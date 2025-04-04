@@ -1,0 +1,17 @@
+{
+  "name": "document-vector-storage",
+  "version": "1.0.0",
+  "description": "Minimalist React app for document upload and vector storage",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm run dev\"",
+    "build": "cd client && npm run build && cd ../server && npm run build",
+    "start": "cd server && npm start"
+  },
+  "keywords": ["react", "qdrant", "vector", "document", "embeddings"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+} 
