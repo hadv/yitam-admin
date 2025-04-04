@@ -1,9 +1,9 @@
 import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { createEmbedding, searchDocumentsByVector } from '../services/embeddingService.js';
-import { addDocumentToQdrant, deleteDocumentFromQdrant, getAllDocuments } from '../services/qdrantService.js';
-import { parseDocument } from '../services/documentParserService.js';
+import { createEmbedding, searchDocumentsByVector } from '@/services/embeddingService.js';
+import { addDocumentToQdrant, deleteDocumentFromQdrant, getAllDocuments } from '@/services/qdrantService.js';
+import { parseDocument } from '@/services/documentParserService.js';
 
 // Upload a document, parse it, and store its vector embedding in Qdrant
 export const uploadDocument = async (req: Request, res: Response) => {

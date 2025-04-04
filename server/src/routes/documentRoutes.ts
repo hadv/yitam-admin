@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import * as documentController from '../controllers/documentController.js';
+import * as documentController from '@controllers/documentController.js';
 
 const router = express.Router();
 

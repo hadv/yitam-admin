@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import DocumentUpload from './components/DocumentUpload'
-import DocumentList from './components/DocumentList'
+import DocumentUpload from '@components/DocumentUpload'
+import DocumentList from '@components/DocumentList'
 
 function App() {
   const [uploadSuccess, setUploadSuccess] = useState<boolean>(false)

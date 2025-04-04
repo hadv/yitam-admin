@@ -1,3 +1,6 @@
+// Register module aliases for runtime
+import 'module-alias/register';
+
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -5,8 +8,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
-import documentRoutes from './routes/documentRoutes.js';
-import { initializeQdrant } from './services/qdrantService.js';
+import documentRoutes from '@routes/documentRoutes.js';
+import { initializeQdrant } from '@/services/qdrantService.js';
 
 // For ESM compatibility
 const __filename = fileURLToPath(import.meta.url);

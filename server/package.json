@@ -9,6 +9,15 @@
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
   },
+  "_moduleAliases": {
+    "@": "dist",
+    "@controllers": "dist/controllers",
+    "@models": "dist/models",
+    "@routes": "dist/routes",
+    "@middleware": "dist/middleware",
+    "@utils": "dist/utils",
+    "@config": "dist/config"
+  },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.6.0",
     "@types/axios": "^0.14.0",
@@ -17,6 +26,7 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "mammoth": "^1.6.0",
+    "module-alias": "^2.2.3",
     "multer": "^1.4.5-lts.1",
     "pdf-parse": "^1.1.1"
   },
