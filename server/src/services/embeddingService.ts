@@ -1,12 +1,7 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import dotenv from 'dotenv';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-
-// For ESM compatibility
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { FallbackService } from '../core/fallback-service';
 
 // Load .env file from the project root
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -15,6 +10,9 @@ dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 const VECTOR_SIZE = parseInt(process.env.VECTOR_SIZE || '384', 10);
+
+// Create fallback service for embedding operations
+const embeddingFallback = new FallbackService('Embedding');
 
 /**
  * Generate an embedding vector for the provided text
@@ -25,30 +23,36 @@ const VECTOR_SIZE = parseInt(process.env.VECTOR_SIZE || '384', 10);
  * @returns A vector representation of the text
  */
 export const createEmbedding = async (text: string): Promise<number[]> => {
-  try {
-    // Using Qdrant's server-side FastEmbed integration
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    
-    if (QDRANT_API_KEY) {
-      headers['api-key'] = QDRANT_API_KEY;
-    }
-    
-    const response = await axios.post(
-      `${QDRANT_URL}/embeddings`,
-      {
-        text: text,
-        model: 'fastembed', // Use the default FastEmbed model
-      },
-      { headers }
-    );
-    
-    return response.data.embedding;
-  } catch (error) {
-    console.error('Error generating embedding with FastEmbed:', error);
-    // Fall back to mock implementation in case of errors
-    console.warn('Falling back to mock embeddings due to API error.');
-    return Array.from({ length: VECTOR_SIZE }, () => Math.random() - 0.5);
-  }
+  return embeddingFallback.withFallback(
+    'generateVector',
+    // Fallback function - generate random vector
+    () => {
+      // Log information about text being embedded to help debugging
+      console.debug(`Generated fallback embedding for text of length ${text.length}.`);
+      return Array.from({ length: VECTOR_SIZE }, () => Math.random() - 0.5);
+    },
+    // Primary function - call embedding API
+    async () => {
+      // Using Qdrant's server-side FastEmbed integration
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      
+      if (QDRANT_API_KEY) {
+        headers['api-key'] = QDRANT_API_KEY;
+      }
+      
+      const response = await axios.post(
+        `${QDRANT_URL}/embeddings`,
+        {
+          text: text,
+          model: 'fastembed', // Use the default FastEmbed model
+        },
+        { headers }
+      );
+      
+      return response.data.embedding;
+    },
+    embeddingFallback.isFallbackActive()
+  );
 };
 
 /**
@@ -88,4 +92,13 @@ export const searchDocumentsByVector = async (queryVector: number[]) => {
   // This functionality is delegated to qdrantService
   // We're keeping this function here as a potential place for additional search logic
   return queryVector;
+};
+
+/**
+ * Force a retry of the primary embedding service
+ * Useful for manual recovery after fixing connection issues
+ */
+export const forceRetryEmbeddingService = (): void => {
+  embeddingFallback.forceRetryPrimary();
+  console.log('Forcing retry of primary embedding service on next operation');
 }; 

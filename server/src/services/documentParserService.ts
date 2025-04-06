@@ -21,8 +21,14 @@ export const parseDocument = async (filePath: string, mimeType: string): Promise
       case 'application/pdf':
         // Use pdf-parse
         const pdfBuffer = await readFile(filePath);
-        const pdfData = await pdfParse(pdfBuffer);
-        text = pdfData.text;
+        try {
+          const pdfData = await pdfParse(pdfBuffer);
+          text = pdfData.text;
+        } catch (pdfError: unknown) {
+          console.error('Error parsing PDF:', pdfError);
+          const errorMessage = pdfError instanceof Error ? pdfError.message : 'Unknown error';
+          throw new Error(`Failed to parse PDF document: ${errorMessage}`);
+        }
         break;
         
       case 'text/plain':
