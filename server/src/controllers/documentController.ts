@@ -1,11 +1,14 @@
 import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { createEmbedding, searchDocumentsByVector } from '@/services/embeddingService.js';
-import { addDocumentToQdrant, deleteDocumentFromQdrant, getAllDocuments } from '@/services/qdrantService.js';
-import { parseDocument } from '@/services/documentParserService.js';
+import { createEmbedding } from '../services/embeddingService';
+import { parseDocument } from '../services/documentParserService';
+import { DatabaseService } from '../core/database-service';
 
-// Upload a document, parse it, and store its vector embedding in Qdrant
+// Create a singleton instance of the database service
+const dbService = new DatabaseService();
+
+// Upload a document, parse it, and store its vector embedding
 export const uploadDocument = async (req: Request, res: Response) => {
   try {
     if (!req.file) {
@@ -23,7 +26,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
       ? fileContent.substring(0, 100) + '...' 
       : fileContent;
     
-    // Store in Qdrant
+    // Store document with embedding
     const document = {
       id: path.basename(req.file.path, path.extname(req.file.path)),
       filename: req.file.originalname,
@@ -33,7 +36,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
       preview: textPreview,
     };
 
-    await addDocumentToQdrant(document, embedding);
+    await dbService.addDocument(document, embedding);
     
     res.status(200).json({ 
       message: 'Document uploaded and embedded successfully',
@@ -48,7 +51,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
 // Get all documents
 export const getDocuments = async (req: Request, res: Response) => {
   try {
-    const documents = await getAllDocuments();
+    const documents = await dbService.getAllDocuments();
     res.status(200).json(documents);
   } catch (error) {
     console.error('Error fetching documents:', error);
@@ -68,8 +71,8 @@ export const searchDocuments = async (req: Request, res: Response) => {
     // Create embedding for the query
     const queryEmbedding = await createEmbedding(query);
     
-    // Search in Qdrant
-    const searchResults = await searchDocumentsByVector(queryEmbedding);
+    // Search using vector similarity
+    const searchResults = await dbService.searchByVector(queryEmbedding);
     
     res.status(200).json(searchResults);
   } catch (error) {
@@ -83,11 +86,11 @@ export const deleteDocument = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     
-    // Delete from Qdrant
-    await deleteDocumentFromQdrant(id);
+    // Delete from database
+    await dbService.deleteDocument(id);
     
     // Find the file path
-    const documents = await getAllDocuments();
+    const documents = await dbService.getAllDocuments();
     const doc = documents.find(doc => doc.id === id);
     
     // Delete the file if it exists

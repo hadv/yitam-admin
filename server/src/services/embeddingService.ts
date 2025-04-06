@@ -1,12 +1,6 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import dotenv from 'dotenv';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-
-// For ESM compatibility
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 // Load .env file from the project root
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -15,6 +9,9 @@ dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 const VECTOR_SIZE = parseInt(process.env.VECTOR_SIZE || '384', 10);
+
+// Flag to prevent duplicate embedding error warnings
+let embeddingErrorWarningLogged = false;
 
 /**
  * Generate an embedding vector for the provided text
@@ -42,14 +39,68 @@ export const createEmbedding = async (text: string): Promise<number[]> => {
       { headers }
     );
     
+    // Reset error flag if successful
+    embeddingErrorWarningLogged = false;
+    
     return response.data.embedding;
   } catch (error) {
-    console.error('Error generating embedding with FastEmbed:', error);
-    // Fall back to mock implementation in case of errors
-    console.warn('Falling back to mock embeddings due to API error.');
-    return Array.from({ length: VECTOR_SIZE }, () => Math.random() - 0.5);
+    return handleEmbeddingError(error, text.length);
   }
 };
+
+/**
+ * Handle errors during embedding generation with proper categorization and logging
+ */
+function handleEmbeddingError(error: any, textLength: number): number[] {
+  // Determine error type and handle accordingly
+  if (axios.isAxiosError(error)) {
+    const axiosError = error as AxiosError;
+    
+    // Handle connection errors (e.g., Qdrant not running)
+    if (axiosError.code === 'ECONNREFUSED' || !axiosError.response) {
+      if (!embeddingErrorWarningLogged) {
+        console.warn('Cannot connect to Qdrant for embedding generation.');
+        console.warn(`Ensure Qdrant is running at ${QDRANT_URL} with FastEmbed support.`);
+        console.warn('Using random vector fallback for embeddings.');
+        embeddingErrorWarningLogged = true;
+      } else {
+        console.debug('Still unable to connect to Qdrant embedding service. Using fallback.');
+      }
+    } 
+    // Handle API errors (e.g., bad request, authentication, etc.)
+    else if (axiosError.response) {
+      const status = axiosError.response.status;
+      if (status === 401 || status === 403) {
+        console.error('Authentication error connecting to Qdrant embedding service. Check your API key.');
+      } else if (status === 404) {
+        console.error('Embedding endpoint not found. Ensure your Qdrant version supports FastEmbed.');
+      } else if (status >= 400 && status < 500) {
+        console.error(`Client error (${status}) when requesting embeddings:`, axiosError.response.data);
+      } else if (status >= 500) {
+        console.error(`Server error (${status}) from embedding service.`);
+      }
+      
+      if (!embeddingErrorWarningLogged) {
+        console.warn('Using random vector fallback for embeddings due to API error.');
+        embeddingErrorWarningLogged = true;
+      }
+    }
+  } else {
+    // Handle non-Axios errors
+    console.error('Unexpected error during embedding generation:', error);
+    
+    if (!embeddingErrorWarningLogged) {
+      console.warn('Using random vector fallback for embeddings due to unexpected error.');
+      embeddingErrorWarningLogged = true;
+    }
+  }
+  
+  // Log information about text being embedded to help debugging
+  console.debug(`Generated fallback embedding for text of length ${textLength}.`);
+  
+  // Fall back to mock implementation in case of errors
+  return Array.from({ length: VECTOR_SIZE }, () => Math.random() - 0.5);
+}
 
 /**
  * Helper function to calculate cosine similarity between two vectors

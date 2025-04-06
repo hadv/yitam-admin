@@ -21,8 +21,13 @@ export const parseDocument = async (filePath: string, mimeType: string): Promise
       case 'application/pdf':
         // Use pdf-parse
         const pdfBuffer = await readFile(filePath);
-        const pdfData = await pdfParse(pdfBuffer);
-        text = pdfData.text;
+        try {
+          const pdfData = await pdfParse(pdfBuffer);
+          text = pdfData.text;
+        } catch (pdfError) {
+          console.error('Error parsing PDF:', pdfError);
+          throw new Error('Failed to parse PDF document');
+        }
         break;
         
       case 'text/plain':
