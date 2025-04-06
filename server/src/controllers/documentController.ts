@@ -26,6 +26,11 @@ export const uploadDocument = async (req: Request, res: Response) => {
       ? fileContent.substring(0, 100) + '...' 
       : fileContent;
     
+    // Get domains from request body (if provided)
+    const domains = req.body.domains ? 
+      (Array.isArray(req.body.domains) ? req.body.domains : JSON.parse(req.body.domains)) : 
+      [];
+    
     // Store document with embedding
     const document = {
       id: path.basename(req.file.path, path.extname(req.file.path)),
@@ -34,6 +39,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
       contentType: req.file.mimetype,
       uploadedAt: new Date().toISOString(),
       preview: textPreview,
+      domains: domains,
     };
 
     await dbService.addDocument(document, embedding);
