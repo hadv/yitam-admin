@@ -25,6 +25,7 @@ export interface DocumentMetadata {
   contentType: string;
   uploadedAt: string;
   preview?: string;
+  domains?: string[]; // Array of domains the document belongs to
 }
 
 // Database service class
@@ -98,7 +99,8 @@ export class DatabaseService {
           path: document.path,
           contentType: document.contentType,
           uploadedAt: document.uploadedAt,
-          preview: document.preview
+          preview: document.preview,
+          domains: document.domains || []
         };
 
         await this.qdrantClient.upsert(COLLECTION_NAME, {
