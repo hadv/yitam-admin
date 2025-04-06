@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { createEmbedding } from '../services/embeddingService';
+import { FallbackService } from './fallback-service';
 
 // Load environment variables
 dotenv.config();
@@ -30,13 +31,14 @@ export interface DocumentMetadata {
 export class DatabaseService {
   private qdrantClient: QdrantClient;
   private isUsingFallback = false;
-  private connectionWarningLogged = false;
+  private fallbackService: FallbackService;
   
   constructor() {
     this.qdrantClient = new QdrantClient({ 
       url: QDRANT_URL,
       apiKey: QDRANT_API_KEY
     });
+    this.fallbackService = new FallbackService('Qdrant');
     console.log(`Initializing database service with Qdrant at ${QDRANT_URL}`);
   }
   
@@ -74,56 +76,16 @@ export class DatabaseService {
       }
       
       this.isUsingFallback = false;
-      this.connectionWarningLogged = false;
       console.log('Qdrant initialized successfully');
     } catch (error) {
-      this.handleConnectionError('initialize', error);
+      this.isUsingFallback = true;
+      this.fallbackService.handleError('initialize', error);
     }
-  }
-
-  // Helper method to handle connection errors
-  private handleConnectionError(operation: string, error: any): void {
-    // Set fallback mode
-    this.isUsingFallback = true;
-    
-    // Only log the connection warning once
-    if (!this.connectionWarningLogged) {
-      console.warn('Failed to connect to Qdrant server. Using in-memory fallback storage instead.');
-      console.warn('To use Qdrant, make sure it is running at: ' + QDRANT_URL);
-      console.warn('You can install Qdrant using Docker: docker run -p 6333:6333 qdrant/qdrant');
-      this.connectionWarningLogged = true;
-    } else {
-      // For subsequent errors, just log a debug message
-      console.debug(`Qdrant connection still unavailable during ${operation} operation. Using fallback.`);
-    }
-    
-    // If it's not a connection refused error, log more details for debugging
-    if (error?.cause?.code !== 'ECONNREFUSED') {
-      console.error(`Unexpected error during ${operation} operation:`, error);
-    }
-  }
-  
-  // Helper method to check if we should use fallback and execute the appropriate function
-  private withFallback<T>(
-    operation: string, 
-    fallbackFn: () => T, 
-    qdrantFn: () => Promise<T>
-  ): Promise<T> {
-    // If already in fallback mode, use fallback immediately
-    if (this.isUsingFallback) {
-      return Promise.resolve(fallbackFn());
-    }
-    
-    // Otherwise try Qdrant first, with fallback on error
-    return qdrantFn().catch((error) => {
-      this.handleConnectionError(operation, error);
-      return fallbackFn();
-    });
   }
 
   // Add a document with its vector embedding
   public async addDocument(document: DocumentMetadata, embedding: number[]): Promise<DocumentMetadata> {
-    return this.withFallback(
+    return this.fallbackService.withFallback(
       'addDocument',
       // Fallback function
       () => {
@@ -153,7 +115,8 @@ export class DatabaseService {
         });
         
         return document;
-      }
+      },
+      this.isUsingFallback
     );
   }
 
@@ -180,7 +143,7 @@ export class DatabaseService {
 
   // Search for documents using vector similarity
   public async searchByVector(queryVector: number[], limit = 5): Promise<Array<DocumentMetadata & { score: number }>> {
-    return this.withFallback(
+    return this.fallbackService.withFallback(
       'searchByVector',
       // Fallback function
       () => {
@@ -208,13 +171,14 @@ export class DatabaseService {
             score: hit.score
           };
         });
-      }
+      },
+      this.isUsingFallback
     );
   }
 
   // Get all documents
   public async getAllDocuments(): Promise<DocumentMetadata[]> {
-    return this.withFallback(
+    return this.fallbackService.withFallback(
       'getAllDocuments',
       // Fallback function
       () => Array.from(inMemoryDocuments.values()).map(item => item.document),
@@ -233,13 +197,14 @@ export class DatabaseService {
           const payload = point.payload as unknown as DocumentMetadata;
           return payload;
         });
-      }
+      },
+      this.isUsingFallback
     );
   }
 
   // Delete a document
   public async deleteDocument(id: string): Promise<boolean> {
-    return this.withFallback(
+    return this.fallbackService.withFallback(
       'deleteDocument',
       // Fallback function
       () => {
@@ -254,7 +219,8 @@ export class DatabaseService {
         });
         
         return true;
-      }
+      },
+      this.isUsingFallback
     );
   }
 } 

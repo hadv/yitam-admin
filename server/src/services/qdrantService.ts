@@ -1,5 +1,6 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
+import { FallbackService } from '../core/fallback-service';
 
 dotenv.config();
 
@@ -10,10 +11,12 @@ const VECTOR_SIZE = parseInt(process.env.VECTOR_SIZE || '384', 10); // Default f
 
 // In-memory storage for fallback when Qdrant is not available
 const inMemoryDocuments = new Map<string, { document: DocumentMetadata, vector: number[] }>();
-let isUsingFallback = false;
 
 // Create Qdrant client
 const qdrantClient = new QdrantClient({ url: QDRANT_URL });
+
+// Create fallback service
+const fallbackService = new FallbackService('Qdrant');
 
 // Initialize Qdrant and create collection if it doesn't exist
 export const initializeQdrant = async () => {
@@ -48,53 +51,47 @@ export const initializeQdrant = async () => {
       });
     }
     
-    isUsingFallback = false;
+    fallbackService.resetWarningFlag('initialize');
     console.log('Qdrant initialized successfully');
   } catch (error) {
-    isUsingFallback = true;
-    console.warn('Failed to connect to Qdrant server. Using in-memory fallback storage instead.');
-    console.warn('To use Qdrant, make sure it is running at: ' + QDRANT_URL);
-    console.warn('You can install Qdrant using Docker: docker run -p 6333:6333 qdrant/qdrant');
+    fallbackService.handleError('initialize', error);
   }
 };
 
 // Add a document with its vector embedding to Qdrant
 export const addDocumentToQdrant = async (document: DocumentMetadata, embedding: number[]) => {
-  try {
-    if (isUsingFallback) {
+  return fallbackService.withFallback(
+    'addDocument',
+    // Fallback function
+    () => {
       inMemoryDocuments.set(document.id, { document, vector: embedding });
       return document;
+    },
+    // Primary function
+    async () => {
+      const payload = {
+        id: document.id,
+        filename: document.filename,
+        path: document.path,
+        contentType: document.contentType,
+        uploadedAt: document.uploadedAt,
+        preview: document.preview
+      };
+
+      await qdrantClient.upsert(COLLECTION_NAME, {
+        wait: true,
+        points: [
+          {
+            id: document.id,
+            vector: embedding,
+            payload
+          }
+        ]
+      });
+      
+      return document;
     }
-
-    const payload = {
-      id: document.id,
-      filename: document.filename,
-      path: document.path,
-      contentType: document.contentType,
-      uploadedAt: document.uploadedAt,
-      preview: document.preview
-    };
-
-    await qdrantClient.upsert(COLLECTION_NAME, {
-      wait: true,
-      points: [
-        {
-          id: document.id,
-          vector: embedding,
-          payload
-        }
-      ]
-    });
-    
-    return document;
-  } catch (error) {
-    console.error('Failed to add document to storage:', error);
-    
-    // Fallback to in-memory storage on error
-    inMemoryDocuments.set(document.id, { document, vector: embedding });
-    isUsingFallback = true;
-    return document;
-  }
+  );
 };
 
 // Helper function to calculate cosine similarity for in-memory fallback
@@ -120,8 +117,10 @@ const cosineSimilarity = (a: number[], b: number[]): number => {
 
 // Search for documents using vector similarity
 export const searchDocumentsByVector = async (queryVector: number[], limit = 5) => {
-  try {
-    if (isUsingFallback) {
+  return fallbackService.withFallback(
+    'searchDocuments',
+    // Fallback function
+    () => {
       // In-memory similarity search
       const results = Array.from(inMemoryDocuments.values())
         .map(item => ({
@@ -132,91 +131,72 @@ export const searchDocumentsByVector = async (queryVector: number[], limit = 5) 
         .slice(0, limit);
       
       return results;
+    },
+    // Primary function
+    async () => {
+      const searchResult = await qdrantClient.search(COLLECTION_NAME, {
+        vector: queryVector,
+        limit,
+        with_payload: true
+      });
+      
+      return searchResult.map(hit => {
+        const payload = hit.payload as unknown as DocumentMetadata;
+        return {
+          ...payload,
+          score: hit.score
+        };
+      });
     }
-
-    const searchResult = await qdrantClient.search(COLLECTION_NAME, {
-      vector: queryVector,
-      limit,
-      with_payload: true
-    });
-    
-    return searchResult.map(hit => {
-      const payload = hit.payload as unknown as DocumentMetadata;
-      return {
-        ...payload,
-        score: hit.score
-      };
-    });
-  } catch (error) {
-    console.error('Failed to search documents in storage:', error);
-    
-    // Fallback to in-memory search
-    isUsingFallback = true;
-    
-    // In-memory similarity search
-    const results = Array.from(inMemoryDocuments.values())
-      .map(item => ({
-        ...item.document,
-        score: cosineSimilarity(queryVector, item.vector)
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
-    
-    return results;
-  }
+  );
 };
 
 // Get all documents
 export const getAllDocuments = async () => {
-  try {
-    if (isUsingFallback) {
+  return fallbackService.withFallback(
+    'getAllDocuments',
+    // Fallback function
+    () => {
       return Array.from(inMemoryDocuments.values()).map(item => item.document);
+    },
+    // Primary function
+    async () => {
+      const result = await qdrantClient.scroll(COLLECTION_NAME, {
+        with_payload: true,
+        limit: 100
+      });
+      
+      if (!result.points) {
+        return [];
+      }
+      
+      return result.points.map(point => {
+        const payload = point.payload as unknown as DocumentMetadata;
+        return payload;
+      });
     }
-
-    const result = await qdrantClient.scroll(COLLECTION_NAME, {
-      with_payload: true,
-      limit: 100
-    });
-    
-    if (!result.points) {
-      return [];
-    }
-    
-    return result.points.map(point => {
-      const payload = point.payload as unknown as DocumentMetadata;
-      return payload;
-    });
-  } catch (error) {
-    console.error('Failed to get documents from storage:', error);
-    
-    // Fallback to in-memory
-    isUsingFallback = true;
-    return Array.from(inMemoryDocuments.values()).map(item => item.document);
-  }
+  );
 };
 
 // Delete a document
 export const deleteDocumentFromQdrant = async (id: string) => {
-  try {
-    if (isUsingFallback) {
+  return fallbackService.withFallback(
+    'deleteDocument',
+    // Fallback function
+    () => {
       inMemoryDocuments.delete(id);
       return true;
+    },
+    // Primary function
+    async () => {
+      await qdrantClient.delete(COLLECTION_NAME, {
+        wait: true,
+        points: [id]
+      });
+      
+      return true;
     }
-
-    await qdrantClient.delete(COLLECTION_NAME, {
-      wait: true,
-      points: [id]
-    });
-    
-    return true;
-  } catch (error) {
-    console.error('Failed to delete document from storage:', error);
-    
-    // Fallback to in-memory
-    isUsingFallback = true;
-    inMemoryDocuments.delete(id);
-    return true;
-  }
+  );
 };
 
 // Document metadata interface
