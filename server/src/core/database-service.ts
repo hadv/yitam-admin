@@ -30,7 +30,6 @@ export interface DocumentMetadata {
 // Database service class
 export class DatabaseService {
   private qdrantClient: QdrantClient;
-  private isUsingFallback = false;
   private fallbackService: FallbackService;
   
   constructor() {
@@ -75,10 +74,9 @@ export class DatabaseService {
         });
       }
       
-      this.isUsingFallback = false;
+      this.fallbackService.resetWarningFlag('initialize');
       console.log('Qdrant initialized successfully');
     } catch (error) {
-      this.isUsingFallback = true;
       this.fallbackService.handleError('initialize', error);
     }
   }
@@ -116,7 +114,7 @@ export class DatabaseService {
         
         return document;
       },
-      this.isUsingFallback
+      this.fallbackService.isFallbackActive()
     );
   }
 
@@ -172,7 +170,7 @@ export class DatabaseService {
           };
         });
       },
-      this.isUsingFallback
+      this.fallbackService.isFallbackActive()
     );
   }
 
@@ -198,7 +196,7 @@ export class DatabaseService {
           return payload;
         });
       },
-      this.isUsingFallback
+      this.fallbackService.isFallbackActive()
     );
   }
 
@@ -220,7 +218,16 @@ export class DatabaseService {
         
         return true;
       },
-      this.isUsingFallback
+      this.fallbackService.isFallbackActive()
     );
+  }
+  
+  /**
+   * Force a retry of the primary database connection
+   * Useful for manual recovery after fixing connection issues
+   */
+  public forceRetryPrimary(): void {
+    this.fallbackService.forceRetryPrimary();
+    console.log('Forcing retry of primary database connection on next operation');
   }
 } 

@@ -90,7 +90,8 @@ export const addDocumentToQdrant = async (document: DocumentMetadata, embedding:
       });
       
       return document;
-    }
+    },
+    fallbackService.isFallbackActive()
   );
 };
 
@@ -147,7 +148,8 @@ export const searchDocumentsByVector = async (queryVector: number[], limit = 5) 
           score: hit.score
         };
       });
-    }
+    },
+    fallbackService.isFallbackActive()
   );
 };
 
@@ -174,7 +176,8 @@ export const getAllDocuments = async () => {
         const payload = point.payload as unknown as DocumentMetadata;
         return payload;
       });
-    }
+    },
+    fallbackService.isFallbackActive()
   );
 };
 
@@ -195,8 +198,18 @@ export const deleteDocumentFromQdrant = async (id: string) => {
       });
       
       return true;
-    }
+    },
+    fallbackService.isFallbackActive()
   );
+};
+
+/**
+ * Force a retry of the primary database connection
+ * Useful for manual recovery after fixing connection issues
+ */
+export const forceRetryPrimary = (): void => {
+  fallbackService.forceRetryPrimary();
+  console.log('Forcing retry of primary Qdrant connection on next operation');
 };
 
 // Document metadata interface

@@ -50,7 +50,8 @@ export const createEmbedding = async (text: string): Promise<number[]> => {
       );
       
       return response.data.embedding;
-    }
+    },
+    embeddingFallback.isFallbackActive()
   );
 };
 
@@ -91,4 +92,13 @@ export const searchDocumentsByVector = async (queryVector: number[]) => {
   // This functionality is delegated to qdrantService
   // We're keeping this function here as a potential place for additional search logic
   return queryVector;
+};
+
+/**
+ * Force a retry of the primary embedding service
+ * Useful for manual recovery after fixing connection issues
+ */
+export const forceRetryEmbeddingService = (): void => {
+  embeddingFallback.forceRetryPrimary();
+  console.log('Forcing retry of primary embedding service on next operation');
 }; 

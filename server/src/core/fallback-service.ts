@@ -1,6 +1,11 @@
 // Generic fallback service to handle service unavailability consistently
 export class FallbackService {
   private warningFlags: Map<string, boolean> = new Map();
+  private lastAttemptTime: Map<string, number> = new Map();
+  private isUsingFallback: boolean = false;
+  
+  // Configuration for retry behavior
+  private retryIntervalMs: number = 60000; // Try primary service again after 1 minute
   
   constructor(private serviceName: string) {}
   
@@ -15,15 +20,20 @@ export class FallbackService {
     operation: string,
     fallbackFn: () => T,
     primaryFn: () => Promise<T>,
-    isUsingFallbackMode = false
+    forceFallback = false
   ): Promise<T> {
-    // If already in fallback mode, use fallback immediately
-    if (isUsingFallbackMode) {
+    // If explicitly in fallback mode and retry interval hasn't elapsed, use fallback immediately
+    if (forceFallback && !this.shouldRetryPrimary(operation)) {
       return Promise.resolve(fallbackFn());
     }
     
-    // Otherwise try primary function first, with fallback on error
-    return primaryFn().catch((error) => {
+    // Try primary function, with fallback on error
+    return primaryFn().then(result => {
+      // If we get here, primary function succeeded - reset fallback state
+      this.isUsingFallback = false;
+      this.resetWarningFlag(operation);
+      return result;
+    }).catch((error) => {
       this.handleError(operation, error);
       return fallbackFn();
     });
@@ -36,10 +46,12 @@ export class FallbackService {
    */
   public handleError(operation: string, error: any): void {
     const errorKey = `${this.serviceName}:${operation}`;
+    this.isUsingFallback = true;
+    this.lastAttemptTime.set(errorKey, Date.now());
     
     // Only log the full warning once per service+operation combination
     if (!this.warningFlags.get(errorKey)) {
-      console.warn(`${this.serviceName} unavailable during ${operation}. Using fallback.`);
+      console.warn(`${this.serviceName} unavailable during ${operation}. Using fallback until service is available.`);
       
       // Add service-specific guidance
       if (this.serviceName === 'Qdrant') {
@@ -65,8 +77,61 @@ export class FallbackService {
    * Reset the warning flag for an operation
    * @param operation Operation name to reset
    */
-  public resetWarningFlag(operation: string): void {
+  public resetWarningFlag(operation?: string): void {
+    if (operation) {
+      const errorKey = `${this.serviceName}:${operation}`;
+      this.warningFlags.delete(errorKey);
+      this.lastAttemptTime.delete(errorKey);
+    } else {
+      // Reset all warning flags for this service
+      for (const key of this.warningFlags.keys()) {
+        if (key.startsWith(`${this.serviceName}:`)) {
+          this.warningFlags.delete(key);
+          this.lastAttemptTime.delete(key);
+        }
+      }
+    }
+  }
+  
+  /**
+   * Determines if we should attempt the primary service again after a failure
+   * @param operation The operation being performed
+   * @returns True if enough time has passed to retry the primary service
+   */
+  private shouldRetryPrimary(operation: string): boolean {
     const errorKey = `${this.serviceName}:${operation}`;
-    this.warningFlags.delete(errorKey);
+    const lastAttempt = this.lastAttemptTime.get(errorKey);
+    
+    // If no failed attempt recorded or enough time has passed since last attempt
+    if (!lastAttempt || Date.now() - lastAttempt > this.retryIntervalMs) {
+      return true;
+    }
+    
+    return false;
+  }
+  
+  /**
+   * Check if the service is currently in fallback mode
+   */
+  public isFallbackActive(): boolean {
+    return this.isUsingFallback;
+  }
+  
+  /**
+   * Force the service to try the primary implementation next time
+   */
+  public forceRetryPrimary(): void {
+    this.isUsingFallback = false;
+    this.resetWarningFlag();
+  }
+  
+  /**
+   * Set retry interval for attempting primary service after failure
+   * @param intervalMs Interval in milliseconds
+   */
+  public setRetryInterval(intervalMs: number): void {
+    if (intervalMs > 0) {
+      this.retryIntervalMs = intervalMs;
+    }
   }
 } 
