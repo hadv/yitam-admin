@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { createEmbedding } from '../services/embeddingService';
-import { parseDocument } from '../services/documentParserService';
+import { createEmbedding } from '../services/embedding';
+import { parseDocument } from '../services/documentParser';
 import { DatabaseService } from '../core/database-service';
 
 // Create a singleton instance of the database service

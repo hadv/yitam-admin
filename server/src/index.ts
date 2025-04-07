@@ -3,7 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
-import documentRoutes from './routes/documentRoutes';
+import documentRoutes from './routes/document';
 import { DatabaseService } from './core/database-service';
 
 // Load environment variables

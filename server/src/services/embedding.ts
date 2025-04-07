@@ -89,7 +89,7 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 
 // Search for documents using semantic similarity
 export const searchDocumentsByVector = async (queryVector: number[]) => {
-  // This functionality is delegated to qdrantService
+  // This functionality is delegated to qdrant
   // We're keeping this function here as a potential place for additional search logic
   return queryVector;
 };
