@@ -1,4 +1,4 @@
-import axios, { AxiosError } from 'axios';
+import axios from 'axios';
 import dotenv from 'dotenv';
 import path from 'path';
 import { FallbackService } from '../core/fallback-service';
