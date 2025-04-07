@@ -1,6 +1,5 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
-import { createEmbedding } from '../services/embedding';
 import { FallbackService } from './fallback-service';
 
 // Load environment variables
