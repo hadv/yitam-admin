@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import fs from 'fs';
-import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
 import { createEmbedding } from '../services/embedding';
 import { parseDocument } from '../services/document';
 import { DatabaseService } from '../core/database-service';
@@ -31,9 +31,9 @@ export const uploadDocument = async (req: Request, res: Response) => {
       (Array.isArray(req.body.domains) ? req.body.domains : JSON.parse(req.body.domains)) : 
       [];
     
-    // Store document with embedding
+    // Store document with embedding - use UUID instead of filename to avoid special character issues
     const document = {
-      id: path.basename(req.file.path, path.extname(req.file.path)),
+      id: uuidv4(),
       filename: req.file.originalname,
       path: req.file.path,
       contentType: req.file.mimetype,
