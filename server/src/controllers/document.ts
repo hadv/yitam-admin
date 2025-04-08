@@ -19,11 +19,11 @@ export const uploadDocument = async (req: Request, res: Response) => {
     const fileContent = await parseDocument(req.file.path, req.file.mimetype);
     
     // Create vector embedding
-    const embedding = await createEmbedding(fileContent);
+    const embedding = await createEmbedding(fileContent, 'retrieval_document');
     
-    // Generate a preview (first ~100 characters)
-    const textPreview = fileContent.length > 100 
-      ? fileContent.substring(0, 100) + '...' 
+    // Generate a preview (first ~300 characters)
+    const textPreview = fileContent.length > 300 
+      ? fileContent.substring(0, 300) + '...' 
       : fileContent;
     
     // Get domains from request body (if provided)
@@ -75,7 +75,7 @@ export const searchDocuments = async (req: Request, res: Response) => {
     }
     
     // Create embedding for the query
-    const queryEmbedding = await createEmbedding(query);
+    const queryEmbedding = await createEmbedding(query, 'retrieval_query');
     
     // Search using vector similarity
     const searchResults = await dbService.searchByVector(queryEmbedding);

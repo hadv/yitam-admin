@@ -1,15 +1,17 @@
-import axios from 'axios';
 import dotenv from 'dotenv';
-import path from 'path';
 import { FallbackService } from '../core/fallback-service';
+import { GoogleGenerativeAI, TaskType } from '@google/generative-ai';
 
-// Load .env file from the project root
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+// Load .env file from the server directory
+dotenv.config();
 
-// Qdrant configuration
-const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
-const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
-const VECTOR_SIZE = parseInt(process.env.VECTOR_SIZE || '384', 10);
+// Gemini configuration
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+if (!GEMINI_API_KEY) {
+  console.warn('GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.');
+}
+
+const GEMINI_VECTOR_SIZE = parseInt(process.env.GEMINI_VECTOR_SIZE || '768', 10);
 
 // Create fallback service for embedding operations
 const embeddingFallback = new FallbackService('Embedding');
@@ -17,88 +19,169 @@ const embeddingFallback = new FallbackService('Embedding');
 /**
  * Generate an embedding vector for the provided text
  * 
- * Uses Qdrant's built-in FastEmbed capability
+ * Uses Google's Gemini for embeddings
  * 
  * @param text The text to generate an embedding for
+ * @param taskType Optional task type for Gemini embeddings ('retrieval_document' or 'retrieval_query')
  * @returns A vector representation of the text
  */
-export const createEmbedding = async (text: string): Promise<number[]> => {
+export const createEmbedding = async (text: string, taskType?: 'retrieval_document' | 'retrieval_query'): Promise<number[]> => {
   return embeddingFallback.withFallback(
     'generateVector',
     // Fallback function - generate random vector
     () => {
       // Log information about text being embedded to help debugging
       console.debug(`Generated fallback embedding for text of length ${text.length}.`);
-      return Array.from({ length: VECTOR_SIZE }, () => Math.random() - 0.5);
+      return Array.from({ length: GEMINI_VECTOR_SIZE }, () => Math.random() - 0.5);
     },
-    // Primary function - call embedding API
+    // Primary function - call Gemini embedding API
     async () => {
-      // Using Qdrant's server-side FastEmbed integration
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      
-      if (QDRANT_API_KEY) {
-        headers['api-key'] = QDRANT_API_KEY;
-      }
-      
-      const response = await axios.post(
-        `${QDRANT_URL}/embeddings`,
-        {
-          text: text,
-          model: 'fastembed', // Use the default FastEmbed model
-        },
-        { headers }
-      );
-      
-      return response.data.embedding;
+      return generateGeminiEmbedding(text, taskType);
     },
     embeddingFallback.isFallbackActive()
   );
 };
 
 /**
- * Helper function to calculate cosine similarity between two vectors
+ * Generate embedding using Google's Gemini API
  * 
- * @param a First vector
- * @param b Second vector
- * @returns Cosine similarity score (0-1)
+ * @param text Text to generate embedding for
+ * @param taskType Task type: 'retrieval_document' for indexed docs, 'retrieval_query' for search
+ * @returns Vector representation of the text
  */
-export function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error('Vectors must be of the same length');
+async function generateGeminiEmbedding(
+  text: string, 
+  taskType: 'retrieval_document' | 'retrieval_query' = 'retrieval_document'
+): Promise<number[]> {
+  if (!GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is required for Gemini embeddings');
+  }
+
+  // Gemini has a payload size limit of ~32KB
+  // Chunk the text if it's too large (approximately 10K characters to be safe)
+  const MAX_CHUNK_SIZE = 10000;
+  
+  if (text.length <= MAX_CHUNK_SIZE) {
+    // Text is small enough to process as a single chunk
+    return processTextChunk(text, taskType);
+  } else {
+    console.log(`Text is too large (${text.length} chars), chunking into smaller pieces...`);
+    
+    // Chunk by paragraphs or sentences to maintain context
+    const chunks = chunkText(text, MAX_CHUNK_SIZE);
+    console.log(`Created ${chunks.length} chunks`);
+    
+    if (chunks.length === 0) return []; // Shouldn't happen
+    
+    if (chunks.length === 1) {
+      return processTextChunk(chunks[0], taskType);
+    }
+    
+    // For multiple chunks, we'll use the average of all chunk embeddings
+    // This is a simple approach - more sophisticated approaches could weight key sections
+    const chunkEmbeddings = await Promise.all(
+      chunks.map(chunk => processTextChunk(chunk, taskType))
+    );
+    
+    // Average the embeddings
+    const embeddingSize = chunkEmbeddings[0].length;
+    const averageEmbedding = new Array(embeddingSize).fill(0);
+    
+    for (const embedding of chunkEmbeddings) {
+      for (let i = 0; i < embeddingSize; i++) {
+        averageEmbedding[i] += embedding[i] / chunks.length;
+      }
+    }
+    
+    return averageEmbedding;
   }
   
-  let dotProduct = 0;
-  let aMagnitude = 0;
-  let bMagnitude = 0;
-  
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
-    aMagnitude += a[i] * a[i];
-    bMagnitude += b[i] * b[i];
+  // Helper function to process a single text chunk
+  async function processTextChunk(chunk: string, chunkTaskType: 'retrieval_document' | 'retrieval_query' = taskType): Promise<number[]> {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" });
+    
+    // Create properly formatted request object with TaskType enum
+    // This format works with the Gemini API to properly specify the embedding use case
+    const result = await embeddingModel.embedContent({
+      content: {
+        parts: [{ text: chunk }],
+        role: "user"
+      },
+      taskType: chunkTaskType === 'retrieval_document' 
+              ? TaskType.RETRIEVAL_DOCUMENT 
+              : TaskType.RETRIEVAL_QUERY
+    });
+    
+    return result.embedding.values;
   }
-  
-  aMagnitude = Math.sqrt(aMagnitude);
-  bMagnitude = Math.sqrt(bMagnitude);
-  
-  if (aMagnitude === 0 || bMagnitude === 0) {
-    return 0;
-  }
-  
-  return dotProduct / (aMagnitude * bMagnitude);
 }
 
-// Search for documents using semantic similarity
-export const searchDocumentsByVector = async (queryVector: number[]) => {
-  // This functionality is delegated to qdrant
-  // We're keeping this function here as a potential place for additional search logic
-  return queryVector;
-};
-
 /**
- * Force a retry of the primary embedding service
- * Useful for manual recovery after fixing connection issues
+ * Split text into chunks that don't exceed the maximum size
+ * Tries to split on paragraph boundaries first, then sentences if needed
  */
-export const forceRetryEmbeddingService = (): void => {
-  embeddingFallback.forceRetryPrimary();
-  console.log('Forcing retry of primary embedding service on next operation');
-}; 
+function chunkText(text: string, maxChunkSize: number): string[] {
+  // Split by paragraphs first (double newlines)
+  const paragraphs = text.split(/\n\s*\n/);
+  
+  const chunks: string[] = [];
+  let currentChunk = '';
+  
+  for (const paragraph of paragraphs) {
+    // If a single paragraph is too big, we'll need to split by sentences
+    if (paragraph.length > maxChunkSize) {
+      if (currentChunk) {
+        chunks.push(currentChunk);
+        currentChunk = '';
+      }
+      
+      // Split by sentences (period + space or newline)
+      const sentences = paragraph.split(/\.\s+|\.\n/);
+      
+      for (const sentence of sentences) {
+        // Skip empty sentences
+        if (!sentence || sentence.trim() === '') continue;
+        
+        if (sentence.length > maxChunkSize) {
+          // If even a sentence is too long, split by word boundaries
+          const words = sentence.split(/\s+/).filter(word => word.trim() !== '');
+          let sentenceChunk = '';
+          
+          for (const word of words) {
+            if ((sentenceChunk + ' ' + word).length <= maxChunkSize) {
+              sentenceChunk += (sentenceChunk ? ' ' : '') + word;
+            } else {
+              if (sentenceChunk) chunks.push(sentenceChunk);
+              sentenceChunk = word;
+            }
+          }
+          
+          if (sentenceChunk) chunks.push(sentenceChunk);
+        } else {
+          // Sentence fits in a chunk
+          if ((currentChunk + '. ' + sentence).length <= maxChunkSize) {
+            currentChunk += (currentChunk ? '. ' : '') + sentence;
+          } else {
+            if (currentChunk) chunks.push(currentChunk);
+            currentChunk = sentence;
+          }
+        }
+      }
+    } else {
+      // Paragraph fits in a chunk
+      if ((currentChunk + '\n\n' + paragraph).length <= maxChunkSize) {
+        currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
+      } else {
+        if (currentChunk) chunks.push(currentChunk);
+        currentChunk = paragraph;
+      }
+    }
+  }
+  
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+  
+  return chunks;
+} 
