@@ -20,7 +20,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
     const fileContent = await parseDocument(req.file.path, req.file.mimetype);
     
     // Create vector embedding using TaskType enum for document storage
-    const embedding = await createEmbedding(fileContent, 'retrieval_document');
+    const embedding = await createEmbedding(fileContent, TaskType.RETRIEVAL_DOCUMENT);
     
     // Generate a preview (first ~300 characters)
     const textPreview = fileContent.length > 300 
@@ -76,7 +76,7 @@ export const searchDocuments = async (req: Request, res: Response) => {
     }
     
     // Create embedding for the query using TaskType enum for search queries
-    const queryEmbedding = await createEmbedding(query, 'retrieval_query');
+    const queryEmbedding = await createEmbedding(query, TaskType.RETRIEVAL_QUERY);
     
     // Search using vector similarity
     const searchResults = await dbService.searchByVector(queryEmbedding);

@@ -22,10 +22,24 @@ const embeddingFallback = new FallbackService('Embedding');
  * Uses Google's Gemini for embeddings
  * 
  * @param text The text to generate an embedding for
- * @param taskType Optional task type for Gemini embeddings ('retrieval_document' or 'retrieval_query')
+ * @param taskType Optional task type for Gemini embeddings 
  * @returns A vector representation of the text
  */
-export const createEmbedding = async (text: string, taskType?: 'retrieval_document' | 'retrieval_query'): Promise<number[]> => {
+export const createEmbedding = async (
+  text: string, 
+  taskType: TaskType | 'retrieval_document' | 'retrieval_query' = 'retrieval_document'
+): Promise<number[]> => {
+  // Map string task types to TaskType enum values if needed
+  let taskTypeEnum: TaskType;
+  
+  if (typeof taskType === 'string') {
+    taskTypeEnum = taskType === 'retrieval_document' 
+      ? TaskType.RETRIEVAL_DOCUMENT 
+      : TaskType.RETRIEVAL_QUERY;
+  } else {
+    taskTypeEnum = taskType;
+  }
+  
   return embeddingFallback.withFallback(
     'generateVector',
     // Fallback function - generate random vector
@@ -36,7 +50,7 @@ export const createEmbedding = async (text: string, taskType?: 'retrieval_docume
     },
     // Primary function - call Gemini embedding API
     async () => {
-      return generateGeminiEmbedding(text, taskType);
+      return generateGeminiEmbedding(text, taskTypeEnum);
     },
     embeddingFallback.isFallbackActive()
   );
@@ -46,12 +60,12 @@ export const createEmbedding = async (text: string, taskType?: 'retrieval_docume
  * Generate embedding using Google's Gemini API
  * 
  * @param text Text to generate embedding for
- * @param taskType Task type: 'retrieval_document' for indexed docs, 'retrieval_query' for search
+ * @param taskType Task type from TaskType enum
  * @returns Vector representation of the text
  */
 async function generateGeminiEmbedding(
   text: string, 
-  taskType: 'retrieval_document' | 'retrieval_query' = 'retrieval_document'
+  taskType: TaskType
 ): Promise<number[]> {
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is required for Gemini embeddings');
@@ -97,7 +111,7 @@ async function generateGeminiEmbedding(
   }
   
   // Helper function to process a single text chunk
-  async function processTextChunk(chunk: string, chunkTaskType: 'retrieval_document' | 'retrieval_query' = taskType): Promise<number[]> {
+  async function processTextChunk(chunk: string, chunkTaskType: TaskType): Promise<number[]> {
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
     const embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" });
     
@@ -108,9 +122,7 @@ async function generateGeminiEmbedding(
         parts: [{ text: chunk }],
         role: "user"
       },
-      taskType: chunkTaskType === 'retrieval_document' 
-              ? TaskType.RETRIEVAL_DOCUMENT 
-              : TaskType.RETRIEVAL_QUERY
+      taskType: chunkTaskType
     });
     
     return result.embedding.values;
