@@ -22,24 +22,13 @@ const embeddingFallback = new FallbackService('Embedding');
  * Uses Google's Gemini for embeddings
  * 
  * @param text The text to generate an embedding for
- * @param taskType Optional task type for Gemini embeddings 
+ * @param taskType TaskType enum value for the embedding purpose
  * @returns A vector representation of the text
  */
 export const createEmbedding = async (
   text: string, 
-  taskType: TaskType | 'retrieval_document' | 'retrieval_query' = 'retrieval_document'
+  taskType: TaskType = TaskType.RETRIEVAL_DOCUMENT
 ): Promise<number[]> => {
-  // Map string task types to TaskType enum values if needed
-  let taskTypeEnum: TaskType;
-  
-  if (typeof taskType === 'string') {
-    taskTypeEnum = taskType === 'retrieval_document' 
-      ? TaskType.RETRIEVAL_DOCUMENT 
-      : TaskType.RETRIEVAL_QUERY;
-  } else {
-    taskTypeEnum = taskType;
-  }
-  
   return embeddingFallback.withFallback(
     'generateVector',
     // Fallback function - generate random vector
@@ -50,7 +39,7 @@ export const createEmbedding = async (
     },
     // Primary function - call Gemini embedding API
     async () => {
-      return generateGeminiEmbedding(text, taskTypeEnum);
+      return generateGeminiEmbedding(text, taskType);
     },
     embeddingFallback.isFallbackActive()
   );
