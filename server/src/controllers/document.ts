@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createEmbedding } from '../services/embedding';
 import { parseDocument } from '../services/document';
 import { DatabaseService } from '../core/database-service';
+import { TaskType } from '@google/generative-ai';
 
 // Create a singleton instance of the database service
 const dbService = new DatabaseService();
@@ -18,12 +19,12 @@ export const uploadDocument = async (req: Request, res: Response) => {
     // Parse the uploaded document
     const fileContent = await parseDocument(req.file.path, req.file.mimetype);
     
-    // Create vector embedding
-    const embedding = await createEmbedding(fileContent);
+    // Create vector embedding using TaskType enum for document storage
+    const embedding = await createEmbedding(fileContent, TaskType.RETRIEVAL_DOCUMENT);
     
-    // Generate a preview (first ~100 characters)
-    const textPreview = fileContent.length > 100 
-      ? fileContent.substring(0, 100) + '...' 
+    // Generate a preview (first ~300 characters)
+    const textPreview = fileContent.length > 300 
+      ? fileContent.substring(0, 300) + '...' 
       : fileContent;
     
     // Get domains from request body (if provided)
@@ -74,8 +75,8 @@ export const searchDocuments = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Search query is required' });
     }
     
-    // Create embedding for the query
-    const queryEmbedding = await createEmbedding(query);
+    // Create embedding for the query using TaskType enum for search queries
+    const queryEmbedding = await createEmbedding(query, TaskType.RETRIEVAL_QUERY);
     
     // Search using vector similarity
     const searchResults = await dbService.searchByVector(queryEmbedding);

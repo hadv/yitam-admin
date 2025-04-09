@@ -9,7 +9,7 @@ dotenv.config();
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 const COLLECTION_NAME = process.env.COLLECTION_NAME || 'documents';
-const VECTOR_SIZE = parseInt(process.env.VECTOR_SIZE || '384', 10); // Default fastembed vector size
+const VECTOR_SIZE = parseInt(process.env.GEMINI_VECTOR_SIZE || '768', 10); // Gemini embedding size
 
 // In-memory storage for fallback when Qdrant is not available
 const inMemoryDocuments = new Map<string, { document: DocumentMetadata, vector: number[] }>();
@@ -49,7 +49,7 @@ export class DatabaseService {
       );
 
       if (!collectionExists) {
-        console.log(`Creating Qdrant collection: ${COLLECTION_NAME}`);
+        console.log(`Creating Qdrant collection: ${COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
         
         // Create collection
         await this.qdrantClient.createCollection(COLLECTION_NAME, {
@@ -70,6 +70,16 @@ export class DatabaseService {
           field_name: 'uploadedAt',
           field_schema: 'keyword'
         });
+      } else {
+        // Check if collection has the right vector size
+        const collectionInfo = await this.qdrantClient.getCollection(COLLECTION_NAME);
+        const collectionVectorSize = collectionInfo.config?.params?.vectors?.size;
+        
+        if (collectionVectorSize !== VECTOR_SIZE) {
+          console.warn(`Warning: Existing collection ${COLLECTION_NAME} has vector size ${collectionVectorSize}, ` +
+                      `but current configuration expects ${VECTOR_SIZE}. ` +
+                      `You'll need to recreate the collection for Gemini embeddings.`);
+        }
       }
       
       this.fallbackService.resetWarningFlag('initialize');
@@ -219,14 +229,5 @@ export class DatabaseService {
       },
       this.fallbackService.isFallbackActive()
     );
-  }
-  
-  /**
-   * Force a retry of the primary database connection
-   * Useful for manual recovery after fixing connection issues
-   */
-  public forceRetryPrimary(): void {
-    this.fallbackService.forceRetryPrimary();
-    console.log('Forcing retry of primary database connection on next operation');
   }
 } 
