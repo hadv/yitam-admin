@@ -1,6 +1,7 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
 import { FallbackService } from './fallback-service';
+import { DocumentChunk } from '../services/chunking';
 
 // Load environment variables
 dotenv.config();
@@ -8,21 +9,23 @@ dotenv.config();
 // Configuration constants
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
-const COLLECTION_NAME = process.env.COLLECTION_NAME || 'documents';
+const CHUNKS_COLLECTION_NAME = process.env.CHUNKS_COLLECTION_NAME || 'document_chunks';
 const VECTOR_SIZE = parseInt(process.env.GEMINI_VECTOR_SIZE || '768', 10); // Gemini embedding size
 
 // In-memory storage for fallback when Qdrant is not available
-const inMemoryDocuments = new Map<string, { document: DocumentMetadata, vector: number[] }>();
+const inMemoryChunks = new Map<string, { chunk: DocumentChunk }>();
 
-// Document metadata interface
-export interface DocumentMetadata {
+// Search result interface with scores
+export interface SearchResult {
   id: string;
-  filename: string;
-  path: string;
-  contentType: string;
-  uploadedAt: string;
-  preview?: string;
-  domains?: string[]; // Array of domains the document belongs to
+  documentName: string;
+  pageNumber: number;
+  chunkNumber: number;
+  content: string;
+  title?: string;
+  summary?: string;
+  sourceFile?: string;
+  score: number;
 }
 
 // Database service class
@@ -39,47 +42,48 @@ export class DatabaseService {
     console.log(`Initializing database service with Qdrant at ${QDRANT_URL}`);
   }
   
-  // Initialize Qdrant and create collection if it doesn't exist
+  // Initialize Qdrant and create collections if they don't exist
   public async initialize(): Promise<void> {
     try {
-      // Check if collection exists
+      // Check if collections exist
       const collections = await this.qdrantClient.getCollections();
-      const collectionExists = collections.collections?.some(
-        (collection) => collection.name === COLLECTION_NAME
+      
+      // Check if the chunks collection exists
+      const chunksCollectionExists = collections.collections?.some(
+        (collection) => collection.name === CHUNKS_COLLECTION_NAME
       );
-
-      if (!collectionExists) {
-        console.log(`Creating Qdrant collection: ${COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
+      
+      if (!chunksCollectionExists) {
+        console.log(`Creating Qdrant collection: ${CHUNKS_COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
         
-        // Create collection
-        await this.qdrantClient.createCollection(COLLECTION_NAME, {
+        // Create chunks collection
+        await this.qdrantClient.createCollection(CHUNKS_COLLECTION_NAME, {
           vectors: {
             size: VECTOR_SIZE,
             distance: 'Cosine'
           }
         });
         
-        // Create payload index for filename
-        await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-          field_name: 'filename',
+        // Create relevant payload indices for chunks
+        await this.qdrantClient.createPayloadIndex(CHUNKS_COLLECTION_NAME, {
+          field_name: 'documentName',
           field_schema: 'keyword'
         });
         
-        // Create payload index for uploadedAt
-        await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-          field_name: 'uploadedAt',
+        await this.qdrantClient.createPayloadIndex(CHUNKS_COLLECTION_NAME, {
+          field_name: 'title',
           field_schema: 'keyword'
         });
-      } else {
-        // Check if collection has the right vector size
-        const collectionInfo = await this.qdrantClient.getCollection(COLLECTION_NAME);
-        const collectionVectorSize = collectionInfo.config?.params?.vectors?.size;
         
-        if (collectionVectorSize !== VECTOR_SIZE) {
-          console.warn(`Warning: Existing collection ${COLLECTION_NAME} has vector size ${collectionVectorSize}, ` +
-                      `but current configuration expects ${VECTOR_SIZE}. ` +
-                      `You'll need to recreate the collection for Gemini embeddings.`);
-        }
+        await this.qdrantClient.createPayloadIndex(CHUNKS_COLLECTION_NAME, {
+          field_name: 'pageNumber',
+          field_schema: 'integer'
+        });
+        
+        await this.qdrantClient.createPayloadIndex(CHUNKS_COLLECTION_NAME, {
+          field_name: 'chunkNumber',
+          field_schema: 'integer'
+        });
       }
       
       this.fallbackService.resetWarningFlag('initialize');
@@ -88,40 +92,43 @@ export class DatabaseService {
       this.fallbackService.handleError('initialize', error);
     }
   }
-
-  // Add a document with its vector embedding
-  public async addDocument(document: DocumentMetadata, embedding: number[]): Promise<DocumentMetadata> {
+  
+  // Add document chunks to database
+  public async addDocumentChunks(chunks: DocumentChunk[]): Promise<void> {
     return this.fallbackService.withFallback(
-      'addDocument',
+      'addDocumentChunks',
       // Fallback function
       () => {
-        inMemoryDocuments.set(document.id, { document, vector: embedding });
-        return document;
+        for (const chunk of chunks) {
+          inMemoryChunks.set(chunk.id, { chunk });
+        }
       },
       // Qdrant function
       async () => {
-        const payload = {
-          id: document.id,
-          filename: document.filename,
-          path: document.path,
-          contentType: document.contentType,
-          uploadedAt: document.uploadedAt,
-          preview: document.preview,
-          domains: document.domains || []
-        };
-
-        await this.qdrantClient.upsert(COLLECTION_NAME, {
-          wait: true,
-          points: [
-            {
-              id: document.id,
-              vector: embedding,
-              payload
-            }
-          ]
-        });
+        if (chunks.length === 0) return;
         
-        return document;
+        // Prepare points for bulk insertion
+        const points = chunks.map(chunk => ({
+          id: chunk.id,
+          vector: chunk.embedding,
+          payload: {
+            id: chunk.id,
+            documentName: chunk.documentName,
+            parentDocumentId: chunk.parentDocumentId,
+            pageNumber: chunk.pageNumber,
+            chunkNumber: chunk.chunkNumber,
+            content: chunk.content,
+            title: chunk.title,
+            summary: chunk.summary,
+            sourceFile: chunk.sourceFile
+          }
+        }));
+        
+        // Insert chunks
+        await this.qdrantClient.upsert(CHUNKS_COLLECTION_NAME, {
+          wait: true,
+          points
+        });
       },
       this.fallbackService.isFallbackActive()
     );
@@ -149,32 +156,50 @@ export class DatabaseService {
   }
 
   // Search for documents using vector similarity
-  public async searchByVector(queryVector: number[], limit = 5): Promise<Array<DocumentMetadata & { score: number }>> {
+  public async searchByVector(queryVector: number[], limit = 10): Promise<SearchResult[]> {
     return this.fallbackService.withFallback(
       'searchByVector',
       // Fallback function
       () => {
-        // In-memory similarity search
-        return Array.from(inMemoryDocuments.values())
-          .map(item => ({
-            ...item.document,
-            score: this.cosineSimilarity(queryVector, item.vector)
-          }))
+        // Search chunks
+        return Array.from(inMemoryChunks.values())
+          .map(item => {
+            const chunk = item.chunk;
+            return {
+              id: chunk.id,
+              documentName: chunk.documentName,
+              pageNumber: chunk.pageNumber,
+              chunkNumber: chunk.chunkNumber,
+              content: chunk.content,
+              title: chunk.title,
+              summary: chunk.summary,
+              sourceFile: chunk.sourceFile,
+              score: this.cosineSimilarity(queryVector, chunk.embedding)
+            };
+          })
           .sort((a, b) => b.score - a.score)
           .slice(0, limit);
       },
       // Qdrant function
       async () => {
-        const searchResult = await this.qdrantClient.search(COLLECTION_NAME, {
+        const results = await this.qdrantClient.search(CHUNKS_COLLECTION_NAME, {
           vector: queryVector,
-          limit,
+          limit: limit,
           with_payload: true
         });
         
-        return searchResult.map(hit => {
-          const payload = hit.payload as unknown as DocumentMetadata;
+        return results.map(hit => {
+          const payload = hit.payload as any;
+          
           return {
-            ...payload,
+            id: payload.id,
+            documentName: payload.documentName,
+            pageNumber: payload.pageNumber,
+            chunkNumber: payload.chunkNumber,
+            content: payload.content,
+            title: payload.title,
+            summary: payload.summary,
+            sourceFile: payload.sourceFile,
             score: hit.score
           };
         });
@@ -183,17 +208,18 @@ export class DatabaseService {
     );
   }
 
-  // Get all documents
-  public async getAllDocuments(): Promise<DocumentMetadata[]> {
+  // Get all chunks
+  public async getAllChunks(): Promise<DocumentChunk[]> {
     return this.fallbackService.withFallback(
-      'getAllDocuments',
+      'getAllChunks',
       // Fallback function
-      () => Array.from(inMemoryDocuments.values()).map(item => item.document),
+      () => Array.from(inMemoryChunks.values()).map(item => item.chunk),
       // Qdrant function
       async () => {
-        const result = await this.qdrantClient.scroll(COLLECTION_NAME, {
+        const result = await this.qdrantClient.scroll(CHUNKS_COLLECTION_NAME, {
           with_payload: true,
-          limit: 100
+          with_vector: true,
+          limit: 1000
         });
         
         if (!result.points) {
@@ -201,31 +227,132 @@ export class DatabaseService {
         }
         
         return result.points.map(point => {
-          const payload = point.payload as unknown as DocumentMetadata;
-          return payload;
+          const payload = point.payload as any;
+          const vector = point.vector as number[];
+          
+          return {
+            id: payload.id,
+            documentName: payload.documentName,
+            parentDocumentId: payload.parentDocumentId,
+            pageNumber: payload.pageNumber,
+            chunkNumber: payload.chunkNumber,
+            content: payload.content,
+            title: payload.title,
+            summary: payload.summary,
+            sourceFile: payload.sourceFile,
+            embedding: vector
+          };
+        });
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+  
+  // Get document chunks by document name
+  public async getDocumentChunksByName(documentName: string): Promise<DocumentChunk[]> {
+    return this.fallbackService.withFallback(
+      'getDocumentChunksByName',
+      // Fallback function
+      () => {
+        return Array.from(inMemoryChunks.values())
+          .filter(item => item.chunk.documentName === documentName)
+          .map(item => item.chunk)
+          .sort((a, b) => {
+            // Sort by page number first, then by chunk number
+            if (a.pageNumber !== b.pageNumber) {
+              return a.pageNumber - b.pageNumber;
+            }
+            return a.chunkNumber - b.chunkNumber;
+          });
+      },
+      // Qdrant function
+      async () => {
+        const result = await this.qdrantClient.scroll(CHUNKS_COLLECTION_NAME, {
+          filter: {
+            must: [
+              { key: "documentName", match: { value: documentName } }
+            ]
+          },
+          with_payload: true,
+          with_vector: true,
+          limit: 1000
+        });
+        
+        if (!result.points) {
+          return [];
+        }
+        
+        return result.points.map(point => {
+          const payload = point.payload as any;
+          const vector = point.vector as number[];
+          
+          return {
+            id: payload.id,
+            documentName: payload.documentName,
+            parentDocumentId: payload.parentDocumentId,
+            pageNumber: payload.pageNumber,
+            chunkNumber: payload.chunkNumber,
+            content: payload.content,
+            title: payload.title,
+            summary: payload.summary,
+            sourceFile: payload.sourceFile,
+            embedding: vector
+          };
+        }).sort((a, b) => {
+          // Sort by page number first, then by chunk number
+          if (a.pageNumber !== b.pageNumber) {
+            return a.pageNumber - b.pageNumber;
+          }
+          return a.chunkNumber - b.chunkNumber;
         });
       },
       this.fallbackService.isFallbackActive()
     );
   }
 
-  // Delete a document
-  public async deleteDocument(id: string): Promise<boolean> {
+  // Delete a document by name (all chunks with this document name)
+  public async deleteDocumentByName(documentName: string): Promise<number> {
     return this.fallbackService.withFallback(
-      'deleteDocument',
+      'deleteDocumentByName',
       // Fallback function
       () => {
-        inMemoryDocuments.delete(id);
-        return true;
+        // Get all chunks for this document
+        const chunkIds = Array.from(inMemoryChunks.keys())
+          .filter(chunkId => {
+            const chunk = inMemoryChunks.get(chunkId)!.chunk;
+            return chunk.documentName === documentName;
+          });
+        
+        // Delete chunks
+        for (const chunkId of chunkIds) {
+          inMemoryChunks.delete(chunkId);
+        }
+        
+        return chunkIds.length;
       },
       // Qdrant function
       async () => {
-        await this.qdrantClient.delete(COLLECTION_NAME, {
-          wait: true,
-          points: [id]
+        // First count how many chunks will be deleted
+        const countResult = await this.qdrantClient.count(CHUNKS_COLLECTION_NAME, {
+          exact: true,
+          filter: {
+            must: [
+              { key: "documentName", match: { value: documentName } }
+            ]
+          }
         });
         
-        return true;
+        // Delete all chunks for this document
+        await this.qdrantClient.delete(CHUNKS_COLLECTION_NAME, {
+          wait: true,
+          filter: {
+            must: [
+              { key: "documentName", match: { value: documentName } }
+            ]
+          }
+        });
+        
+        return countResult.count;
       },
       this.fallbackService.isFallbackActive()
     );
