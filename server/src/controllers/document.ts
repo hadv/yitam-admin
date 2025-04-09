@@ -5,7 +5,7 @@ import { createEmbedding } from '../services/embedding';
 import { parseDocument, parsePdfByPages } from '../services/document';
 import { DatabaseService } from '../core/database-service';
 import { TaskType } from '@google/generative-ai';
-import { chunkPdfDocument, ChunkingConfig } from '../services/chunking';
+import { chunkDocument, ChunkingConfig } from '../services/chunking';
 import path from 'path';
 
 // Create a singleton instance of the database service
@@ -48,7 +48,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
       const pdfPages = await parsePdfByPages(req.file.path);
       
       // Chunk the PDF by pages
-      const chunks = await chunkPdfDocument(pdfPages, req.file.path, chunkingConfig);
+      const chunks = await chunkDocument(pdfPages, req.file.path, chunkingConfig);
       console.log(`Created ${chunks.length} chunks for PDF ${req.file.originalname}`);
       
       // Store all chunks in database
@@ -75,7 +75,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
     };
     
     // Chunk the document
-    const chunks = await chunkPdfDocument(document, req.file.path, chunkingConfig);
+    const chunks = await chunkDocument(document, req.file.path, chunkingConfig);
     console.log(`Created ${chunks.length} chunks for document ${req.file.originalname}`);
     
     // Store all chunks in database

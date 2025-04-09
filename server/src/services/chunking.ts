@@ -44,14 +44,14 @@ const DEFAULT_CHUNKING_CONFIG: ChunkingConfig = {
 };
 
 /**
- * Process a PDF document into page-based chunks with overlap
+ * Process a document into page-based chunks with overlap
  * 
- * @param document Object containing parsed PDF pages
+ * @param document Object containing parsed document pages
  * @param sourceFilePath Path to the source file
  * @param config Chunking configuration
  * @returns Array of document chunks with embeddings, titles, and summaries
  */
-export async function chunkPdfDocument(
+export async function chunkDocument(
   document: { pages: { pageNumber: number; content: string }[] },
   sourceFilePath: string,
   config: Partial<ChunkingConfig> = {}
