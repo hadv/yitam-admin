@@ -5,6 +5,7 @@ import { DatabaseService } from '../core/database-service';
 import { TaskType } from '@google/generative-ai';
 import { chunkDocument, ChunkingConfig } from '../services/chunking';
 import path from 'path';
+import fs from 'fs';
 
 // Create a singleton instance of the database service
 const dbService = new DatabaseService();
@@ -110,6 +111,11 @@ export const parseAndStoreDocument = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error processing document:', error);
     res.status(500).json({ message: 'Failed to process document' });
+  } finally {
+    // Clean up file regardless of success or failure
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
   }
 };
 
