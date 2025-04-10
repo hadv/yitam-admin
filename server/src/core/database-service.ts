@@ -9,11 +9,11 @@ dotenv.config();
 // Configuration constants
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
-const COLLECTION_NAME = process.env.COLLECTION_NAME || 'document_chunks';
+const COLLECTION_NAME = process.env.COLLECTION_NAME || 'knowledge_base';
 const VECTOR_SIZE = parseInt(process.env.GEMINI_VECTOR_SIZE || '768', 10); // Gemini embedding size
 
 // In-memory storage for fallback when Qdrant is not available
-const inMemoryChunks = new Map<string, { chunk: DocumentChunk }>();
+const inMemoryDocuments = new Map<string, { document: DocumentChunk }>();
 
 // Search result interface with scores
 export interface SearchResult {
@@ -47,15 +47,15 @@ export class DatabaseService {
       // Check if collections exist
       const collections = await this.qdrantClient.getCollections();
       
-      // Check if the chunks collection exists
-      const chunksCollectionExists = collections.collections?.some(
+      // Check if the knowledge base collection exists
+      const collectionExists = collections.collections?.some(
         (collection) => collection.name === COLLECTION_NAME
       );
       
-      if (!chunksCollectionExists) {
+      if (!collectionExists) {
         console.log(`Creating Qdrant collection: ${COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
         
-        // Create chunks collection
+        // Create knowledge base collection
         await this.qdrantClient.createCollection(COLLECTION_NAME, {
           vectors: {
             size: VECTOR_SIZE,
@@ -63,7 +63,7 @@ export class DatabaseService {
           }
         });
         
-        // Create relevant payload indices for chunks
+        // Create relevant payload indices for knowledge base
         await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
           field_name: 'documentName',
           field_schema: 'keyword'
@@ -87,36 +87,36 @@ export class DatabaseService {
     }
   }
   
-  // Add document chunks to database
-  public async addDocumentChunks(chunks: DocumentChunk[]): Promise<void> {
+  // Add documents to knowledge base
+  public async addDocumentChunks(documents: DocumentChunk[]): Promise<void> {
     return this.fallbackService.withFallback(
       'addDocumentChunks',
       // Fallback function
       () => {
-        for (const chunk of chunks) {
-          inMemoryChunks.set(chunk.id, { chunk });
+        for (const doc of documents) {
+          inMemoryDocuments.set(doc.id, { document: doc });
         }
       },
       // Qdrant function
       async () => {
-        if (chunks.length === 0) return;
+        if (documents.length === 0) return;
         
         // Prepare points for bulk insertion
-        const points = chunks.map(chunk => ({
-          id: chunk.id,
-          vector: chunk.embedding,
+        const points = documents.map(doc => ({
+          id: doc.id,
+          vector: doc.embedding,
           payload: {
-            id: chunk.id,
-            documentName: chunk.documentName,
-            content: chunk.content,
-            title: chunk.title,
-            summary: chunk.summary,
-            sourceFile: chunk.sourceFile,
-            domains: chunk.domains
+            id: doc.id,
+            documentName: doc.documentName,
+            content: doc.content,
+            title: doc.title,
+            summary: doc.summary,
+            sourceFile: doc.sourceFile,
+            domains: doc.domains
           }
         }));
         
-        // Insert chunks
+        // Insert documents
         await this.qdrantClient.upsert(COLLECTION_NAME, {
           wait: true,
           points
@@ -153,19 +153,19 @@ export class DatabaseService {
       'searchByVector',
       // Fallback function
       () => {
-        // Search chunks
-        return Array.from(inMemoryChunks.values())
+        // Search documents
+        return Array.from(inMemoryDocuments.values())
           .map(item => {
-            const chunk = item.chunk;
+            const doc = item.document;
             return {
-              id: chunk.id,
-              documentName: chunk.documentName,
-              content: chunk.content,
-              title: chunk.title,
-              summary: chunk.summary,
-              sourceFile: chunk.sourceFile,
-              domains: chunk.domains,
-              score: this.cosineSimilarity(queryVector, chunk.embedding)
+              id: doc.id,
+              documentName: doc.documentName,
+              content: doc.content,
+              title: doc.title,
+              summary: doc.summary,
+              sourceFile: doc.sourceFile,
+              domains: doc.domains,
+              score: this.cosineSimilarity(queryVector, doc.embedding)
             };
           })
           .sort((a, b) => b.score - a.score)
