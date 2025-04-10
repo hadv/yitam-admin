@@ -31,6 +31,7 @@ export interface ChunkingConfig {
   chunkOverlap: number;
   generateTitles: boolean;
   generateSummaries: boolean;
+  respectBoundaries: boolean; // Added for sentence/paragraph boundaries
 }
 
 // Default chunking configuration
@@ -38,7 +39,8 @@ const DEFAULT_CHUNKING_CONFIG: ChunkingConfig = {
   chunksPerPage: 3, // Each page gets 3 chunks
   chunkOverlap: 0.2, // 20% overlap between chunks
   generateTitles: true,
-  generateSummaries: true
+  generateSummaries: true,
+  respectBoundaries: true // Default to respecting boundaries
 };
 
 /**
@@ -84,29 +86,53 @@ export async function chunkDocument(
     // Create chunks for this page
     const pageChunks: Omit<DocumentChunk, 'embedding' | 'title' | 'summary'>[] = [];
     
-    for (let i = 0; i < fullConfig.chunksPerPage; i++) {
-      // Calculate start position (with overlap)
-      const startPos = i === 0 ? 0 : i * chunkSize - overlap;
+    if (fullConfig.respectBoundaries) {
+      // Use the boundary-aware chunking approach
+      const chunks = createBoundaryAwareChunks(
+        pageContent, 
+        fullConfig.chunksPerPage, 
+        chunkSize, 
+        overlap
+      );
       
-      // Calculate end position
-      const endPos = Math.min(startPos + chunkSize, pageContent.length);
-      
-      // If we've reached the end of content, break
-      if (startPos >= pageContent.length) break;
-      
-      // Extract chunk content
-      const content = pageContent.substring(startPos, endPos);
-      
-      // Create chunk ID: documentName_pageXXX_chunkY
-      const id = `${documentName}_page${page.pageNumber.toString().padStart(3, '0')}_chunk${i}`;
-      
-      pageChunks.push({
-        id,
-        documentName,
-        content,
-        sourceFile: sourceFilePath,
-        domains: [...domains]
+      chunks.forEach((content, i) => {
+        // Create chunk ID: documentName_pageXXX_chunkY
+        const id = `${documentName}_page${page.pageNumber.toString().padStart(3, '0')}_chunk${i}`;
+        
+        pageChunks.push({
+          id,
+          documentName,
+          content,
+          sourceFile: sourceFilePath,
+          domains: [...domains]
+        });
       });
+    } else {
+      // Use the original chunking approach
+      for (let i = 0; i < fullConfig.chunksPerPage; i++) {
+        // Calculate start position (with overlap)
+        const startPos = i === 0 ? 0 : i * chunkSize - overlap;
+        
+        // Calculate end position
+        const endPos = Math.min(startPos + chunkSize, pageContent.length);
+        
+        // If we've reached the end of content, break
+        if (startPos >= pageContent.length) break;
+        
+        // Extract chunk content
+        const content = pageContent.substring(startPos, endPos);
+        
+        // Create chunk ID: documentName_pageXXX_chunkY
+        const id = `${documentName}_page${page.pageNumber.toString().padStart(3, '0')}_chunk${i}`;
+        
+        pageChunks.push({
+          id,
+          documentName,
+          content,
+          sourceFile: sourceFilePath,
+          domains: [...domains]
+        });
+      }
     }
     
     // Process chunks in parallel - generate embeddings, titles, and summaries
@@ -153,6 +179,98 @@ export async function chunkDocument(
   
   console.log(`Created ${allChunks.length} chunks for document ${documentName}`);
   return allChunks;
+}
+
+/**
+ * Create chunks that respect sentence and paragraph boundaries
+ * 
+ * @param text The text to chunk
+ * @param maxChunks Maximum number of chunks to create
+ * @param targetSize Target size for each chunk
+ * @param overlap Overlap size in characters
+ * @returns Array of text chunks with boundaries preserved
+ */
+function createBoundaryAwareChunks(
+  text: string,
+  maxChunks: number,
+  targetSize: number,
+  overlap: number
+): string[] {
+  // Split text into semantic units (paragraphs first, then sentences)
+  const paragraphs = text.split(/\n\s*\n/); // Split by empty lines
+  
+  // Collect all semantic units (paragraphs, then sentences if needed)
+  const semanticUnits: string[] = [];
+  
+  for (const paragraph of paragraphs) {
+    if (paragraph.trim().length === 0) continue;
+    
+    // If paragraph is very large, split into sentences
+    if (paragraph.length > targetSize * 1.5) {
+      // Split by sentence boundaries (period, question mark, exclamation followed by space or newline)
+      const sentences = paragraph.split(/(?<=[.!?])\s+/);
+      sentences.forEach(sentence => {
+        if (sentence.trim().length > 0) {
+          semanticUnits.push(sentence.trim());
+        }
+      });
+    } else {
+      semanticUnits.push(paragraph.trim());
+    }
+  }
+  
+  // Create chunks from semantic units
+  const chunks: string[] = [];
+  let currentChunk = '';
+  
+  for (let i = 0; i < semanticUnits.length; i++) {
+    const unit = semanticUnits[i];
+    
+    // If adding this unit would exceed target size and we already have content,
+    // finish current chunk and start a new one
+    if (currentChunk.length > 0 && 
+        (currentChunk.length + unit.length > targetSize) && 
+        (chunks.length < maxChunks - 1)) {
+      chunks.push(currentChunk);
+      
+      // Start new chunk with overlap if possible
+      if (currentChunk.length > overlap) {
+        // Find the nearest sentence boundary within the overlap region
+        const overlapText = currentChunk.slice(-overlap);
+        const sentenceBoundaryMatch = overlapText.match(/(?<=[.!?])\s+/g);
+        
+        if (sentenceBoundaryMatch && sentenceBoundaryMatch.length > 0) {
+          // Get the position of the last sentence boundary in the overlap
+          const lastIndex = overlapText.lastIndexOf(sentenceBoundaryMatch[sentenceBoundaryMatch.length - 1]);
+          if (lastIndex !== -1) {
+            // Start with text after the last sentence boundary in the overlap
+            currentChunk = currentChunk.slice(currentChunk.length - overlap + lastIndex + sentenceBoundaryMatch[sentenceBoundaryMatch.length - 1].length);
+          } else {
+            currentChunk = currentChunk.slice(-overlap);
+          }
+        } else {
+          currentChunk = currentChunk.slice(-overlap);
+        }
+      } else {
+        currentChunk = '';
+      }
+    }
+    
+    // Add current unit to the chunk
+    if (currentChunk.length > 0) {
+      currentChunk += ' ' + unit;
+    } else {
+      currentChunk = unit;
+    }
+  }
+  
+  // Add the last chunk if it has content
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+  
+  // Ensure we don't exceed max chunks
+  return chunks.slice(0, maxChunks);
 }
 
 /**
