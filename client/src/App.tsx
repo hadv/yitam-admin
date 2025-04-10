@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import DocumentUpload from '@components/DocumentUpload'
-import DocumentList from '@components/DocumentList'
 
 function App() {
   const [uploadSuccess, setUploadSuccess] = useState<boolean>(false)
@@ -26,15 +25,9 @@ function App() {
                 Document uploaded and embedded successfully!
               </div>
             )}
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-              <div>
-                <h2 className="text-xl font-semibold mb-4">Upload Document</h2>
-                <DocumentUpload onUploadSuccess={handleUploadSuccess} />
-              </div>
-              <div>
-                <h2 className="text-xl font-semibold mb-4">Recent Documents</h2>
-                <DocumentList />
-              </div>
+            <div>
+              <h2 className="text-xl font-semibold mb-4">Upload Document</h2>
+              <DocumentUpload onUploadSuccess={handleUploadSuccess} />
             </div>
           </div>
         </div>

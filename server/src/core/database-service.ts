@@ -1,6 +1,8 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
 import { FallbackService } from './fallback-service';
+import { DocumentChunk } from '../services/chunking';
+import { v4 as uuidv4 } from 'uuid';
 
 // Load environment variables
 dotenv.config();
@@ -8,21 +10,22 @@ dotenv.config();
 // Configuration constants
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
-const COLLECTION_NAME = process.env.COLLECTION_NAME || 'documents';
+const COLLECTION_NAME = process.env.COLLECTION_NAME || 'knowledge_base';
 const VECTOR_SIZE = parseInt(process.env.GEMINI_VECTOR_SIZE || '768', 10); // Gemini embedding size
 
 // In-memory storage for fallback when Qdrant is not available
-const inMemoryDocuments = new Map<string, { document: DocumentMetadata, vector: number[] }>();
+const inMemoryDocuments = new Map<string, { document: DocumentChunk }>();
 
-// Document metadata interface
-export interface DocumentMetadata {
+// Search result interface with scores
+export interface SearchResult {
   id: string;
-  filename: string;
-  path: string;
-  contentType: string;
-  uploadedAt: string;
-  preview?: string;
-  domains?: string[]; // Array of domains the document belongs to
+  documentName: string;
+  content: string;
+  title?: string;
+  summary?: string;
+  sourceFile?: string;
+  domains?: string[];
+  score: number;
 }
 
 // Database service class
@@ -39,19 +42,21 @@ export class DatabaseService {
     console.log(`Initializing database service with Qdrant at ${QDRANT_URL}`);
   }
   
-  // Initialize Qdrant and create collection if it doesn't exist
+  // Initialize Qdrant and create collections if they don't exist
   public async initialize(): Promise<void> {
     try {
-      // Check if collection exists
+      // Check if collections exist
       const collections = await this.qdrantClient.getCollections();
+      
+      // Check if the knowledge base collection exists
       const collectionExists = collections.collections?.some(
         (collection) => collection.name === COLLECTION_NAME
       );
-
+      
       if (!collectionExists) {
         console.log(`Creating Qdrant collection: ${COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
         
-        // Create collection
+        // Create knowledge base collection
         await this.qdrantClient.createCollection(COLLECTION_NAME, {
           vectors: {
             size: VECTOR_SIZE,
@@ -59,27 +64,21 @@ export class DatabaseService {
           }
         });
         
-        // Create payload index for filename
+        // Create relevant payload indices for knowledge base
         await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-          field_name: 'filename',
+          field_name: 'documentName',
           field_schema: 'keyword'
         });
         
-        // Create payload index for uploadedAt
         await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-          field_name: 'uploadedAt',
+          field_name: 'title',
           field_schema: 'keyword'
         });
-      } else {
-        // Check if collection has the right vector size
-        const collectionInfo = await this.qdrantClient.getCollection(COLLECTION_NAME);
-        const collectionVectorSize = collectionInfo.config?.params?.vectors?.size;
         
-        if (collectionVectorSize !== VECTOR_SIZE) {
-          console.warn(`Warning: Existing collection ${COLLECTION_NAME} has vector size ${collectionVectorSize}, ` +
-                      `but current configuration expects ${VECTOR_SIZE}. ` +
-                      `You'll need to recreate the collection for Gemini embeddings.`);
-        }
+        await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
+          field_name: 'domains',
+          field_schema: 'keyword'
+        });
       }
       
       this.fallbackService.resetWarningFlag('initialize');
@@ -88,40 +87,43 @@ export class DatabaseService {
       this.fallbackService.handleError('initialize', error);
     }
   }
-
-  // Add a document with its vector embedding
-  public async addDocument(document: DocumentMetadata, embedding: number[]): Promise<DocumentMetadata> {
+  
+  // Add documents to knowledge base
+  public async addDocumentChunks(documents: DocumentChunk[]): Promise<void> {
     return this.fallbackService.withFallback(
-      'addDocument',
+      'addDocumentChunks',
       // Fallback function
       () => {
-        inMemoryDocuments.set(document.id, { document, vector: embedding });
-        return document;
+        for (const doc of documents) {
+          inMemoryDocuments.set(doc.id, { document: doc });
+        }
       },
       // Qdrant function
       async () => {
-        const payload = {
-          id: document.id,
-          filename: document.filename,
-          path: document.path,
-          contentType: document.contentType,
-          uploadedAt: document.uploadedAt,
-          preview: document.preview,
-          domains: document.domains || []
-        };
-
-        await this.qdrantClient.upsert(COLLECTION_NAME, {
-          wait: true,
-          points: [
-            {
-              id: document.id,
-              vector: embedding,
-              payload
+        if (documents.length === 0) return;
+        
+        // Prepare points for bulk insertion
+        const points = documents.map(doc => {
+          return {
+            id: uuidv4(),
+            vector: doc.embedding,
+            payload: {
+              id: doc.id,
+              documentName: doc.documentName,
+              content: doc.content,
+              title: doc.title,
+              summary: doc.summary,
+              sourceFile: doc.sourceFile,
+              domains: doc.domains
             }
-          ]
+          };
         });
         
-        return document;
+        // Insert documents
+        await this.qdrantClient.upsert(COLLECTION_NAME, {
+          wait: true,
+          points
+        });
       },
       this.fallbackService.isFallbackActive()
     );
@@ -149,83 +151,51 @@ export class DatabaseService {
   }
 
   // Search for documents using vector similarity
-  public async searchByVector(queryVector: number[], limit = 5): Promise<Array<DocumentMetadata & { score: number }>> {
+  public async searchByVector(queryVector: number[], limit = 10): Promise<SearchResult[]> {
     return this.fallbackService.withFallback(
       'searchByVector',
       // Fallback function
       () => {
-        // In-memory similarity search
+        // Search documents
         return Array.from(inMemoryDocuments.values())
-          .map(item => ({
-            ...item.document,
-            score: this.cosineSimilarity(queryVector, item.vector)
-          }))
+          .map(item => {
+            const doc = item.document;
+            return {
+              id: doc.id,
+              documentName: doc.documentName,
+              content: doc.content,
+              title: doc.title,
+              summary: doc.summary,
+              sourceFile: doc.sourceFile,
+              domains: doc.domains,
+              score: this.cosineSimilarity(queryVector, doc.embedding)
+            };
+          })
           .sort((a, b) => b.score - a.score)
           .slice(0, limit);
       },
       // Qdrant function
       async () => {
-        const searchResult = await this.qdrantClient.search(COLLECTION_NAME, {
+        const results = await this.qdrantClient.search(COLLECTION_NAME, {
           vector: queryVector,
-          limit,
+          limit: limit,
           with_payload: true
         });
         
-        return searchResult.map(hit => {
-          const payload = hit.payload as unknown as DocumentMetadata;
+        return results.map(hit => {
+          const payload = hit.payload as any;
+          
           return {
-            ...payload,
+            id: payload.id,
+            documentName: payload.documentName,
+            content: payload.content,
+            title: payload.title,
+            summary: payload.summary,
+            sourceFile: payload.sourceFile,
+            domains: payload.domains || ['default'],
             score: hit.score
           };
         });
-      },
-      this.fallbackService.isFallbackActive()
-    );
-  }
-
-  // Get all documents
-  public async getAllDocuments(): Promise<DocumentMetadata[]> {
-    return this.fallbackService.withFallback(
-      'getAllDocuments',
-      // Fallback function
-      () => Array.from(inMemoryDocuments.values()).map(item => item.document),
-      // Qdrant function
-      async () => {
-        const result = await this.qdrantClient.scroll(COLLECTION_NAME, {
-          with_payload: true,
-          limit: 100
-        });
-        
-        if (!result.points) {
-          return [];
-        }
-        
-        return result.points.map(point => {
-          const payload = point.payload as unknown as DocumentMetadata;
-          return payload;
-        });
-      },
-      this.fallbackService.isFallbackActive()
-    );
-  }
-
-  // Delete a document
-  public async deleteDocument(id: string): Promise<boolean> {
-    return this.fallbackService.withFallback(
-      'deleteDocument',
-      // Fallback function
-      () => {
-        inMemoryDocuments.delete(id);
-        return true;
-      },
-      // Qdrant function
-      async () => {
-        await this.qdrantClient.delete(COLLECTION_NAME, {
-          wait: true,
-          points: [id]
-        });
-        
-        return true;
       },
       this.fallbackService.isFallbackActive()
     );

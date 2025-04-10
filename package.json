@@ -9,10 +9,18 @@
     "build": "cd client && npm run build && cd ../server && npm run build",
     "start": "cd server && npm start"
   },
-  "keywords": ["react", "qdrant", "vector", "document", "embeddings"],
+  "keywords": [
+    "react",
+    "qdrant",
+    "vector",
+    "document",
+    "embeddings"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "concurrently": "^8.2.0"
+  },
+  "dependencies": {
   }
-} 
+}
