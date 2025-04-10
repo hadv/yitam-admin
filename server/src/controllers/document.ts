@@ -1,6 +1,4 @@
 import { Request, Response } from 'express';
-import fs from 'fs';
-import { v4 as uuidv4 } from 'uuid';
 import { createEmbedding } from '../services/embedding';
 import { parseDocument, parsePdfByPages } from '../services/document';
 import { DatabaseService } from '../core/database-service';
@@ -16,8 +14,8 @@ dbService.initialize().catch(err => {
   console.error('Error initializing database:', err);
 });
 
-// Upload a document, parse it, chunk it, and store in vector DB
-export const uploadDocument = async (req: Request, res: Response) => {
+// Parse a document, split into chunks, embed each chunk and store in vector DB
+export const parseAndStoreDocument = async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: 'No file uploaded' });
@@ -42,110 +40,76 @@ export const uploadDocument = async (req: Request, res: Response) => {
       chunkingConfig.generateSummaries = req.body.generateSummaries === 'true' || req.body.generateSummaries === true;
     }
 
-    // Special handling for PDFs - use page-based chunking
+    // Get domains from request body or use default
+    let domains: string[] = ['default'];
+    if (req.body.domains) {
+      // If domains is provided as a string, parse it as JSON
+      if (typeof req.body.domains === 'string') {
+        try {
+          domains = JSON.parse(req.body.domains);
+          if (!Array.isArray(domains)) {
+            domains = [req.body.domains];
+          }
+        } catch (error) {
+          // If parsing fails, use the string as a single domain
+          domains = [req.body.domains];
+        }
+      } 
+      // If domains is already an array, use it directly
+      else if (Array.isArray(req.body.domains)) {
+        domains = req.body.domains;
+      }
+      // If domain is provided as a single string, use it
+      else if (req.body.domain) {
+        domains = [req.body.domain];
+      }
+    }
+    
+    // Get document title from request body if provided
+    const documentTitle = req.body.documentTitle || '';
+
+    // Parse document into chunks based on document type
+    let chunks;
+    
     if (req.file.mimetype === 'application/pdf') {
       // Parse PDF into pages
       const pdfPages = await parsePdfByPages(req.file.path);
       
       // Chunk the PDF by pages
-      const chunks = await chunkDocument(pdfPages, req.file.path, chunkingConfig);
-      console.log(`Created ${chunks.length} chunks for PDF ${req.file.originalname}`);
+      chunks = await chunkDocument(pdfPages, req.file.path, chunkingConfig, domains, documentTitle);
+    } else {
+      // For non-PDF documents, treat as a single page and chunk it
+      const fileContent = await parseDocument(req.file.path, req.file.mimetype);
       
-      // Store all chunks in database
-      await dbService.addDocumentChunks(chunks);
+      // Create a single page document structure
+      const document = {
+        pages: [
+          {
+            pageNumber: 1,
+            content: fileContent
+          }
+        ]
+      };
       
-      return res.status(200).json({ 
-        message: 'PDF document chunked and embedded successfully',
-        totalChunks: chunks.length,
-        documentName: path.basename(req.file.originalname, path.extname(req.file.originalname))
-      });
-    } 
+      // Chunk the document
+      chunks = await chunkDocument(document, req.file.path, chunkingConfig, domains, documentTitle);
+    }
     
-    // For non-PDF documents, treat as a single page and chunk it
-    const fileContent = await parseDocument(req.file.path, req.file.mimetype);
-    
-    // Create a single page document structure
-    const document = {
-      pages: [
-        {
-          pageNumber: 1,
-          content: fileContent
-        }
-      ]
-    };
-    
-    // Chunk the document
-    const chunks = await chunkDocument(document, req.file.path, chunkingConfig);
-    console.log(`Created ${chunks.length} chunks for document ${req.file.originalname}`);
+    console.log(`Created ${chunks.length} chunks for document ${req.file.originalname} in domains: ${domains.join(', ')}`);
     
     // Store all chunks in database
     await dbService.addDocumentChunks(chunks);
     
     res.status(200).json({ 
-      message: 'Document chunked and embedded successfully',
+      message: 'Document parsed, chunked and embedded successfully',
       totalChunks: chunks.length,
-      documentName: path.basename(req.file.originalname, path.extname(req.file.originalname))
+      documentName: path.basename(req.file.originalname, path.extname(req.file.originalname)),
+      documentTitle: documentTitle || path.basename(req.file.originalname, path.extname(req.file.originalname)),
+      domains
     });
   } catch (error) {
     console.error('Error processing document:', error);
     res.status(500).json({ message: 'Failed to process document' });
-  }
-};
-
-// Get all documents
-export const getDocuments = async (req: Request, res: Response) => {
-  try {
-    // Since we're now only storing chunks, we'll retrieve unique document names
-    const chunks = await dbService.getAllChunks();
-    
-    // Extract unique document names
-    const uniqueDocuments = new Map();
-    
-    for (const chunk of chunks) {
-      if (!uniqueDocuments.has(chunk.documentName)) {
-        uniqueDocuments.set(chunk.documentName, {
-          documentName: chunk.documentName,
-          sourceFile: chunk.sourceFile,
-          totalChunks: 0,
-          firstChunk: chunk
-        });
-      }
-      
-      // Increment total chunks for this document
-      const docInfo = uniqueDocuments.get(chunk.documentName);
-      docInfo.totalChunks++;
-    }
-    
-    const documents = Array.from(uniqueDocuments.values()).map(docInfo => ({
-      documentName: docInfo.documentName,
-      sourceFile: docInfo.sourceFile,
-      totalChunks: docInfo.totalChunks,
-      preview: docInfo.firstChunk.content.substring(0, 200) + '...',
-      title: docInfo.firstChunk.title
-    }));
-    
-    res.status(200).json(documents);
-  } catch (error) {
-    console.error('Error fetching documents:', error);
-    res.status(500).json({ message: 'Failed to fetch documents' });
-  }
-};
-
-// Get document chunks
-export const getDocumentChunks = async (req: Request, res: Response) => {
-  try {
-    const { documentName } = req.params;
-    
-    if (!documentName) {
-      return res.status(400).json({ message: 'Document name is required' });
-    }
-    
-    const chunks = await dbService.getDocumentChunksByName(documentName);
-    
-    res.status(200).json(chunks);
-  } catch (error) {
-    console.error('Error fetching document chunks:', error);
-    res.status(500).json({ message: 'Failed to fetch document chunks' });
   }
 };
 
@@ -168,23 +132,5 @@ export const searchDocuments = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error searching documents:', error);
     res.status(500).json({ message: 'Failed to search documents' });
-  }
-};
-
-// Delete a document (all chunks with the same document name)
-export const deleteDocument = async (req: Request, res: Response) => {
-  try {
-    const { documentName } = req.params;
-    
-    // Delete all chunks for this document
-    const deletedCount = await dbService.deleteDocumentByName(documentName);
-    
-    res.status(200).json({ 
-      message: 'Document deleted successfully',
-      deletedChunks: deletedCount
-    });
-  } catch (error) {
-    console.error('Error deleting document:', error);
-    res.status(500).json({ message: 'Failed to delete document' });
   }
 }; 

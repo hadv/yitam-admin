@@ -16,15 +16,13 @@ if (!GEMINI_API_KEY) {
 // DocumentChunk interface - represents a single chunk of a document
 export interface DocumentChunk {
   id: string;
-  parentDocumentId: string;
   documentName: string;
-  pageNumber: number;
-  chunkNumber: number;
   content: string;
   embedding: number[];
   title: string;
   summary: string;
   sourceFile: string;
+  domains: string[];
 }
 
 // Configuration interface for chunking parameters
@@ -49,12 +47,16 @@ const DEFAULT_CHUNKING_CONFIG: ChunkingConfig = {
  * @param document Object containing parsed document pages
  * @param sourceFilePath Path to the source file
  * @param config Chunking configuration
+ * @param domains Array of domains the document belongs to
+ * @param documentTitle Optional title provided by the user
  * @returns Array of document chunks with embeddings, titles, and summaries
  */
 export async function chunkDocument(
   document: { pages: { pageNumber: number; content: string }[] },
   sourceFilePath: string,
-  config: Partial<ChunkingConfig> = {}
+  config: Partial<ChunkingConfig> = {},
+  domains: string[] = ['default'],
+  documentTitle: string = ''
 ): Promise<DocumentChunk[]> {
   // Merge default config with provided config
   const fullConfig: ChunkingConfig = {
@@ -66,7 +68,7 @@ export async function chunkDocument(
   const documentName = path.basename(sourceFilePath, path.extname(sourceFilePath))
     .replace(/[^a-zA-Z0-9]/g, '_'); // Replace non-alphanumeric with underscore
   
-  console.log(`Chunking document ${documentName} with ${document.pages.length} pages`);
+  console.log(`Chunking document ${documentName} with ${document.pages.length} pages in domains: ${domains.join(', ')}`);
   
   // Process all pages and create chunks
   const allChunks: DocumentChunk[] = [];
@@ -100,24 +102,27 @@ export async function chunkDocument(
       
       pageChunks.push({
         id,
-        parentDocumentId: documentName,
         documentName,
-        pageNumber: page.pageNumber,
-        chunkNumber: i,
         content,
-        sourceFile: sourceFilePath
+        sourceFile: sourceFilePath,
+        domains: [...domains]
       });
     }
     
     // Process chunks in parallel - generate embeddings, titles, and summaries
     const processedChunks = await Promise.all(
-      pageChunks.map(async (chunk) => {
+      pageChunks.map(async (chunk, index) => {
         // Create embedding for the chunk
         const embedding = await createEmbedding(chunk.content, TaskType.RETRIEVAL_DOCUMENT);
         
         // Generate title and summary
-        let title = `Page ${chunk.pageNumber} - Chunk ${chunk.chunkNumber + 1}`;
+        let title = '';
         let summary = '';
+        
+        // Use provided document title for all chunks
+        if (documentTitle) {
+          title = documentTitle;
+        }
         
         if (fullConfig.generateTitles || fullConfig.generateSummaries) {
           const { generatedTitle, generatedSummary } = await generateChunkMetadata(
@@ -126,7 +131,11 @@ export async function chunkDocument(
             fullConfig.generateSummaries
           );
           
-          if (generatedTitle) title = generatedTitle;
+          // Only use generated title if no user-provided title exists
+          if (generatedTitle && !documentTitle) {
+            title = generatedTitle;
+          }
+          
           if (generatedSummary) summary = generatedSummary;
         }
         

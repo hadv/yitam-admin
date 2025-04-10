@@ -31,8 +31,9 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
   const [error, setError] = useState<string | null>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [selectedDomains, setSelectedDomains] = useState<string[]>([])
+  const [documentTitle, setDocumentTitle] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [currentStep, setCurrentStep] = useState(1) // 1: Select document, 2: Select domains, 3: Review & Submit
+  const [currentStep, setCurrentStep] = useState(1) // 1: Select document, 2: Configure, 3: Review & Submit
 
   const handleDomainChange = (domain: string) => {
     setSelectedDomains(prev => 
@@ -47,7 +48,10 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
 
     const file = acceptedFiles[0]
     setSelectedFile(file)
-    setCurrentStep(2) // Move to domain selection step after file selection
+    // Suggest a document title based on filename
+    const fileName = file.name.split('.')[0] // Remove extension
+    setDocumentTitle(fileName)
+    setCurrentStep(2) // Move to configuration step after file selection
   }, [])
   
   const handleSubmit = async () => {
@@ -61,6 +65,11 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
       const formData = new FormData()
       formData.append('document', selectedFile)
       formData.append('domains', JSON.stringify(selectedDomains))
+      
+      // Add document title
+      if (documentTitle) {
+        formData.append('documentTitle', documentTitle)
+      }
 
       await axios.post('/api/documents/upload', formData, {
         headers: {
@@ -78,6 +87,7 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
       // Reset form
       setSelectedFile(null)
       setSelectedDomains([])
+      setDocumentTitle('')
       setCurrentStep(1)
     } catch (err) {
       if (axios.isAxiosError(err) && err.response) {
@@ -120,7 +130,7 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
           <div className={`flex-1 h-0.5 self-center ${currentStep >= 2 ? 'bg-blue-600' : 'bg-gray-300'}`}></div>
           <div className={`flex flex-col items-center ${currentStep >= 2 ? 'text-blue-600' : 'text-gray-400'}`}>
             <div className={`w-8 h-8 flex items-center justify-center rounded-full border-2 ${currentStep >= 2 ? 'border-blue-600 bg-blue-100' : 'border-gray-300'}`}>2</div>
-            <span className="text-xs mt-1">Select Domains</span>
+            <span className="text-xs mt-1">Configure</span>
           </div>
           <div className={`flex-1 h-0.5 self-center ${currentStep >= 3 ? 'bg-blue-600' : 'bg-gray-300'}`}></div>
           <div className={`flex flex-col items-center ${currentStep >= 3 ? 'text-blue-600' : 'text-gray-400'}`}>
@@ -151,7 +161,7 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
         </div>
       )}
 
-      {/* Step 2: Select domains */}
+      {/* Step 2: Configure title and domains */}
       {currentStep === 2 && (
         <div className="p-4">
           <div className="mb-4">
@@ -160,6 +170,21 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
               <FiFile className="text-blue-500 mr-2" />
               <span className="text-sm">{selectedFile?.name}</span>
             </div>
+          </div>
+          
+          <div className="mb-4">
+            <h3 className="font-medium mb-2">Document Title:</h3>
+            <input
+              type="text"
+              value={documentTitle}
+              onChange={(e) => setDocumentTitle(e.target.value)}
+              className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50 py-2"
+              placeholder="Enter a title for your document"
+              disabled={isUploading}
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              This title will be used for all chunks of your document
+            </p>
           </div>
           
           <h3 className="font-medium mb-2">Select Domains:</h3>
@@ -219,6 +244,13 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
           </div>
           
           <div className="mb-4">
+            <div className="text-sm font-medium text-gray-700">Document Title:</div>
+            <div className="bg-gray-100 p-3 rounded">
+              <span className="text-sm">{documentTitle || "(No title provided)"}</span>
+            </div>
+          </div>
+          
+          <div className="mb-4">
             <div className="text-sm font-medium text-gray-700">Selected Domains ({selectedDomains.length}):</div>
             {selectedDomains.length > 0 ? (
               <div className="bg-gray-100 p-3 rounded">
@@ -251,7 +283,13 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
             </div>
           )}
           
-          <div className="mt-4 flex justify-between">
+          {error && (
+            <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+              {error}
+            </div>
+          )}
+          
+          <div className="flex justify-between">
             <button 
               onClick={goBack} 
               className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
@@ -261,18 +299,12 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
             </button>
             <button 
               onClick={handleSubmit} 
-              className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
+              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={isUploading}
             >
-              {isUploading ? 'Uploading...' : 'Submit Document'}
+              {isUploading ? 'Uploading...' : 'Upload Document'}
             </button>
           </div>
-        </div>
-      )}
-
-      {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 m-4 rounded">
-          {error}
         </div>
       )}
     </div>

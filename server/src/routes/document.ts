@@ -45,10 +45,7 @@ const upload = multer({
 });
 
 // Routes
-router.post('/upload', upload.single('document'), documentController.uploadDocument);
-router.get('/', documentController.getDocuments);
+router.post('/upload', upload.single('document'), documentController.parseAndStoreDocument);
 router.get('/search', documentController.searchDocuments);
-router.get('/:documentName/chunks', documentController.getDocumentChunks);
-router.delete('/:documentName', documentController.deleteDocument);
 
 export default router; 
