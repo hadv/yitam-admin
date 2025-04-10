@@ -2,6 +2,7 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
 import { FallbackService } from './fallback-service';
 import { DocumentChunk } from '../services/chunking';
+import { v4 as uuidv4 } from 'uuid';
 
 // Load environment variables
 dotenv.config();
@@ -102,19 +103,21 @@ export class DatabaseService {
         if (documents.length === 0) return;
         
         // Prepare points for bulk insertion
-        const points = documents.map(doc => ({
-          id: doc.id,
-          vector: doc.embedding,
-          payload: {
-            id: doc.id,
-            documentName: doc.documentName,
-            content: doc.content,
-            title: doc.title,
-            summary: doc.summary,
-            sourceFile: doc.sourceFile,
-            domains: doc.domains
-          }
-        }));
+        const points = documents.map(doc => {
+          return {
+            id: uuidv4(),
+            vector: doc.embedding,
+            payload: {
+              id: doc.id,
+              documentName: doc.documentName,
+              content: doc.content,
+              title: doc.title,
+              summary: doc.summary,
+              sourceFile: doc.sourceFile,
+              domains: doc.domains
+            }
+          };
+        });
         
         // Insert documents
         await this.qdrantClient.upsert(COLLECTION_NAME, {
