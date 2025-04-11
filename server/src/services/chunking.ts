@@ -31,16 +31,18 @@ export interface ChunkingConfig {
   chunkOverlap: number;
   generateTitles: boolean;
   generateSummaries: boolean;
-  respectBoundaries: boolean; // Added for sentence/paragraph boundaries
+  respectBoundaries: boolean; // Whether to use boundary-aware chunking
+  preserveHeadings: boolean;  // Whether to keep headings with their content
 }
 
 // Default chunking configuration
 const DEFAULT_CHUNKING_CONFIG: ChunkingConfig = {
-  chunksPerPage: 3, // Each page gets 3 chunks
+  chunksPerPage: 2, // Each page gets 2 chunks (changed from 3)
   chunkOverlap: 0.2, // 20% overlap between chunks
   generateTitles: true,
   generateSummaries: true,
-  respectBoundaries: true // Default to respecting boundaries
+  respectBoundaries: true, // Default to respecting boundaries
+  preserveHeadings: true    // Default to preserving headings with their content
 };
 
 /**
@@ -88,14 +90,21 @@ export async function chunkDocument(
     
     if (fullConfig.respectBoundaries) {
       // Use the boundary-aware chunking approach
+      console.log(`Using boundary-aware chunking for page ${page.pageNumber} with preserveHeadings=${fullConfig.preserveHeadings}`);
       const chunks = createBoundaryAwareChunks(
         pageContent, 
         fullConfig.chunksPerPage, 
         chunkSize, 
-        overlap
+        overlap,
+        fullConfig.preserveHeadings
       );
       
+      console.log(`Created ${chunks.length} boundary-aware chunks for page ${page.pageNumber}`);
+      
       chunks.forEach((content, i) => {
+        // Log first 50 chars of each chunk to help with debugging
+        console.log(`Chunk ${i} starts with: "${content.substring(0, 50).replace(/\n/g, ' ')}..."`);
+        
         // Create chunk ID: documentName_pageXXX_chunkY
         const id = `${documentName}_page${page.pageNumber.toString().padStart(3, '0')}_chunk${i}`;
         
@@ -182,95 +191,163 @@ export async function chunkDocument(
 }
 
 /**
- * Create chunks that respect sentence and paragraph boundaries
+ * Create chunks that respect headings, paragraph, and sentence boundaries
  * 
  * @param text The text to chunk
  * @param maxChunks Maximum number of chunks to create
  * @param targetSize Target size for each chunk
  * @param overlap Overlap size in characters
+ * @param preserveHeadings Whether to prioritize keeping headings with their content
  * @returns Array of text chunks with boundaries preserved
  */
 function createBoundaryAwareChunks(
   text: string,
   maxChunks: number,
   targetSize: number,
-  overlap: number
+  overlap: number,
+  preserveHeadings: boolean = true
 ): string[] {
-  // Split text into semantic units (paragraphs first, then sentences)
-  const paragraphs = text.split(/\n\s*\n/); // Split by empty lines
-  
-  // Collect all semantic units (paragraphs, then sentences if needed)
-  const semanticUnits: string[] = [];
-  
-  for (const paragraph of paragraphs) {
-    if (paragraph.trim().length === 0) continue;
+  // Helper function to check if text is a heading
+  const isHeading = (text: string): boolean => {
+    // Check for markdown headings (e.g., # Heading, ## Heading, etc.)
+    if (/^#{1,6}\s+.+/m.test(text)) return true;
     
-    // If paragraph is very large, split into sentences
-    if (paragraph.length > targetSize * 1.5) {
-      // Split by sentence boundaries (period, question mark, exclamation followed by space or newline)
-      const sentences = paragraph.split(/(?<=[.!?])\s+/);
-      sentences.forEach(sentence => {
-        if (sentence.trim().length > 0) {
-          semanticUnits.push(sentence.trim());
-        }
-      });
+    // Check for uppercase headings with no punctuation (common in PDFs)
+    if (/^[A-Z][A-Z\s]{4,}$/.test(text) && !text.includes('.')) return true;
+    
+    // Check for numeric section headings (e.g., "1.2.3 Section Name")
+    if (/^\d+(\.\d+)*\s+[A-Z]/.test(text)) return true;
+    
+    return false;
+  };
+  
+  // Helper to determine if a paragraph is a list item
+  const isListItem = (text: string): boolean => {
+    return /^\s*(\d+\.|[*\-•]|\([a-zA-Z0-9]+\))\s+/.test(text);
+  };
+
+  // Split text into paragraphs first
+  const rawParagraphs = text.split(/\n\s*\n/);
+  
+  // Process paragraphs to identify headings and their content
+  const structuredContent: Array<{type: 'heading' | 'paragraph' | 'list-item', content: string}> = [];
+  
+  for (let i = 0; i < rawParagraphs.length; i++) {
+    const paragraph = rawParagraphs[i].trim();
+    if (!paragraph) continue;
+    
+    if (isHeading(paragraph)) {
+      structuredContent.push({ type: 'heading', content: paragraph });
+    } else if (isListItem(paragraph)) {
+      structuredContent.push({ type: 'list-item', content: paragraph });
     } else {
-      semanticUnits.push(paragraph.trim());
+      structuredContent.push({ type: 'paragraph', content: paragraph });
     }
   }
   
-  // Create chunks from semantic units
+  // Create chunks that preserve structure
   const chunks: string[] = [];
   let currentChunk = '';
+  let lastHeadingIndex = -1;
   
-  for (let i = 0; i < semanticUnits.length; i++) {
-    const unit = semanticUnits[i];
+  for (let i = 0; i < structuredContent.length; i++) {
+    const item = structuredContent[i];
+    const isItemHeading = item.type === 'heading';
     
-    // If adding this unit would exceed target size and we already have content,
-    // finish current chunk and start a new one
-    if (currentChunk.length > 0 && 
-        (currentChunk.length + unit.length > targetSize) && 
-        (chunks.length < maxChunks - 1)) {
-      chunks.push(currentChunk);
-      
-      // Start new chunk with overlap if possible
-      if (currentChunk.length > overlap) {
-        // Find the nearest sentence boundary within the overlap region
-        const overlapText = currentChunk.slice(-overlap);
-        const sentenceBoundaryMatch = overlapText.match(/(?<=[.!?])\s+/g);
-        
-        if (sentenceBoundaryMatch && sentenceBoundaryMatch.length > 0) {
-          // Get the position of the last sentence boundary in the overlap
-          const lastIndex = overlapText.lastIndexOf(sentenceBoundaryMatch[sentenceBoundaryMatch.length - 1]);
-          if (lastIndex !== -1) {
-            // Start with text after the last sentence boundary in the overlap
-            currentChunk = currentChunk.slice(currentChunk.length - overlap + lastIndex + sentenceBoundaryMatch[sentenceBoundaryMatch.length - 1].length);
-          } else {
-            currentChunk = currentChunk.slice(-overlap);
-          }
-        } else {
-          currentChunk = currentChunk.slice(-overlap);
-        }
-      } else {
-        currentChunk = '';
-      }
+    // Keep track of the last heading we've seen
+    if (isItemHeading) {
+      lastHeadingIndex = i;
     }
     
-    // Add current unit to the chunk
-    if (currentChunk.length > 0) {
-      currentChunk += ' ' + unit;
+    // Check if adding this item would exceed target size (with special handling for headings)
+    const wouldExceedSize = currentChunk.length > 0 && 
+                           (currentChunk.length + item.content.length > targetSize) &&
+                           (chunks.length < maxChunks - 1);
+
+    // When we need to start a new chunk
+    if (wouldExceedSize) {
+      // If we have a currentChunk, push it to chunks
+      chunks.push(currentChunk);
+      
+      // Special case: if we just ended a chunk and now have a heading, start fresh
+      if (isItemHeading) {
+        currentChunk = item.content;
+        continue;
+      }
+      
+      // Special case: if preserveHeadings is enabled and this item belongs to the previous heading
+      if (preserveHeadings && lastHeadingIndex >= 0) {
+        const prevHeadingContent = structuredContent[lastHeadingIndex].content;
+        if (i - lastHeadingIndex < 3 && // Close to its heading
+            prevHeadingContent.length + item.content.length < targetSize * 0.7) { // Would fit with just the heading
+          // Include the previous heading with this item
+          currentChunk = prevHeadingContent + '\n\n' + item.content;
+          continue;
+        }
+      } else if (lastHeadingIndex >= 0 && 
+         i - lastHeadingIndex < 3 && // Close to its heading
+         structuredContent[lastHeadingIndex].content.length + item.content.length < targetSize * 0.7) { // Would fit with just the heading
+        // Include the previous heading with this item (old behavior)
+        currentChunk = structuredContent[lastHeadingIndex].content + '\n\n' + item.content;
+        continue;
+      }
+      
+      // Regular overlap case
+      if (currentChunk.length > overlap * 2) {
+        // Try to find a paragraph boundary for the overlap
+        const paragraphs = currentChunk.split(/\n\s*\n/);
+        if (paragraphs.length > 1) {
+          // Take the last paragraph if it's not too long
+          const lastParagraph = paragraphs[paragraphs.length - 1];
+          if (lastParagraph.length < overlap * 1.5) {
+            currentChunk = lastParagraph + '\n\n' + item.content;
+            continue;
+          }
+        }
+        
+        // If no good paragraph boundary, try sentences
+        const overlapText = currentChunk.slice(-overlap * 2);
+        const sentenceBoundaries = [...overlapText.matchAll(/(?<=[.!?])\s+/g)];
+        
+        if (sentenceBoundaries.length > 0) {
+          // Find the last complete sentence in the overlap region
+          const lastBoundaryIndex = sentenceBoundaries[sentenceBoundaries.length - 1].index;
+          if (lastBoundaryIndex !== undefined) {
+            const overlapPoint = overlapText.length - (overlapText.length - lastBoundaryIndex - sentenceBoundaries[sentenceBoundaries.length - 1][0].length);
+            currentChunk = overlapText.slice(overlapPoint) + (overlapText.slice(overlapPoint).endsWith('\n\n') ? '' : '\n\n') + item.content;
+            continue;
+          }
+        }
+      }
+      
+      // If no good boundary found, just start fresh with current item
+      currentChunk = item.content;
     } else {
-      currentChunk = unit;
+      // Add the item to the current chunk
+      if (currentChunk) {
+        // Ensure proper spacing between items
+        if (isItemHeading && !currentChunk.endsWith('\n\n')) {
+          currentChunk += '\n\n' + item.content;
+        } else if (item.type === 'list-item' && !currentChunk.endsWith('\n')) {
+          currentChunk += '\n' + item.content;
+        } else {
+          currentChunk += '\n\n' + item.content;
+        }
+      } else {
+        currentChunk = item.content;
+      }
     }
   }
   
   // Add the last chunk if it has content
-  if (currentChunk.length > 0) {
+  if (currentChunk) {
     chunks.push(currentChunk);
   }
   
-  // Ensure we don't exceed max chunks
-  return chunks.slice(0, maxChunks);
+  // Final cleanup - ensure we don't exceed max chunks, and trim excessive whitespace
+  return chunks.slice(0, maxChunks).map(chunk => 
+    chunk.replace(/\n{3,}/g, '\n\n').trim()
+  );
 }
 
 /**
