@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import axios from 'axios'
-import { FiUpload, FiFile } from 'react-icons/fi'
+import { FiUpload, FiFile, FiFolder } from 'react-icons/fi'
 
 interface DocumentUploadProps {
   onUploadSuccess: () => void
@@ -9,6 +9,7 @@ interface DocumentUploadProps {
 
 // List of available domains
 const availableDomains = [
+  'nội kinh',
   'đông y',
   'y học cổ truyền',
   'y tông tâm lĩnh',
@@ -33,6 +34,8 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
   const [selectedDomains, setSelectedDomains] = useState<string[]>([])
   const [documentTitle, setDocumentTitle] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
+  const [uploadMode, setUploadMode] = useState<'single' | 'folder'>('single')
   const [currentStep, setCurrentStep] = useState(1) // 1: Select document, 2: Configure, 3: Review & Submit
 
   const handleDomainChange = (domain: string) => {
@@ -46,16 +49,67 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
   const onDrop = useCallback((acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return
 
-    const file = acceptedFiles[0]
-    setSelectedFile(file)
-    // Suggest a document title based on filename
-    const fileName = file.name.split('.')[0] // Remove extension
-    setDocumentTitle(fileName)
+    if (uploadMode === 'single') {
+      const file = acceptedFiles[0]
+      setSelectedFile(file)
+      // Suggest a document title based on filename
+      const fileName = file.name.split('.')[0] // Remove extension
+      setDocumentTitle(fileName)
+      setSelectedFiles([])
+    } else {
+      // Filter only image files for folder upload
+      const imageFiles = acceptedFiles.filter(file => 
+        file.type.startsWith('image/')
+      )
+      
+      if (imageFiles.length === 0) {
+        setError('No image files found. Please upload PNG, JPEG, or TIFF files.')
+        return
+      }
+      
+      setSelectedFiles(imageFiles)
+      setSelectedFile(null)
+      
+      // Set document title based on common prefix of filenames if possible
+      if (imageFiles.length > 0) {
+        const baseNames = imageFiles.map(file => file.name.split('-')[0])
+        const mostCommonPrefix = findMostCommonPrefix(baseNames)
+        setDocumentTitle(mostCommonPrefix || 'Scanned Document')
+      }
+    }
+    
     setCurrentStep(2) // Move to configuration step after file selection
-  }, [])
+  }, [uploadMode])
+  
+  // Helper function to find the most common prefix from an array of strings
+  const findMostCommonPrefix = (strings: string[]): string => {
+    if (strings.length === 0) return '';
+    
+    // Count occurrences of each prefix
+    const prefixCounts = new Map<string, number>();
+    for (const str of strings) {
+      const prefix = str.trim();
+      if (prefix) {
+        prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1);
+      }
+    }
+    
+    // Find the most common prefix
+    let mostCommonPrefix = '';
+    let maxCount = 0;
+    for (const [prefix, count] of prefixCounts.entries()) {
+      if (count > maxCount) {
+        mostCommonPrefix = prefix;
+        maxCount = count;
+      }
+    }
+    
+    return mostCommonPrefix;
+  };
   
   const handleSubmit = async () => {
-    if (!selectedFile) return
+    if (uploadMode === 'single' && !selectedFile) return
+    if (uploadMode === 'folder' && selectedFiles.length === 0) return
     
     setIsUploading(true)
     setError(null)
@@ -63,7 +117,16 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
 
     try {
       const formData = new FormData()
-      formData.append('document', selectedFile)
+      
+      if (uploadMode === 'single') {
+        formData.append('document', selectedFile as File)
+      } else {
+        // For folder upload, append all files
+        selectedFiles.forEach((file) => {
+          formData.append('documents', file)
+        })
+      }
+      
       formData.append('domains', JSON.stringify(selectedDomains))
       
       // Add document title
@@ -71,7 +134,11 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
         formData.append('documentTitle', documentTitle)
       }
 
-      await axios.post('/api/documents/upload', formData, {
+      const endpoint = uploadMode === 'single' 
+        ? '/api/documents/upload' 
+        : '/api/documents/upload-folder'
+
+      await axios.post(endpoint, formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         },
@@ -86,6 +153,7 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
       onUploadSuccess()
       // Reset form
       setSelectedFile(null)
+      setSelectedFiles([])
       setSelectedDomains([])
       setDocumentTitle('')
       setCurrentStep(1)
@@ -103,12 +171,18 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      'application/pdf': ['.pdf'],
-      'text/plain': ['.txt'],
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-    },
-    maxFiles: 1,
+    accept: uploadMode === 'single' 
+      ? {
+          'application/pdf': ['.pdf'],
+          'text/plain': ['.txt'],
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+        }
+      : {
+          'image/png': ['.png'],
+          'image/jpeg': ['.jpg', '.jpeg'],
+          'image/tiff': ['.tiff', '.tif'],
+        },
+    maxFiles: uploadMode === 'single' ? 1 : 50,
     disabled: isUploading || currentStep !== 1
   })
 
@@ -140,6 +214,42 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
         </div>
       </div>
 
+      {/* Upload mode selection */}
+      {currentStep === 1 && (
+        <div className="px-4 pb-4">
+          <div className="flex space-x-4 mb-4">
+            <button
+              type="button"
+              onClick={() => setUploadMode('single')}
+              className={`flex-1 py-2 px-4 rounded-md ${
+                uploadMode === 'single' 
+                  ? 'bg-blue-600 text-white' 
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              <div className="flex items-center justify-center">
+                <FiFile className="mr-2" />
+                <span>Single Document</span>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setUploadMode('folder')}
+              className={`flex-1 py-2 px-4 rounded-md ${
+                uploadMode === 'folder' 
+                  ? 'bg-blue-600 text-white' 
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              <div className="flex items-center justify-center">
+                <FiFolder className="mr-2" />
+                <span>Image Folder</span>
+              </div>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Step 1: Select document */}
       {currentStep === 1 && (
         <div
@@ -149,14 +259,28 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
           <input {...getInputProps()} />
           <div className="flex flex-col items-center justify-center p-6">
             <div className="mb-4 text-blue-500">
-              {isDragActive ? <FiFile size={48} /> : <FiUpload size={48} />}
+              {isDragActive 
+                ? uploadMode === 'single' ? <FiFile size={48} /> : <FiFolder size={48} />
+                : <FiUpload size={48} />
+              }
             </div>
             <p className="text-lg font-medium">
-              {isDragActive ? 'Drop the document here' : 'Drag & drop a document here'}
+              {isDragActive 
+                ? uploadMode === 'single' ? 'Drop the document here' : 'Drop the image files here'
+                : uploadMode === 'single' ? 'Drag & drop a document here' : 'Drag & drop multiple image files here'
+              }
             </p>
             <p className="text-sm text-gray-500 mt-1">
-              or click to browse (PDF, TXT, DOCX)
+              {uploadMode === 'single' 
+                ? 'or click to browse (PDF, TXT, DOCX)'
+                : 'or click to browse (PNG, JPEG, TIFF)'
+              }
             </p>
+            {uploadMode === 'folder' && (
+              <p className="text-xs text-gray-400 mt-1">
+                For best results, use filenames with page numbers (e.g., document-001.png)
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -165,11 +289,31 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
       {currentStep === 2 && (
         <div className="p-4">
           <div className="mb-4">
-            <h3 className="font-medium mb-2">Selected Document:</h3>
-            <div className="bg-gray-100 p-3 rounded flex items-center">
-              <FiFile className="text-blue-500 mr-2" />
-              <span className="text-sm">{selectedFile?.name}</span>
-            </div>
+            <h3 className="font-medium mb-2">
+              {uploadMode === 'single' ? 'Selected Document:' : 'Selected Image Files:'}
+            </h3>
+            {uploadMode === 'single' && selectedFile && (
+              <div className="bg-gray-100 p-3 rounded flex items-center">
+                <FiFile className="text-blue-500 mr-2" />
+                <span className="text-sm">{selectedFile?.name}</span>
+              </div>
+            )}
+            {uploadMode === 'folder' && (
+              <div className="bg-gray-100 p-3 rounded">
+                <div className="flex items-center mb-2">
+                  <FiFolder className="text-blue-500 mr-2" />
+                  <span className="text-sm font-medium">{selectedFiles.length} image files</span>
+                </div>
+                <div className="max-h-20 overflow-y-auto text-xs">
+                  {selectedFiles.slice(0, 5).map((file, index) => (
+                    <div key={index} className="text-gray-600">{file.name}</div>
+                  ))}
+                  {selectedFiles.length > 5 && (
+                    <div className="text-gray-500">...and {selectedFiles.length - 5} more</div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
           
           <div className="mb-4">
@@ -200,29 +344,29 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
                     onChange={() => handleDomainChange(domain)}
                     disabled={isUploading}
                   />
-                  <label htmlFor={`domain-${domain}`} className="ml-2 text-sm text-gray-700">
+                  <label 
+                    htmlFor={`domain-${domain}`} 
+                    className="ml-2 text-sm text-gray-700 cursor-pointer"
+                  >
                     {domain}
                   </label>
                 </div>
               ))}
             </div>
           </div>
-          {selectedDomains.length > 0 && (
-            <div className="mt-2 text-sm text-gray-600">
-              Selected: {selectedDomains.length} domain{selectedDomains.length !== 1 ? 's' : ''}
-            </div>
-          )}
           
-          <div className="mt-4 flex justify-between">
-            <button 
-              onClick={goBack} 
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+          <div className="mt-6 flex space-x-2">
+            <button
+              onClick={goBack}
+              className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
+              disabled={isUploading}
             >
               Back
             </button>
-            <button 
-              onClick={() => setCurrentStep(3)} 
-              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+            <button
+              onClick={() => setCurrentStep(3)}
+              className="px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              disabled={isUploading}
             >
               Continue
             </button>
@@ -230,79 +374,74 @@ const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
         </div>
       )}
 
-      {/* Step 3: Review & Submit */}
+      {/* Step 3: Review and Submit */}
       {currentStep === 3 && (
         <div className="p-4">
-          <h3 className="font-medium mb-2">Review Your Submission:</h3>
+          <h3 className="font-medium mb-4">Review and Submit</h3>
           
-          <div className="mb-4">
-            <div className="text-sm font-medium text-gray-700">Document:</div>
-            <div className="bg-gray-100 p-3 rounded flex items-center">
-              <FiFile className="text-blue-500 mr-2" />
-              <span className="text-sm">{selectedFile?.name}</span>
+          <div className="bg-gray-50 p-4 rounded-md mb-4">
+            <div className="mb-2">
+              <span className="text-sm font-medium">Document Type:</span>
+              <span className="text-sm ml-2">
+                {uploadMode === 'single' ? 'Single Document' : 'Image Folder'}
+              </span>
+            </div>
+            <div className="mb-2">
+              <span className="text-sm font-medium">Title:</span>
+              <span className="text-sm ml-2">{documentTitle || 'Untitled'}</span>
+            </div>
+            <div className="mb-2">
+              <span className="text-sm font-medium">Selected files:</span>
+              <span className="text-sm ml-2">
+                {uploadMode === 'single' ? selectedFile?.name : `${selectedFiles.length} image files`}
+              </span>
+            </div>
+            <div>
+              <span className="text-sm font-medium">Domains:</span>
+              <span className="text-sm ml-2">
+                {selectedDomains.length > 0 
+                  ? selectedDomains.join(', ') 
+                  : 'Default'
+                }
+              </span>
             </div>
           </div>
-          
-          <div className="mb-4">
-            <div className="text-sm font-medium text-gray-700">Document Title:</div>
-            <div className="bg-gray-100 p-3 rounded">
-              <span className="text-sm">{documentTitle || "(No title provided)"}</span>
-            </div>
-          </div>
-          
-          <div className="mb-4">
-            <div className="text-sm font-medium text-gray-700">Selected Domains ({selectedDomains.length}):</div>
-            {selectedDomains.length > 0 ? (
-              <div className="bg-gray-100 p-3 rounded">
-                <div className="flex flex-wrap gap-2">
-                  {selectedDomains.map(domain => (
-                    <span key={domain} className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded">
-                      {domain}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="bg-gray-100 p-3 rounded text-sm text-gray-500">
-                No domains selected
-              </div>
-            )}
-          </div>
-          
-          {isUploading && (
-            <div className="mb-4">
-              <div className="flex items-center justify-center">
-                <div className="mr-2 text-blue-500">
-                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                </div>
-                <p className="text-sm text-gray-600">Uploading... {uploadProgress}%</p>
-              </div>
-            </div>
-          )}
           
           {error && (
-            <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+            <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-md">
               {error}
             </div>
           )}
           
-          <div className="flex justify-between">
-            <button 
-              onClick={goBack} 
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+          {isUploading && (
+            <div className="mb-4">
+              <div className="flex justify-between text-sm mb-1">
+                <span>Uploading...</span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div 
+                  className="bg-blue-600 h-2 rounded-full" 
+                  style={{ width: `${uploadProgress}%` }}
+                ></div>
+              </div>
+            </div>
+          )}
+          
+          <div className="flex space-x-2">
+            <button
+              onClick={goBack}
+              className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
               disabled={isUploading}
             >
               Back
             </button>
-            <button 
-              onClick={handleSubmit} 
-              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            <button
+              onClick={handleSubmit}
+              className="px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors"
               disabled={isUploading}
             >
-              {isUploading ? 'Uploading...' : 'Upload Document'}
+              {isUploading ? 'Uploading...' : 'Submit'}
             </button>
           </div>
         </div>
