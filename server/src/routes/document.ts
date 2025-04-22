@@ -28,13 +28,17 @@ const fileFilter = (req: Express.Request, file: Express.Multer.File, cb: multer.
   const allowedFileTypes = [
     'application/pdf',
     'text/plain',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'image/png',
+    'image/jpeg',
+    'image/jpg',
+    'image/tiff'
   ];
   
   if (allowedFileTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('File type not supported. Please upload PDF, TXT, or DOCX files.'));
+    cb(new Error('File type not supported. Please upload PDF, TXT, DOCX, or image files (PNG, JPEG, TIFF).'));
   }
 };
 
@@ -46,6 +50,7 @@ const upload = multer({
 
 // Routes
 router.post('/upload', upload.single('document'), documentController.parseAndStoreDocument);
+router.post('/upload-folder', upload.array('documents', 50), documentController.parseAndStoreImageFolder);
 router.get('/search', documentController.searchDocuments);
 
 export default router; 
