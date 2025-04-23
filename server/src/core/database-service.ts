@@ -21,6 +21,7 @@ export interface SearchResult {
   id: string;
   documentName: string;
   content: string;
+  enhancedContent?: string;
   title?: string;
   summary?: string;
   sourceFile?: string;
@@ -111,6 +112,7 @@ export class DatabaseService {
               id: doc.id,
               documentName: doc.documentName,
               content: doc.content,
+              enhancedContent: doc.enhancedContent,
               title: doc.title,
               summary: doc.summary,
               sourceFile: doc.sourceFile,
@@ -164,6 +166,7 @@ export class DatabaseService {
               id: doc.id,
               documentName: doc.documentName,
               content: doc.content,
+              enhancedContent: doc.enhancedContent,
               title: doc.title,
               summary: doc.summary,
               sourceFile: doc.sourceFile,
@@ -189,6 +192,7 @@ export class DatabaseService {
             id: payload.id,
             documentName: payload.documentName,
             content: payload.content,
+            enhancedContent: payload.enhancedContent,
             title: payload.title,
             summary: payload.summary,
             sourceFile: payload.sourceFile,

@@ -3,6 +3,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { createEmbedding } from './embedding';
 import path from 'path';
+import { enhanceContent, EnhancementType } from './content-enhancement';
 
 // Load environment variables
 dotenv.config();
@@ -18,6 +19,7 @@ export interface DocumentChunk {
   id: string;
   documentName: string;
   content: string;
+  enhancedContent?: string;
   embedding: number[];
   title: string;
   summary: string;
@@ -31,6 +33,7 @@ export interface ChunkingConfig {
   chunkOverlap: number;
   generateTitles: boolean;
   generateSummaries: boolean;
+  enhanceContent: boolean;  // Whether to use AI to enhance content
   respectBoundaries: boolean; // Whether to use boundary-aware chunking
   preserveHeadings: boolean;  // Whether to keep headings with their content
 }
@@ -41,6 +44,7 @@ const DEFAULT_CHUNKING_CONFIG: ChunkingConfig = {
   chunkOverlap: 0.2, // 20% overlap between chunks
   generateTitles: true,
   generateSummaries: true,
+  enhanceContent: true, // Default to enhancing content
   respectBoundaries: true, // Default to respecting boundaries
   preserveHeadings: true    // Default to preserving headings with their content
 };
@@ -303,6 +307,69 @@ export async function chunkDocument(
     await generateChunkMetadata(chunks, fullConfig);
   } else {
     console.log(`⏭️ Skipping title/summary generation as requested in config`);
+  }
+  
+  // Enhance content if enabled
+  if (fullConfig.enhanceContent && chunks.length > 0) {
+    console.log(`✨ Enhancing content for ${chunks.length} chunks...`);
+    
+    // Process chunks in batches to avoid API rate limits
+    const batchSize = 3;
+    const batchCount = Math.ceil(chunks.length / batchSize);
+    
+    for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
+      const batchStart = batchIndex * batchSize;
+      const batchEnd = Math.min((batchIndex + 1) * batchSize, chunks.length);
+      const currentBatch = chunks.slice(batchStart, batchEnd);
+      
+      console.log(`Processing enhancement batch ${batchIndex + 1}/${batchCount} (chunks ${batchStart + 1}-${batchEnd})`);
+      
+      // Process each chunk in the batch
+      for (const chunk of currentBatch) {
+        try {
+          // Determine the appropriate enhancement types based on domains
+          const enhancementTypes = [
+            EnhancementType.FORMATTING,
+            EnhancementType.READABILITY
+          ];
+          
+          // If domain is technical, add explanation
+          if (domains.some(d => d.toLowerCase().includes('technical') || d.toLowerCase().includes('science'))) {
+            enhancementTypes.push(EnhancementType.EXPLANATION);
+          }
+          
+          // If domain is educational, add structure
+          if (domains.some(d => d.toLowerCase().includes('educational') || d.toLowerCase().includes('training'))) {
+            enhancementTypes.push(EnhancementType.STRUCTURE);
+          }
+          
+          // Enhance content
+          const enhancedChunk = await enhanceContent(chunk, {
+            types: enhancementTypes,
+            domain: domains[0] // Use first domain as primary domain
+          });
+          
+          // Update the chunk in the original array
+          Object.assign(chunk, enhancedChunk);
+          
+          console.log(`✅ Enhanced content for chunk ${chunk.id}`);
+          
+          // Add a small delay between chunk processing
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+          console.error(`❌ Error enhancing content for chunk ${chunk.id}:`, error);
+        }
+      }
+      
+      // Add a small delay between batches
+      if (batchIndex < batchCount - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+    }
+    
+    console.log(`✅ Content enhancement complete for ${chunks.length} chunks`);
+  } else {
+    console.log(`⏭️ Skipping content enhancement as requested in config`);
   }
   
   return chunks;
