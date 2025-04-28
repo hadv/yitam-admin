@@ -754,6 +754,9 @@ QUY TẮC QUAN TRỌNG:
 3. KHÔNG thêm hoặc xóa đoạn văn, câu, từ
 4. Giữ nguyên vị trí của các dấu câu và khoảng cách giữa các đoạn
 5. Duy trì chính xác các thuật ngữ y học cổ truyền và triết học
+6. TUYỆT ĐỐI KHÔNG thêm dấu đầu dòng, không thêm bullet points hoặc asterisk (*)
+7. KHÔNG thay đổi định dạng, KHÔNG định dạng lại văn bản, giữ nguyên cấu trúc gốc
+8. KHÔNG đánh số hoặc thêm ký tự đặc biệt trang trí vào văn bản
 
 SỬA CHÍNH XÁC những lỗi này:
 - "huy ế t" → "huyết" (KHÔNG phải "huyếch")
@@ -771,6 +774,10 @@ VÍ DỤ CỤ THỂ:
    Đúng: "Chương 15 LỤC VỊ HOÀN THUYẾT"
    Sai: "Chương 15 Lục Vị Hoàn Thuật"
 
+3. Gốc: "là vị thuốc trong trọc ở trong loại thuốc trong trọc, có tác dụng cứng mạnh gân xương, bệnh nội thương, bệnh gân xương của can thận đều phải dùng nó."
+   Đúng: "là vị thuốc trong trọc ở trong loại thuốc trong trọc, có tác dụng cứng mạnh gân xương, bệnh nội thương, bệnh gân xương của can thận đều phải dùng nó."
+   Sai: "• Là vị thuốc trong trọc: Thuộc loại thuốc trong trọc, có tác dụng cứng mạnh gân xương, chữa bệnh nội thương và bệnh gân xương của can thận."
+
 VĂN BẢN CẦN SỬA:
 ${preProcessedText}
 
@@ -779,8 +786,11 @@ Task: Fix ONLY character and font errors in Vietnamese text.
 DO NOT change paragraph structure or meanings.
 DO NOT add or remove sentences or words.
 DO NOT reorganize the text flow.
+DO NOT add bullet points, asterisks, or any formatting.
+DO NOT reorganize content into lists or add numbering.
+KEEP the exact same text structure as the original.
 Specifically fix "huy ế t" to "huyết" (NOT "huyếch") and "thuy ế t" to "thuyết" (NOT "thuật").
-Return ONLY the corrected text, preserving original structure.)`;
+Return ONLY the corrected text, preserving original structure exactly as provided.)`;
 
       // Call API with retry mechanism
       let retryCount = 0;
@@ -1288,6 +1298,14 @@ Your task is to ensure the current page has complete sentences by fixing truncat
 
 CRITICAL INSTRUCTION: DO NOT TRANSLATE THE TEXT. Keep the text in its original language (Vietnamese). Your task is only to fix sentence boundaries, not to translate.
 
+CRITICAL FORMATTING RULES:
+1. DO NOT add bullet points, asterisks (*), or any formatting to the text
+2. DO NOT reorganize text into lists or add numbering
+3. KEEP the exact same text structure as the original
+4. PRESERVE the exact formatting, paragraph breaks, and layout
+5. DO NOT add section headers or text decoration
+6. If the original text has no bullet points, do not add them
+
 PREVIOUS PAGE: "${prevPageContent.substring(0, Math.min(500, prevPageContent.length))}..."
 
 CURRENT PAGE: "${currentPageContent}"
@@ -1304,6 +1322,7 @@ IMPORTANT: Output must be in the original language (Vietnamese). DO NOT translat
 VIETNAMESE TEXT PROCESSING - DO NOT TRANSLATE TO ANY OTHER LANGUAGE
 ${promptBase}
 YOUR RESPONSE MUST BE IN VIETNAMESE ONLY - NO ENGLISH WORDS ALLOWED
+PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
 `;
 
   try {
