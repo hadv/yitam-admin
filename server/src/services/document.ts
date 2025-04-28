@@ -163,26 +163,118 @@ export const parsePdfByPages = async (filePath: string): Promise<{ pages: { page
     await pdfParse(pdfBuffer, {
       // This function is called for each page
       pagerender: async (pageData: any) => {
-        // Extract text content from the page
-        const content = await pageData.getTextContent();
-        let pageText = '';
-        
-        // Combine all text items on the page
-        for (const item of content.items) {
-          if ('str' in item) {
-            pageText += item.str + ' ';
+        try {
+          // Extract text content from the page with more detailed options
+          const content = await pageData.getTextContent({
+            normalizeWhitespace: false,
+            disableCombineTextItems: false
+          });
+          
+          // Improved text extraction logic for better handling of Vietnamese text
+          let textItems: { 
+            str: string, 
+            x: number, 
+            y: number, 
+            width?: number,
+            height?: number,
+            fontName?: string
+          }[] = [];
+          
+          // Process each text item while preserving position information
+          content.items.forEach((item: any) => {
+            if ('str' in item && item.str.trim()) {
+              textItems.push({
+                str: item.str,
+                x: item.transform[4], // x position
+                y: item.transform[5],  // y position
+                width: item.width,
+                height: item.height,
+                fontName: item.fontName
+              });
+            }
+          });
+          
+          // Sort items by y-position (top to bottom), then by x-position (left to right)
+          textItems.sort((a, b) => {
+            // Use a tolerance value to group items on the same line
+            const yTolerance = 3; // Adjust based on your document's font size
+            if (Math.abs(a.y - b.y) <= yTolerance) {
+              return a.x - b.x; // Same line, sort left to right
+            }
+            return b.y - a.y; // Different lines, sort top to bottom
+          });
+          
+          // Combine text with proper spacing based on positions
+          let pageText = '';
+          let currentY: number | null = null;
+          let currentLineText = '';
+          
+          // Process text items into lines
+          for (let i = 0; i < textItems.length; i++) {
+            const item = textItems[i];
+            
+            // Check if this is a new line
+            if (currentY === null || Math.abs(item.y - currentY) > 3) {
+              // Add the previous line to the page text if it exists
+              if (currentLineText) {
+                pageText += currentLineText + '\n';
+                currentLineText = '';
+              }
+              
+              currentY = item.y;
+              currentLineText = item.str;
+            } else {
+              // Check if we need a space between words
+              const prevItem = textItems[i - 1];
+              
+              // More intelligent space detection using character width
+              const expectedGapWidth = prevItem.width ? prevItem.str.length * (prevItem.width / prevItem.str.length) * 0.3 : 4;
+              const actualGap = item.x - (prevItem.x + (prevItem.width || 0));
+              
+              // Add space if the gap is significant or if last item didn't end with space
+              const spaceNeeded = (actualGap > expectedGapWidth && 
+                               !prevItem.str.endsWith(' ') && 
+                               !item.str.startsWith(' '));
+              
+              currentLineText += (spaceNeeded ? ' ' : '') + item.str;
+            }
           }
+          
+          // Add the last line
+          if (currentLineText) {
+            pageText += currentLineText;
+          }
+          
+          // Fix common Vietnamese ligature issues directly in the PDF parsing
+          const cleanedText = pageText
+            // Fix common Vietnamese OCR errors
+            .replace(/([A-ZÀ-Ỹa-zà-ỹ])\s+([àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹ])/g, '$1$2')
+            .replace(/\b([A-ZÀ-Ỹa-zà-ỹ])\s+([A-ZÀ-Ỹa-zà-ỹ])\s+([A-ZÀ-Ỹa-zà-ỹ])\s+([A-ZÀ-Ỹa-zà-ỹ])\b/g, '$1$2$3$4')
+            .replace(/h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "huyết")
+            .replace(/t\s*h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "thuyết")
+            .replace(/huyếch/gi, "huyết");
+          
+          // Add page to the result
+          pages.push({
+            pageNumber: pageData.pageNumber,
+            content: cleanedText
+          });
+          
+          // Return an empty string as we're storing pages separately
+          return '';
+        } catch (pageError) {
+          console.error(`Error extracting text from page ${pageData.pageNumber}:`, pageError);
+          
+          // Fall back to basic extraction
+          pages.push({
+            pageNumber: pageData.pageNumber,
+            content: pageData.getTextContent ? 
+                     (await pageData.getTextContent()).items.map((item: any) => item.str || '').join(' ') : 
+                     ''
+          });
+          
+          return '';
         }
-        
-        // Clean up text and add to pages array
-        pageText = pageText.replace(/\s+/g, ' ').trim();
-        pages.push({
-          pageNumber: pageData.pageNumber,
-          content: pageText
-        });
-        
-        // Return an empty string as we're storing pages separately
-        return '';
       }
     });
     
@@ -612,123 +704,150 @@ const removeHeadersFooters = (
 };
 
 /**
- * Use LLM to correct OCR errors
+ * Use LLM to correct OCR errors with specific focus on Vietnamese text
  */
 export const correctOcrWithLLM = async (text: string): Promise<string> => {
   if (!text.trim()) return '';
-  if (!GEMINI_API_KEY) return text;
   
   try {
-    // Apply targeted regex fixes for the most common OCR issues before sending to LLM
+    // First, apply targeted regex fixes for the most common Vietnamese OCR errors
     let preProcessedText = text;
     
-    // 1. Fix words with incorrectly attached numbers (e.g., "con21" → "con 21")
-    preProcessedText = preProcessedText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1 $2$3');
+    // FIX SPECIFIC CHARACTER ERRORS WITHOUT CHANGING MEANING
     
-    // 2. Fix words with numbers and punctuation (e.g., "khí17." → "khí 17.")
-    preProcessedText = preProcessedText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])/g, '$1 $2$3');
+    // Fix spacing in Vietnamese diacritics (this is critical)
+    preProcessedText = preProcessedText.replace(/h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "huyết");
+    preProcessedText = preProcessedText.replace(/t\s*h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "thuyết");
+    preProcessedText = preProcessedText.replace(/c\s*h\s*ư\s*([oơ])\s*n\s*g/gi, "chương");
+    preProcessedText = preProcessedText.replace(/h\s*o\s*à\s*n/gi, "hoàn");
+    preProcessedText = preProcessedText.replace(/h\s*u\s*y\s*[eé]\s*[́̀̉̃]?\s*c\s*h/gi, "huyết");
     
-    // 3. Fix numbers in quotes (e.g., "chị" sinh ra3, → "chị" sinh ra 3,)
-    preProcessedText = preProcessedText.replace(/([\"""'][\s\w])([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1$2 $3$4');
+    // Fix specific problem cases
+    preProcessedText = preProcessedText.replace(/huyếch/gi, "huyết");
+    preProcessedText = preProcessedText.replace(/\b(LỤC VỊ HOÀN|Lục Vị Hoàn) Thuật\b/gi, "$1 Thuyết");
     
-    // 4. Fix sentence-ending patterns (e.g., "con21." → "con 21.")
-    preProcessedText = preProcessedText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])(\s|$)/g, '$1 $2$3$4');
-    
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-pro", 
-      generationConfig: {
-        temperature: 0,
-        topP: 0.1,
-        maxOutputTokens: 4096,
-      }
-    });
-    
-    // Prepare prompt for OCR correction with specific examples
-    const prompt = `Correct OCR errors in this Vietnamese text, focusing on these specific patterns:
+    // Get API key - try to use the AI model
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
+    if (!apiKey) {
+      console.warn('⚠️ No AI API key found for OCR correction. Basic regex corrections applied but full correction unavailable.');
+      return preProcessedText;
+    }
 
-1. Words with attached numbers (VERY COMMON ERROR):
-   - "con21" → "con 21"
-   - "khí17" → "khí 17"
-   - "ra3" → "ra 3"
-   - "sinh nở19" → "sinh nở 19"
-   - "dương hỏa nên mới có con21. Đến năm" → "dương hỏa nên mới có con 21. Đến năm"
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-pro", 
+        generationConfig: {
+          temperature: 0,
+          topP: 0.1,
+          maxOutputTokens: 4096,
+        }
+      });
+      
+      // Enhanced prompt for Vietnamese OCR correction with EXACT examples from user
+      const prompt = `
+Nhiệm vụ: Sửa lỗi font chữ và ký tự trong văn bản tiếng Việt.
 
-2. Other OCR issues to fix:
-   - Spacing and line breaks (merge broken lines)
-   - Fix obvious OCR character substitutions
-   - Preserve all factual information and content meaning
+QUY TẮC QUAN TRỌNG:
+1. CHỈ sửa lỗi ký tự bị tách rời và lỗi font (ví dụ: "huy ế t" → "huyết")
+2. KHÔNG thay đổi cấu trúc đoạn văn gốc hay ý nghĩa của văn bản
+3. KHÔNG thêm hoặc xóa đoạn văn, câu, từ
+4. Giữ nguyên vị trí của các dấu câu và khoảng cách giữa các đoạn
+5. Duy trì chính xác các thuật ngữ y học cổ truyền và triết học
 
-3. EXPLANATION: These attached numbers are usually:
-   - Footnote references
-   - Page numbers that got merged during scanning
-   - Line numbers from source documents
-   - Section references
+SỬA CHÍNH XÁC những lỗi này:
+- "huy ế t" → "huyết" (KHÔNG phải "huyếch")
+- "thuy ế t" → "thuyết" (KHÔNG phải "thuật")
+- "t ấ t" → "tất"
+- "trư ớ c" → "trước"
+- "Chư ơng" → "Chương"
 
-TEXT:
+VÍ DỤ CỤ THỂ:
+1. Gốc: "Thoát huy ế t trư ớ c t ấ t ích khí."
+   Đúng: "Thoát huyết trước tất ích khí."
+   Sai: "Thoát huyếch trước tất ích khí."
+
+2. Gốc: "Chư ơng 1 5 L Ụ C V Ị HOÀN THUY Ế T"
+   Đúng: "Chương 15 LỤC VỊ HOÀN THUYẾT"
+   Sai: "Chương 15 Lục Vị Hoàn Thuật"
+
+VĂN BẢN CẦN SỬA:
 ${preProcessedText}
 
-Return ONLY the corrected text with proper spacing between words and numbers.
+(Instructions in English for model understanding:
+Task: Fix ONLY character and font errors in Vietnamese text.
+DO NOT change paragraph structure or meanings.
+DO NOT add or remove sentences or words.
+DO NOT reorganize the text flow.
+Specifically fix "huy ế t" to "huyết" (NOT "huyếch") and "thuy ế t" to "thuyết" (NOT "thuật").
+Return ONLY the corrected text, preserving original structure.)`;
 
-IMPORTANT: DO NOT translate to English. Keep the text in Vietnamese.`;
-    
-    // Create a stronger prompt that emphasizes NOT translating
-    const noTranslatePrompt = `
-IMPORTANT INSTRUCTION - DO NOT TRANSLATE: You must process this Vietnamese text exactly as is, without translating to any other language.
-
-${prompt}
-
-FINAL REMINDER: Your output MUST be in Vietnamese only. Do NOT translate anything to English or any other language.`;
-    
-    // Call Gemini API with the enhanced prompt
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: noTranslatePrompt }] }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 8000,
+      // Call API with retry mechanism
+      let retryCount = 0;
+      const maxRetries = 3;
+      let correctedText = preProcessedText;
+      let currentPrompt = prompt;
+      
+      while (retryCount < maxRetries) {
+        try {
+          const result = await model.generateContent({
+            contents: [{ role: "user", parts: [{ text: currentPrompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 8000,
+            }
+          });
+          
+          correctedText = result.response.text().trim();
+          
+          // Check if corrections are properly applied
+          const hasHuyech = correctedText.includes("huyếch");
+          const hasThuat = /\b(LỤC VỊ HOÀN|Lục Vị Hoàn) Thuật\b/i.test(correctedText);
+          
+          if (hasHuyech || hasThuat) {
+            console.log(`⚠️ AI still produced incorrect corrections (retry ${retryCount + 1}/${maxRetries})`);
+            retryCount++;
+            
+            // Make the prompt more specific on problem areas
+            currentPrompt += `\n\nCHÚ Ý ĐẶC BIỆT: Văn bản vẫn có các lỗi sau cần sửa:
+            ${hasHuyech ? '- "huyếch" phải sửa thành "huyết"' : ''}
+            ${hasThuat ? '- "LỤC VỊ HOÀN Thuật" phải sửa thành "LỤC VỊ HOÀN THUYẾT"' : ''}`;
+            
+            continue;
+          }
+          
+          // Post-process to catch any remaining issues
+          correctedText = correctedText
+            .replace(/huyếch/gi, "huyết")
+            .replace(/\b(LỤC VỊ HOÀN|Lục Vị Hoàn) Thuật\b/gi, "$1 Thuyết");
+          
+          break;
+        } catch (error) {
+          console.error(`❌ API error (attempt ${retryCount + 1}/${maxRetries}):`, error);
+          retryCount++;
+          
+          // Short delay before retrying
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
       }
-    });
-    
-    const correctedText = result.response.text().trim();
-    
-    // Apply final thorough regex fixes for any remaining issues
-    let finalText = correctedText;
-    
-    // More aggressive final pass to catch any remaining issues
-    // 1. General word-number separation (both directions)
-    finalText = finalText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)/g, '$1 $2');
-    finalText = finalText.replace(/(\d+)([a-zà-ỹA-ZÀ-Ỹ])/g, '$1 $2');
-    
-    // 2. Special case for Vietnamese text ending with numbers
-    finalText = finalText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])(\s|$)/g, '$1 $2$3$4');
-    
-    // 3. Handle specific patterns from user examples
-    finalText = finalText.replace(/có con(\d+)/g, 'có con $1');
-    finalText = finalText.replace(/khí(\d+)/g, 'khí $1');
-    finalText = finalText.replace(/ra(\d+),/g, 'ra $1,');
-    finalText = finalText.replace(/sinh nở(\d+)/g, 'sinh nở $1');
-    
-    console.log(`Corrected OCR text: ${finalText.length} characters`);
-    return finalText;
+      
+      // Verify it's not translated and hasn't lost content
+      if (detectTranslationToEnglish(preProcessedText, correctedText) || 
+          correctedText.length < preProcessedText.length * 0.8) {
+        console.warn('❌ AI correction issue detected. Using pre-processed text with regex fixes instead.');
+        return preProcessedText;
+      }
+      
+      console.log(`✅ Enhanced text with AI (${correctedText.length} characters)`);
+      return correctedText;
+    } catch (error) {
+      console.error('❌ Error using AI for text correction:', error);
+      // Return regex-processed text if AI fails
+      return preProcessedText;
+    }
   } catch (error) {
-    console.error('Error correcting OCR with LLM:', error);
-    
-    // Apply comprehensive regex fixes as fallback if LLM fails
-    let fallbackText = text;
-    
-    // Apply all the same regex fixes from the pre-processing
-    fallbackText = fallbackText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1 $2$3');
-    fallbackText = fallbackText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])/g, '$1 $2$3');
-    fallbackText = fallbackText.replace(/([\"""'][\s\w])([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1$2 $3$4');
-    fallbackText = fallbackText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])(\s|$)/g, '$1 $2$3$4');
-    
-    // Add the specific patterns from user examples
-    fallbackText = fallbackText.replace(/có con(\d+)/g, 'có con $1');
-    fallbackText = fallbackText.replace(/khí(\d+)/g, 'khí $1');
-    fallbackText = fallbackText.replace(/ra(\d+),/g, 'ra $1,');
-    fallbackText = fallbackText.replace(/sinh nở(\d+)/g, 'sinh nở $1');
-    
-    return fallbackText;
+    console.error('Error correcting text:', error);
+    return text;
   }
 };
 
@@ -792,17 +911,14 @@ export async function createCompleteSentencePages(document: Document): Promise<D
 export async function prepareContentForChunking(document: Document): Promise<Document> {
   console.log(`🔍 Preparing ${document.pages.length} pages for chunking...`);
   
-  // 1. Process pages to ensure complete sentences
-  const completePages = document.pages.map((page, index, allPages) => {
-    // Keep original page properties and add __preProcessed flag
-    return {
-      ...page,
-      __preProcessed: true
-    };
-  });
+  // Clean raw pages to prepare for processing
+  const rawPages = document.pages.map(page => ({
+    ...page,
+    content: page.content.trim()
+  }));
   
-  // 2. Create complete sentence pages with proper types
-  const improvedPagesPromises = completePages.map(async (page, index, allPages) => {
+  // First pass: Use the LLM approach to fix obvious issues
+  const enhancedPagesPromises = rawPages.map(async (page, index, allPages) => {
     const prevPage = index > 0 ? allPages[index - 1] : null;
     const nextPage = index < allPages.length - 1 ? allPages[index + 1] : null;
     
@@ -815,122 +931,200 @@ export async function prepareContentForChunking(document: Document): Promise<Doc
     };
   });
   
-  // Process all pages sequentially
-  const improvedPages = await Promise.all(improvedPagesPromises).then(processedPages => {
-    // 3. Additional post-processing for edge cases
-    for (let i = 0; i < processedPages.length; i++) {
-      const currPage = processedPages[i];
-      const nextPage = i < processedPages.length - 1 ? processedPages[i + 1] : null;
+  const enhancedPages = await Promise.all(enhancedPagesPromises);
+  
+  // Second pass: Manual fixes for remaining issues
+  const finalPages = [...enhancedPages];
+  
+  // Track which pages we've modified to avoid double-modification
+  const modifiedIndices = new Set<number>();
+  
+  for (let i = 0; i < finalPages.length; i++) {
+    if (modifiedIndices.has(i)) continue;
+    
+    const currPage = finalPages[i];
+    const prevPage = i > 0 ? finalPages[i - 1] : null;
+    const nextPage = i < finalPages.length - 1 ? finalPages[i + 1] : null;
+    
+    let currContent = currPage.content.trim();
+    let modified = false;
+    
+    // 1. Fix beginning of current page if it starts with a fragment
+    if (prevPage && !modifiedIndices.has(i - 1)) {
+      const prevContent = prevPage.content.trim();
       
-      // Check for partial syllables at the end of content
-      if (nextPage) {
-        const content = currPage.content.trim();
-        const lastWord = content.split(/\s+/).pop() || '';
+      // Check if current page begins with a fragment
+      const startsWithLowercase = /^[a-zà-ỹ]/.test(currContent);
+      const startsWithContinuationWord = /^(và|hoặc|hay|nhưng|bởi|vì|rằng|nên|để|mà|thì|là|với|cho|trong|từ|đến|bởi vì|tại vì|vào|ra|lên|xuống|ngoài|theo|sau|trước|cùng|cùng với)/i.test(currContent);
+      const startsWithPunctuation = /^[,;)}\]]/.test(currContent);
+      
+      if (startsWithLowercase || startsWithContinuationWord || startsWithPunctuation) {
+        console.log(`⚠️ Page ${currPage.pageNumber} begins with a fragment`);
         
-        // Comprehensive list of Vietnamese partial syllables that shouldn't end a chunk
-        const partialPatterns = [
-          // Single consonants
-          'b', 'c', 'd', 'đ', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't', 'v', 'x',
-          // Common Vietnamese onset consonant clusters
-          'gh', 'gi', 'kh', 'ng', 'nh', 'ph', 'th', 'tr', 'ch', 'nh', 'qu', 'gi',
-          // Common partial syllables
-          'vi', 'ba', 'bo', 'ca', 'co', 'cu', 'du', 'đi', 'đo', 'đa', 'ga', 'ha', 'ho', 'la', 'lo', 
-          'ma', 'mi', 'mo', 'mu', 'na', 'pa', 'ta', 'to', 'tu', 'xa', 'xu'
-        ];
+        // Find the last sentence from previous page
+        const sentenceRegex = /[^.!?:;。]+[.!?:;。]\s*$/;
+        const match = prevContent.match(sentenceRegex);
         
-        // Check if content ends with a partial Vietnamese syllable
-        const hasPartialSyllable = partialPatterns.some(pattern => 
-          content.endsWith(' ' + pattern) || content.endsWith('\n' + pattern)
-        );
-        
-        // Additional regex checks for partial words
-        const endsWithConsonantPattern = /[bcdfghjklmnpqrstvwxzđ]$/i.test(content);
-        const endsWithConsonantVowelPattern = /[bcdfghjklmnpqrstvwxzđ][aeiouăâêôơư]$/i.test(content);
-        
-        if (hasPartialSyllable || endsWithConsonantPattern || endsWithConsonantVowelPattern) {
-          console.log(`⚠️ Page ${currPage.pageNumber} ends with a partial syllable "${lastWord}"`);
+        if (match && match[0]) {
+          const lastSentence = match[0].trim();
           
-          // Find a good amount of text to borrow from the next page
-          const nextPageContent = nextPage.content.trim();
-          let borrowedText = '';
-          
-          // Look for the first complete sentence or reasonable chunk
-          const firstSentenceMatch = nextPageContent.match(/^[^.!?:;。]*[.!?:;。]/);
-          if (firstSentenceMatch && firstSentenceMatch[0]) {
-            borrowedText = firstSentenceMatch[0];
-          } else {
-            // If no complete sentence found, take first 150 characters or first paragraph
-            const firstParaMatch = nextPageContent.match(/^[^\n\r]*/);
-            if (firstParaMatch && firstParaMatch[0] && firstParaMatch[0].length > 0) {
-              borrowedText = firstParaMatch[0];
-            } else {
-              borrowedText = nextPageContent.substring(0, Math.min(150, nextPageContent.length));
-            }
+          // Only prepend if it's not too long and not already there
+          if (lastSentence.length < 200 && !currContent.startsWith(lastSentence)) {
+            currContent = lastSentence + ' ' + currContent;
+            modified = true;
+            console.log(`✅ Added last sentence from page ${currPage.pageNumber-1} to beginning of page ${currPage.pageNumber}`);
           }
+        } else {
+          // If no clear sentence, get last 150 characters
+          const lastChars = prevContent.substring(Math.max(0, prevContent.length - 150));
           
-          if (borrowedText) {
-            // Identify where to cut the current content by finding the last complete word
-            const lastWordIndex = content.lastIndexOf(' ' + lastWord);
-            
-            if (lastWordIndex !== -1) {
-              // Remove the partial word and append the borrowed text
-              const fixedContent = content.substring(0, lastWordIndex) + ' ' + borrowedText;
-              
-              // Update the current page's content
-              processedPages[i] = {
-                ...currPage,
-                content: fixedContent,
-                __modified: true
-              };
-              
-              console.log(`✅ Fixed partial syllable by borrowing text: "${borrowedText.substring(0, 40)}..."`);
-            } else {
-              // If we can't find where to cut precisely, just append
-              processedPages[i] = {
-                ...currPage,
-                content: content + ' ' + borrowedText,
-                __modified: true
-              };
-              console.log(`⚠️ Couldn't find exact cut point, appended borrowed text`);
-            }
+          // Find a good break point
+          const breakPoint = lastChars.search(/[.!?:;。,]\s+[A-ZÀ-Ỹ]/);
+          const textToAdd = breakPoint > 0 ? 
+                            lastChars.substring(breakPoint + 2) : 
+                            lastChars;
+          
+          if (!currContent.startsWith(textToAdd)) {
+            currContent = textToAdd + ' ' + currContent;
+            modified = true;
+            console.log(`✅ Added ${textToAdd.length} chars from page ${currPage.pageNumber-1} to beginning of page ${currPage.pageNumber}`);
           }
         }
       }
+    }
+    
+    // 2. Fix end of current page if it ends with a fragment
+    if (nextPage && !modifiedIndices.has(i + 1)) {
+      const nextContent = nextPage.content.trim();
       
-      // One more check: if the last "word" is suspiciously short (1-2 characters)
-      const content = processedPages[i].content.trim();
-      const lastWord = content.split(/\s+/).pop() || '';
+      // Check if current page ends with a fragment
+      const endsWithoutPunctuation = !/[.!?:;。]\s*$/.test(currContent);
+      const lastWord = currContent.split(/\s+/).pop() || '';
+      const endsWithPartialWord = lastWord.length <= 2 || /[bcdfghjklmnpqrstvwxzđ]$/i.test(lastWord);
       
-      if (lastWord.length <= 2 && nextPage && 
-         !/[.!?:;。,)}\]]$/.test(content) && // Not ending with punctuation
-         !/^[0-9]+$/.test(lastWord)) { // Not a number
-        console.log(`⚠️ Page ${processedPages[i].pageNumber} ends with suspicious short word "${lastWord}"`);
+      if (endsWithoutPunctuation || endsWithPartialWord) {
+        console.log(`⚠️ Page ${currPage.pageNumber} ends with a fragment`);
         
-        // Get the first few words from the next page
-        const nextWords = nextPage.content.trim().split(/\s+/).slice(0, 3).join(' ');
+        // Find the first sentence from next page
+        const sentenceRegex = /^[^.!?:;。]+[.!?:;。]/;
+        const match = nextContent.match(sentenceRegex);
         
-        // Append them to complete the potential partial word
-        processedPages[i] = {
-          ...processedPages[i],
-          content: content + ' ' + nextWords,
-          __modified: true
-        };
-        
-        console.log(`✅ Added "${nextWords}" to complete potential partial word`);
+        if (match && match[0]) {
+          const firstSentence = match[0].trim();
+          
+          // Only append if it's not too long and not already there
+          if (firstSentence.length < 200 && !currContent.endsWith(firstSentence)) {
+            currContent = currContent + ' ' + firstSentence;
+            modified = true;
+            console.log(`✅ Added first sentence from page ${currPage.pageNumber+1} to end of page ${currPage.pageNumber}`);
+          }
+        } else {
+          // If no clear sentence, get first 150 characters
+          const firstChars = nextContent.substring(0, Math.min(nextContent.length, 150));
+          
+          // Find a good break point
+          const breakPoint = firstChars.search(/[.!?:;。]\s+/);
+          const textToAdd = breakPoint > 0 ? 
+                            firstChars.substring(0, breakPoint + 1) : 
+                            firstChars;
+          
+          if (!currContent.endsWith(textToAdd)) {
+            currContent = currContent + ' ' + textToAdd;
+            modified = true;
+            console.log(`✅ Added ${textToAdd.length} chars from page ${currPage.pageNumber+1} to end of page ${currPage.pageNumber}`);
+          }
+        }
       }
     }
     
-    return processedPages;
-  });
+    // Update the page if modified
+    if (modified) {
+      finalPages[i] = {
+        ...currPage,
+        content: currContent,
+        __modified: true
+      };
+      modifiedIndices.add(i);
+    }
+  }
+  
+  // Third pass: Check for overlaps between adjacent pages
+  for (let i = 0; i < finalPages.length - 1; i++) {
+    if (modifiedIndices.has(i) || modifiedIndices.has(i + 1)) continue;
+    
+    const currPage = finalPages[i];
+    const nextPage = finalPages[i + 1];
+    
+    const currContent = currPage.content.trim();
+    const nextContent = nextPage.content.trim();
+    
+    // Check for overlap between end of current page and start of next page
+    let overlap = 0;
+    
+    for (let length = 50; length >= 20; length -= 5) {
+      if (currContent.length < length || nextContent.length < length) continue;
+      
+      const currEnd = currContent.substring(currContent.length - length);
+      
+      if (nextContent.startsWith(currEnd)) {
+        overlap = length;
+        break;
+      }
+    }
+    
+    // Fix overlap if found
+    if (overlap > 0) {
+      console.log(`✅ Found ${overlap} character overlap between pages ${currPage.pageNumber} and ${nextPage.pageNumber}`);
+      
+      const fixedNextContent = nextContent.substring(overlap);
+      finalPages[i + 1] = {
+        ...nextPage,
+        content: fixedNextContent,
+        __modified: true
+      };
+      modifiedIndices.add(i + 1);
+    }
+  }
+  
+  // Final cleanup to fix any remaining issues
+  for (let i = 0; i < finalPages.length; i++) {
+    if (modifiedIndices.has(i)) continue;
+    
+    const page = finalPages[i];
+    let content = page.content.trim();
+    let modified = false;
+    
+    // Ensure the page doesn't start with partial word or punctuation
+    if (/^[,;)}\]]/.test(content)) {
+      content = content.replace(/^[,;)}\]]+\s*/, '');
+      modified = true;
+    }
+    
+    // Ensure the page doesn't end with a partial word
+    const lastWord = content.split(/\s+/).pop() || '';
+    if (lastWord.length <= 2 && !/[.!?:;。,]$/.test(content)) {
+      content = content.replace(/\s+\S{1,2}$/, '.');
+      modified = true;
+    }
+    
+    // Update if modified
+    if (modified) {
+      finalPages[i] = {
+        ...page,
+        content: content,
+        __modified: true
+      };
+    }
+  }
   
   // Log the results
-  const modifiedPages = improvedPages.filter(p => p.__modified).length;
+  const modifiedPages = finalPages.filter(p => p.__modified).length;
   console.log(`✅ Content preparation complete: ${modifiedPages} pages were modified to ensure complete sentences`);
   
   // Return document with processed pages
   return {
     ...document,
-    pages: improvedPages
+    pages: finalPages
   };
 }
 
@@ -1500,30 +1694,6 @@ async function retryApiCall<T>(
   throw lastError;
 }
 
-// Add this helper function to check for common proxy environment variables
-function checkProxySettings() {
-  const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy;
-  const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-  const noProxy = process.env.NO_PROXY || process.env.no_proxy;
-  
-  if (!httpProxy && !httpsProxy) {
-    console.warn(`
-⚠️ WARNING: No proxy environment variables detected (HTTP_PROXY, HTTPS_PROXY).
-If you're behind a corporate firewall or proxy, fetch requests might fail.
-Consider setting HTTP_PROXY and HTTPS_PROXY environment variables if needed.
-For example: 
-  HTTP_PROXY=http://proxy.example.com:8080
-  HTTPS_PROXY=http://proxy.example.com:8080
-  NO_PROXY=localhost,127.0.0.1
-    `);
-  } else {
-    console.log(`ℹ️ Proxy settings detected: HTTP_PROXY=${httpProxy ? 'set' : 'not set'}, HTTPS_PROXY=${httpsProxy ? 'set' : 'not set'}`);
-  }
-}
-
-// Call the proxy check when the module is loaded
-checkProxySettings();
-
 // Add a simple function to detect if text might have been accidentally translated to English
 function detectTranslationToEnglish(originalText: string, enhancedText: string): boolean {
   // Skip empty content
@@ -1557,4 +1727,4 @@ function detectTranslationToEnglish(originalText: string, enhancedText: string):
   }
   
   return false;
-} 
+}
