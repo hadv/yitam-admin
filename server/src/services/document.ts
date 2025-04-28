@@ -635,7 +635,14 @@ export const correctOcrWithLLM = async (text: string): Promise<string> => {
     preProcessedText = preProcessedText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])(\s|$)/g, '$1 $2$3$4');
     
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-1.5-pro", 
+      generationConfig: {
+        temperature: 0,
+        topP: 0.1,
+        maxOutputTokens: 4096,
+      }
+    });
     
     // Prepare prompt for OCR correction with specific examples
     const prompt = `Correct OCR errors in this Vietnamese text, focusing on these specific patterns:
@@ -661,11 +668,21 @@ export const correctOcrWithLLM = async (text: string): Promise<string> => {
 TEXT:
 ${preProcessedText}
 
-Return ONLY the corrected text with proper spacing between words and numbers.`;
+Return ONLY the corrected text with proper spacing between words and numbers.
 
-    // Call Gemini API
+IMPORTANT: DO NOT translate to English. Keep the text in Vietnamese.`;
+    
+    // Create a stronger prompt that emphasizes NOT translating
+    const noTranslatePrompt = `
+IMPORTANT INSTRUCTION - DO NOT TRANSLATE: You must process this Vietnamese text exactly as is, without translating to any other language.
+
+${prompt}
+
+FINAL REMINDER: Your output MUST be in Vietnamese only. Do NOT translate anything to English or any other language.`;
+    
+    // Call Gemini API with the enhanced prompt
     const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      contents: [{ role: "user", parts: [{ text: noTranslatePrompt }] }],
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 8000,
@@ -920,9 +937,106 @@ export async function prepareContentForChunking(document: Document): Promise<Doc
 // Type definition for genAI static property
 interface EnsureCompleteSentencesFunction extends Function {
   genAI: GoogleGenerativeAI | null;
+  apiFailureCount: number;
+  maxApiFailures: number;
+  apiDisabled: boolean;
 }
 
+// Add this helper function to sanitize content before sending to the API
+function sanitizeContentForAPI(text: string): string {
+  if (!text) return '';
+  
+  // 1. Remove control characters except for normal whitespace
+  let sanitized = text.replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+  
+  // 2. Replace unusual Unicode characters that might cause issues
+  // This is a conservative approach that keeps most Unicode but removes rare characters
+  sanitized = sanitized.replace(/[\uFFF0-\uFFFF]/g, '');
+  
+  // 3. Trim extremely long content to avoid token limits
+  const MAX_PROMPT_CHARS = 8000; // More conservative limit (reduced from 12000)
+  
+  if (sanitized.length > MAX_PROMPT_CHARS) {
+    console.log(`⚠️ Content too long (${sanitized.length} chars), truncating to ${MAX_PROMPT_CHARS} chars`);
+    
+    // Check if the text contains "CURRENT PAGE:" marker
+    const currentPageIndex = sanitized.indexOf("CURRENT PAGE:");
+    
+    if (currentPageIndex !== -1) {
+      // Find the previous and next page markers
+      const prevPageIndex = sanitized.indexOf("PREVIOUS PAGE:");
+      const nextPageIndex = sanitized.indexOf("NEXT PAGE:");
+      
+      // Determine how to distribute the characters
+      // Keep most of the CURRENT PAGE content, which is the most important
+      const currentPageContent = 
+        nextPageIndex !== -1 ? 
+        sanitized.substring(currentPageIndex, nextPageIndex) : 
+        sanitized.substring(currentPageIndex);
+      
+      // Give 70% of the budget to the current page
+      const currentPageBudget = Math.floor(MAX_PROMPT_CHARS * 0.7);
+      let truncatedCurrentPage = currentPageContent;
+      
+      if (currentPageContent.length > currentPageBudget) {
+        truncatedCurrentPage = currentPageContent.substring(0, currentPageBudget);
+        console.log(`  - Truncated current page content to ${truncatedCurrentPage.length} chars`);
+      }
+      
+      // Give 15% each to previous and next pages
+      const otherPagesBudget = Math.floor(MAX_PROMPT_CHARS * 0.15);
+      
+      // Get previous page portion
+      let prevPageContent = prevPageIndex !== -1 ? 
+        sanitized.substring(prevPageIndex, currentPageIndex) : "";
+      
+      if (prevPageContent.length > otherPagesBudget) {
+        prevPageContent = prevPageContent.substring(0, otherPagesBudget);
+        console.log(`  - Truncated previous page content to ${prevPageContent.length} chars`);
+      }
+      
+      // Get next page portion
+      let nextPageContent = nextPageIndex !== -1 ? 
+        sanitized.substring(nextPageIndex) : "";
+      
+      if (nextPageContent.length > otherPagesBudget) {
+        nextPageContent = nextPageContent.substring(0, otherPagesBudget);
+        console.log(`  - Truncated next page content to ${nextPageContent.length} chars`);
+      }
+      
+      // Reassemble the prompt with truncated content
+      sanitized = prevPageContent + truncatedCurrentPage + nextPageContent;
+      console.log(`  - Final prompt length: ${sanitized.length} chars`);
+    } else {
+      // Simple truncation if we can't find the structure
+      sanitized = sanitized.substring(0, MAX_PROMPT_CHARS);
+    }
+  }
+  
+  return sanitized;
+}
+
+// Add this simple sleep function to throttle requests
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function ensureCompleteSentences(prevPage: DocumentPage | null, currPage: DocumentPage, nextPage: DocumentPage | null): Promise<DocumentPage> {
+  // Check if API has been disabled due to too many failures
+  const funcWithProps = ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction;
+  
+  // Check environment variable to completely disable API usage
+  const skipApiCompletely = process.env.DISABLE_GEMINI_API === 'true' || process.env.DISABLE_AI_APIS === 'true';
+  
+  if (skipApiCompletely || funcWithProps.apiDisabled) {
+    const reason = skipApiCompletely ? 'disabled by environment variable' : 'too many failures';
+    console.log(`⚠️ API is ${reason}. Using manual fallback for page ${currPage.pageNumber}`);
+    return manuallyFixTruncations(
+      prevPage?.content?.trim() || '', 
+      currPage?.content?.trim() || '', 
+      nextPage?.content?.trim() || '',
+      false, false, currPage
+    );
+  }
+
   if (!currPage || !currPage.content) {
     return currPage;
   }
@@ -948,155 +1062,198 @@ async function ensureCompleteSentences(prevPage: DocumentPage | null, currPage: 
   // Expanded checking for sentence fragments at start of current page
   const startsWithFragment = continuationPatterns.some(pattern => pattern.test(currentPageContent));
   
+  // Vietnamese word endings that shouldn't be at the end of content
+  const partialWordEndings = [
+    /[bcdfghjklmnpqrstvwxzđ]$/i,  // Ends with a consonant
+    /(ch|nh|ng|th|tr|ph|kh|gh|gi|qu)$/i,  // Common Vietnamese consonant clusters
+    /(vi|đi|xe|ba|bo|ca|co|cu|du|ma)$/i  // Common Vietnamese syllable starts
+  ];
+  
+  // Check for partial words at the end
+  const endsWithPartialWord = partialWordEndings.some(pattern => pattern.test(currentPageContent));
+  
   // Check if page ends without proper sentence terminator
-  // Includes Vietnamese-specific ending patterns
   const endsWithFragment = !/[.!?:;。]\s*$|[.:;]\s*"?\s*$/.test(currentPageContent);
   
-  // Check for words that are often split across pages in Vietnamese
-  const endsWithPartialWord = /[bcdfghjklmnpqrstvwxzđ]$/i.test(currentPageContent.trim()) || 
-                              /(vi|đi|xe|ba|bo|ca|co|cu|du|ma|ph|th|tr|ch|nh|kh|gi|qu|ng|gh|đ|b|t|c|l|m|n|p|h|r|x|v|k|g|d)$/i.test(currentPageContent.trim().split(/\s+/).pop() || '');
-  
-  // If no issues detected, return the original content
-  if (!startsWithFragment && !endsWithFragment && !endsWithPartialWord) {
-    console.log(`✅ Page ${currPage.pageNumber} has complete sentences. No changes needed.`);
+  // If the content already looks complete (doesn't start or end with fragments), return as is
+  if (!startsWithFragment && !endsWithPartialWord && !endsWithFragment) {
     return currPage;
   }
   
-  // Log the detected issues
-  if (startsWithFragment) {
-    console.log(`⚠️ Page ${currPage.pageNumber} starts with a continuation (fragment detected)`);
-  }
+  // Get content from previous and next pages if available
+  const prevPageContent = prevPage?.content?.trim() || '';
+  const nextPageContent = nextPage?.content?.trim() || '';
   
-  if (endsWithFragment) {
-    console.log(`⚠️ Page ${currPage.pageNumber} ends with an incomplete sentence`);
-  }
-  
-  if (endsWithPartialWord) {
-    console.log(`⚠️ Page ${currPage.pageNumber} ends with a partial word`);
-  }
-  
-  // Prepare content from previous, current and next pages
-  // Increased context window to capture more content
-  let prevPageContent = '';
-  let nextPageContent = '';
-  
-  if (prevPage && (startsWithFragment || (prevPage.content && currentPageContent.length > 0))) {
-    // Get more content from end of previous page (up to 2500 chars)
-    prevPageContent = prevPage.content.trim();
-    if (prevPageContent.length > 2500) {
-      prevPageContent = prevPageContent.substring(prevPageContent.length - 2500);
-    }
-  }
-  
-  if (nextPage && (endsWithFragment || endsWithPartialWord)) {
-    // Get more content from beginning of next page (up to 2500 chars)
-    nextPageContent = nextPage.content.trim();
-    if (nextPageContent.length > 2500) {
-      nextPageContent = nextPageContent.substring(0, 2500);
-    }
-  }
-
-  // Add logging to show context sizes
+  // Log context sizes for debugging
   console.log(`Context sizes - Previous: ${prevPageContent.length}, Current: ${currentPageContent.length}, Next: ${nextPageContent.length}`);
+  
+  // Create a prompt for the language model with stronger language preservation instructions
+  const promptBase = `
+Please help fix incomplete sentences in a document page. I will provide the content of three consecutive pages (previous, current, and next).
+Your task is to ensure the current page has complete sentences by fixing truncated sentences at the beginning and end.
 
-  // Prepare a prompt for the LLM to fix incomplete sentences with more explicit instructions for Vietnamese
-  const prompt = `
-I have a page from a Vietnamese document that may have incomplete sentences at the beginning or end. 
-I need to create a version that ensures all sentences are complete by borrowing minimal necessary text from 
-adjacent pages. This is critical for proper document chunking.
+CRITICAL INSTRUCTION: DO NOT TRANSLATE THE TEXT. Keep the text in its original language (Vietnamese). Your task is only to fix sentence boundaries, not to translate.
 
-PREVIOUS PAGE END:
-"""
-${prevPageContent}
-"""
+PREVIOUS PAGE: "${prevPageContent.substring(0, Math.min(500, prevPageContent.length))}..."
 
-MIDDLE PAGE (the target content): 
-"""
-${currentPageContent}
-"""
+CURRENT PAGE: "${currentPageContent}"
 
-NEXT PAGE START:
-"""
-${nextPageContent}
-"""
-
-Instructions:
-1. If the MIDDLE PAGE starts with a fragment (lowercase letter, continuation word, etc.), 
-   borrow the minimal necessary text from the PREVIOUS PAGE END to make it start with a complete sentence.
-   Vietnamese continuation words include: của, và, hoặc, hay, nhưng, bởi, vì, rằng, nên, để, mà, thì, etc.
-
-2. If the MIDDLE PAGE ends with an incomplete sentence or partial word, borrow the minimal necessary text 
-   from the NEXT PAGE START to complete it. Pay special attention to Vietnamese words that might be split across pages.
-
-3. Make sure no Vietnamese syllables are split (like "vi" + "ệc") by borrowing appropriately.
-
-4. Only modify the MIDDLE PAGE content, and only borrow what's ABSOLUTELY NECESSARY to complete sentences.
-   Do not alter meaning or remove content.
-
-5. Return ONLY the fixed MIDDLE PAGE content with complete sentences and words.
-
-6. Be extremely careful with Vietnamese text, ensuring complete grammatical units are preserved.
+NEXT PAGE: "${nextPageContent.substring(0, Math.min(500, nextPageContent.length))}..."
 
 I want the output to be the MIDDLE PAGE content with minimal changes - only fix incomplete sentences at 
 the beginning and end by borrowing minimally from adjacent pages. If the content already has complete sentences, 
-return it unchanged.`;
+return it unchanged.
+
+IMPORTANT: Output must be in the original language (Vietnamese). DO NOT translate to English, even if you detect the content is in Vietnamese.`;
+
+  const finalPrompt = `
+VIETNAMESE TEXT PROCESSING - DO NOT TRANSLATE TO ANY OTHER LANGUAGE
+${promptBase}
+YOUR RESPONSE MUST BE IN VIETNAMESE ONLY - NO ENGLISH WORDS ALLOWED
+`;
 
   try {
     // Use Gemini to fix the content
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
     if (!apiKey) {
       console.warn('⚠️ No AI API key found, using manual fallback for sentence completion');
-      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment || endsWithPartialWord, currPage);
+      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
     }
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-pro", 
-      generationConfig: {
-        temperature: 0,
-        topP: 0.1,
-        maxOutputTokens: 4096,
-      }
-    });
+    // Sanitize content before sending to API to avoid issues with problematic characters
+    const sanitizedPrompt = sanitizeContentForAPI(finalPrompt);
 
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-    });
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-pro", 
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8000,
+        }
+      });
 
-    const response = result.response;
-    const enhancedContent = response.text().trim();
-    
-    // Verify the LLM actually made meaningful changes
-    if (!enhancedContent || enhancedContent.length < currentPageContent.length * 0.5) {
-      console.warn(`⚠️ LLM output for page ${currPage.pageNumber} seems too short, using manual fallback`);
-      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment || endsWithPartialWord, currPage);
-    }
-
-    // Check if content was modified meaningfully
-    const wasChanged = enhancedContent !== currentPageContent;
-    
-    // More detailed logging about changes
-    if (wasChanged) {
-      const startDiff = !enhancedContent.startsWith(currentPageContent.substring(0, 50)) ? 
-        `Changed start: "${enhancedContent.substring(0, 50)}..."` : 'No changes at start';
-        
-      const endDiff = !enhancedContent.endsWith(currentPageContent.substring(currentPageContent.length - 50)) ?
-        `Changed end: "...${enhancedContent.substring(enhancedContent.length - 50)}"` : 'No changes at end';
+      // Add a throttling delay to avoid overwhelming the API
+      await sleep(500); // 500ms delay between API calls
       
-      console.log(`✅ Enhanced page ${currPage.pageNumber}: ${startDiff}, ${endDiff}`);
-    } else {
-      console.log(`ℹ️ Page ${currPage.pageNumber}: LLM didn't make changes, content may already be complete`);
+      // Set up a simple timeout with a flag
+      const timeoutMs = 30000; // 30 seconds
+      console.log(`⏱️ Setting API timeout of ${timeoutMs/1000} seconds for page ${currPage.pageNumber}`);
+      
+      let apiTimedOut = false;
+      const timeoutId = setTimeout(() => {
+        apiTimedOut = true;
+        console.error(`⏱️ API timeout for page ${currPage.pageNumber} after ${timeoutMs/1000} seconds`);
+        
+        // Track API failures
+        const funcWithProps = ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction;
+        funcWithProps.apiFailureCount = (funcWithProps.apiFailureCount || 0) + 1;
+        
+        // Log failure count and potentially disable API
+        console.log(`⚠️ API failure count: ${funcWithProps.apiFailureCount}/${funcWithProps.maxApiFailures}`);
+        
+        if (funcWithProps.apiFailureCount >= funcWithProps.maxApiFailures) {
+          console.log(`🚫 Disabling API due to too many failures (${funcWithProps.apiFailureCount})`);
+          funcWithProps.apiDisabled = true;
+        }
+      }, timeoutMs);
+      
+      console.log(`📤 Sending API request for page ${currPage.pageNumber} (content length: ${sanitizedPrompt.length} chars)`);
+      const startTime = Date.now();
+      
+      try {
+        // Make the API call with retry
+        const result = await retryApiCall(async () => {
+          return await model.generateContent({
+            contents: [{ role: "user", parts: [{ text: sanitizedPrompt }] }],
+          });
+        }, 3, 1000); // 3 retries with 1s initial delay
+        
+        // Clear the timeout as the request completed
+        clearTimeout(timeoutId);
+        
+        // If the timeout already occurred, don't process the result
+        if (apiTimedOut) {
+          console.log(`⚠️ API result arrived after timeout for page ${currPage.pageNumber}, ignoring`);
+          return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+        }
+        
+        const elapsedTime = (Date.now() - startTime) / 1000;
+        console.log(`✅ API request completed in ${elapsedTime.toFixed(2)} seconds for page ${currPage.pageNumber}`);
+        
+        // Process the result
+        const response = result.response;
+        const enhancedContent = response.text().trim();
+        
+        // Check if the content was accidentally translated to English
+        const wasTranslated = detectTranslationToEnglish(currentPageContent, enhancedContent);
+        
+        // If it was translated, use the original content instead
+        if (wasTranslated) {
+          console.warn(`🚫 Ignoring API result for page ${currPage.pageNumber} due to translation to English`);
+          return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+        }
+        
+        // Verify the LLM actually made meaningful changes
+        if (!enhancedContent || enhancedContent.length < currentPageContent.length * 0.5) {
+          console.warn(`⚠️ LLM output for page ${currPage.pageNumber} seems too short, using manual fallback`);
+          return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+        }
+
+        // Check if content was modified meaningfully
+        const wasChanged = enhancedContent !== currentPageContent;
+        
+        // More detailed logging about changes
+        if (wasChanged) {
+          const startDiff = !enhancedContent.startsWith(currentPageContent.substring(0, 50)) ? 
+            `Changed start: "${enhancedContent.substring(0, 50)}..."` : 'No changes at start';
+            
+          const endDiff = !enhancedContent.endsWith(currentPageContent.substring(currentPageContent.length - 50)) ?
+            `Changed end: "...${enhancedContent.substring(enhancedContent.length - 50)}"` : 'No changes at end';
+          
+          console.log(`✅ Enhanced page ${currPage.pageNumber}: ${startDiff}, ${endDiff}`);
+        } else {
+          console.log(`ℹ️ Page ${currPage.pageNumber}: LLM didn't make changes, content may already be complete`);
+        }
+        
+        return { 
+          ...currPage,
+          content: enhancedContent,
+          __modified: wasChanged
+        };
+      } catch (error: any) {
+        // Clear the timeout if an error occurs
+        clearTimeout(timeoutId);
+        
+        // Don't count the error if we already timed out
+        if (!apiTimedOut) {
+          // Track API failures
+          const funcWithProps = ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction;
+          funcWithProps.apiFailureCount = (funcWithProps.apiFailureCount || 0) + 1;
+          
+          console.error(`❌ API error for page ${currPage.pageNumber}:`, error);
+          
+          // Log failure count and potentially disable API
+          console.log(`⚠️ API failure count: ${funcWithProps.apiFailureCount}/${funcWithProps.maxApiFailures}`);
+          
+          if (funcWithProps.apiFailureCount >= funcWithProps.maxApiFailures) {
+            console.log(`🚫 Disabling API due to too many failures (${funcWithProps.apiFailureCount})`);
+            funcWithProps.apiDisabled = true;
+          }
+        }
+        
+        console.log(`⚠️ Falling back to manual processing for page ${currPage.pageNumber}`);
+        return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+      }
+    } catch (error) {
+      console.error(`❌ Unexpected error when enhancing page ${currPage.pageNumber}:`, error);
+      // Try manual fallback for any other errors
+      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
     }
-    
-    return { 
-      ...currPage,
-      content: enhancedContent,
-      __modified: wasChanged
-    };
   } catch (error) {
     console.error(`❌ Error enhancing page ${currPage.pageNumber}:`, error);
     // Try manual fallback if LLM fails
-    return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment || endsWithPartialWord, currPage);
+    return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
   }
 }
 
@@ -1117,55 +1274,110 @@ function manuallyFixTruncations(
   
   // Fix start truncation
   if (startsWithFragment && prevPageContent) {
-    // Find last sentence in previous page
-    const sentencePattern = /[^.!?:;。]+[.!?:;。][^\w]*$/;
-    const lastSentenceMatch = prevPageContent.match(sentencePattern);
+    // Try multiple strategies to find a good sentence break in the previous page
+    const strategies = [
+      // Strategy 1: Find last full sentence with punctuation
+      /[^.!?:;。]+[.!?:;。][^\w]*$/,
+      // Strategy 2: Find last paragraph
+      /\n\s*([^\n]+)$/,
+      // Strategy 3: Take last 150 characters
+      /(.{1,150})$/
+    ];
     
-    if (lastSentenceMatch && lastSentenceMatch[0]) {
-      const lastSentence = lastSentenceMatch[0].trim();
-      enhancedContent = lastSentence + ' ' + enhancedContent;
-      console.log(`✅ Manually added content from previous page: "${lastSentence.substring(0, 30)}..."`);
-      wasModified = true;
+    let lastContent = '';
+    for (const pattern of strategies) {
+      const match = prevPageContent.match(pattern);
+      if (match && match[0]) {
+        lastContent = match[0].trim();
+        console.log(`✅ Found content from previous page using pattern: ${pattern}`);
+        break;
+      }
+    }
+    
+    if (lastContent) {
+      // Avoid duplicate content - check if current page already starts with this content
+      if (!currentPageContent.startsWith(lastContent)) {
+        enhancedContent = lastContent + ' ' + enhancedContent;
+        console.log(`✅ Manually added content from previous page: "${lastContent.substring(0, 30)}..."`);
+        wasModified = true;
+      } else {
+        console.log(`ℹ️ Current page already starts with the content from previous page`);
+      }
     } else {
-      // If no sentence break found, take last few lines or chunk
-      const lastLines = prevPageContent.split('\n').slice(-3).join('\n');
-      enhancedContent = lastLines + ' ' + enhancedContent;
-      console.log(`✅ Manually added last lines from previous page`);
+      // Fallback: Take last 100 characters or so
+      lastContent = prevPageContent.substring(Math.max(0, prevPageContent.length - 100));
+      enhancedContent = lastContent + ' ' + enhancedContent;
+      console.log(`✅ Manually added last 100 chars from previous page as fallback`);
       wasModified = true;
     }
   }
   
   // Fix end truncation
   if (endsWithFragment && nextPageContent) {
-    // Find first sentence in next page
-    const firstSentencePattern = /^[^.!?:;。]+[.!?:;。][^\w]*/;
-    const firstSentenceMatch = nextPageContent.match(firstSentencePattern);
+    // Try multiple strategies to find a good sentence break in the next page
+    const strategies = [
+      // Strategy 1: Find first full sentence with punctuation
+      /^[^.!?:;。]+[.!?:;。][^\w]*/,
+      // Strategy 2: Find first paragraph
+      /^([^\n]+)\n/,
+      // Strategy 3: Take first 150 characters
+      /^(.{1,150})/
+    ];
     
-    if (firstSentenceMatch && firstSentenceMatch[0]) {
-      const firstSentence = firstSentenceMatch[0].trim();
-      enhancedContent = enhancedContent + ' ' + firstSentence;
-      console.log(`✅ Manually added content from next page: "${firstSentence.substring(0, 30)}..."`);
-      wasModified = true;
+    let nextContent = '';
+    for (const pattern of strategies) {
+      const match = nextPageContent.match(pattern);
+      if (match && match[0]) {
+        nextContent = match[0].trim();
+        console.log(`✅ Found content from next page using pattern: ${pattern}`);
+        break;
+      }
+    }
+    
+    if (nextContent) {
+      // Avoid duplicate content - check if current page already ends with this content
+      if (!currentPageContent.endsWith(nextContent)) {
+        enhancedContent = enhancedContent + ' ' + nextContent;
+        console.log(`✅ Manually added content from next page: "${nextContent.substring(0, 30)}..."`);
+        wasModified = true;
+      } else {
+        console.log(`ℹ️ Current page already ends with the content from next page`);
+      }
     } else {
-      // If no sentence break found, take first few lines or chunk
-      const firstLines = nextPageContent.split('\n').slice(0, 3).join('\n');
-      enhancedContent = enhancedContent + ' ' + firstLines;
-      console.log(`✅ Manually added first lines from next page`);
+      // Fallback: Take first 100 characters
+      nextContent = nextPageContent.substring(0, 100);
+      enhancedContent = enhancedContent + ' ' + nextContent;
+      console.log(`✅ Manually added first 100 chars from next page as fallback`);
       wasModified = true;
     }
   }
   
   // Better fix for partial words at the end
   const lastWord = currentPageContent.trim().split(/\s+/).pop() || '';
+  
+  // Check if the last word is likely to be a partial word
   const endsWithPartialWord = /^[bcdfghjklmnpqrstvwxzđ]$/i.test(lastWord) || 
-    /(vi|đi|xe|ba|bo|ca|co|cu|du|ma|ph|th|tr|ch|nh|kh|gi|qu|ng|gh)$/i.test(lastWord);
+    /(vi|đi|xe|ba|bo|ca|co|cu|du|ma|ph|th|tr|ch|nh|kh|gi|qu|ng|gh|tr|ph|Tr|Ph|Kh|Ngh|Gi)$/i.test(lastWord) ||
+    lastWord.length <= 2;
   
   if (endsWithPartialWord && nextPageContent && !wasModified) {
-    // Try to find the completion in the next page
+    // Try to find the completion in the next page - take multiple words to ensure we get a complete phrase
     const nextWords = nextPageContent.trim().split(/\s+/).slice(0, 5).join(' ');
-    enhancedContent = enhancedContent + ' ' + nextWords;
-    console.log(`✅ Manually fixed partial word "${lastWord}" by adding "${nextWords}"`);
-    wasModified = true;
+    
+    if (nextWords && nextWords.length > 0) {
+      enhancedContent = enhancedContent + ' ' + nextWords;
+      console.log(`✅ Manually fixed potential partial word "${lastWord}" by adding "${nextWords}"`);
+      wasModified = true;
+    }
+  }
+  
+  // Ensure we don't have double spaces
+  enhancedContent = enhancedContent.replace(/\s{2,}/g, ' ');
+  
+  // If we really couldn't fix anything, just keep the original content
+  if (!wasModified) {
+    console.log(`ℹ️ No manual fixes applied to page ${originalPage.pageNumber}`);
+    return originalPage;
   }
   
   return {
@@ -1175,8 +1387,11 @@ function manuallyFixTruncations(
   };
 }
 
-// Add this static property to the function
+// Add static properties to the function
 (ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).genAI = null;
+(ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).apiFailureCount = 0;
+(ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).maxApiFailures = 5; // After 5 failures, disable API
+(ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).apiDisabled = false;
 
 // Make sure the Document type has pages property - find its definition
 interface Document {
@@ -1237,4 +1452,109 @@ const markSentenceBoundaries = (text: string): string => {
   markedText = markedText.replace(/\[SENTENCE_BOUNDARY\]\s*\[SENTENCE_START\]/g, '[SENTENCE_BOUNDARY]');
   
   return markedText;
-}; 
+};
+
+// Add this helper function for retrying API calls with exponential backoff
+async function retryApiCall<T>(
+  operation: () => Promise<T>,
+  maxRetries: number = 3,
+  initialDelayMs: number = 1000
+): Promise<T> {
+  let lastError: any;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      
+      // Check if we should retry based on the error
+      const isNetworkError = 
+        error.message?.includes('fetch failed') || 
+        error.message?.includes('network') ||
+        error.message?.includes('timeout') ||
+        error.message?.includes('ECONNRESET');
+      
+      // Don't retry if it's not a network error
+      if (!isNetworkError) {
+        console.log(`❌ Non-retryable error: ${error.message}`);
+        throw error;
+      }
+      
+      // If this was the last retry, throw the error
+      if (attempt === maxRetries) {
+        console.log(`❌ Failed after ${maxRetries} retries`);
+        throw error;
+      }
+      
+      // Calculate exponential backoff delay
+      const delayMs = initialDelayMs * Math.pow(2, attempt - 1);
+      console.log(`⏱️ Retry ${attempt}/${maxRetries} after ${delayMs}ms delay (${error.message})`);
+      
+      // Wait before retrying
+      await sleep(delayMs);
+    }
+  }
+  
+  // This should never happen, but TypeScript requires a return
+  throw lastError;
+}
+
+// Add this helper function to check for common proxy environment variables
+function checkProxySettings() {
+  const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy;
+  const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy;
+  
+  if (!httpProxy && !httpsProxy) {
+    console.warn(`
+⚠️ WARNING: No proxy environment variables detected (HTTP_PROXY, HTTPS_PROXY).
+If you're behind a corporate firewall or proxy, fetch requests might fail.
+Consider setting HTTP_PROXY and HTTPS_PROXY environment variables if needed.
+For example: 
+  HTTP_PROXY=http://proxy.example.com:8080
+  HTTPS_PROXY=http://proxy.example.com:8080
+  NO_PROXY=localhost,127.0.0.1
+    `);
+  } else {
+    console.log(`ℹ️ Proxy settings detected: HTTP_PROXY=${httpProxy ? 'set' : 'not set'}, HTTPS_PROXY=${httpsProxy ? 'set' : 'not set'}`);
+  }
+}
+
+// Call the proxy check when the module is loaded
+checkProxySettings();
+
+// Add a simple function to detect if text might have been accidentally translated to English
+function detectTranslationToEnglish(originalText: string, enhancedText: string): boolean {
+  // Skip empty content
+  if (!originalText || !enhancedText) return false;
+  
+  // Common English words that shouldn't appear much in Vietnamese text
+  const englishWords = [
+    'the', 'and', 'is', 'in', 'are', 'to', 'of', 'for', 'with', 'that', 'this',
+    'fire', 'water', 'page', 'chapter', 'women', 'men', 'people', 'should', 'must', 
+    'could', 'would', 'caution', 'extreme', 'fundamental'
+  ];
+  
+  // Count English words
+  let englishWordCount = 0;
+  const enhancedWords = enhancedText.toLowerCase().split(/\s+/);
+  
+  for (const word of enhancedWords) {
+    if (englishWords.includes(word.replace(/[.,;:!?'"]/g, ''))) {
+      englishWordCount++;
+    }
+  }
+  
+  // If more than 20% of the words seem to be English, it's likely translated
+  const threshold = 0.20;
+  const englishRatio = englishWordCount / enhancedWords.length;
+  
+  if (englishRatio > threshold) {
+    console.error(`⚠️ TRANSLATION DETECTED! Content appears to have been translated to English (${(englishRatio * 100).toFixed(1)}% English words)`);
+    console.error(`⚠️ Original language should have been preserved. Using original content instead.`);
+    return true;
+  }
+  
+  return false;
+} 
