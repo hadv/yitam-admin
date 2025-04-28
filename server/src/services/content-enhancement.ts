@@ -81,6 +81,11 @@ export async function enhanceContent(
     // Add mandatory instruction to preserve the original language
     prompt += `- IMPORTANT: The text is in ${detectedLanguage}. Your response MUST be in ${detectedLanguage} as well. Do not translate to any other language.\n`;
     
+    // Add strict instructions to preserve original formatting and structure
+    prompt += `- CRITICAL: Preserve the original text structure. DO NOT add bullet points, asterisks (*), or any additional formatting if not in the original text.\n`;
+    prompt += `- CRITICAL: DO NOT reorganize content into lists or add numbering if they weren't in the original text.\n`;
+    prompt += `- CRITICAL: If the original text has no bullet points or decorative formatting, do not add them.\n`;
+    
     // Add domain-specific instructions if available
     if (fullOptions.domain) {
       prompt += `This content is about ${fullOptions.domain}. `;
@@ -88,7 +93,7 @@ export async function enhanceContent(
 
     // Add enhancement type-specific instructions
     if (fullOptions.types.includes(EnhancementType.FORMATTING)) {
-      prompt += "- Fix formatting issues, including paragraph breaks, inconsistent spacing, and bullet points.\n";
+      prompt += "- Fix formatting issues while maintaining the original structure. Only fix inconsistent spacing where necessary. DO NOT add new bullet points or decorative formatting.\n";
     }
     
     if (fullOptions.types.includes(EnhancementType.EXPLANATION)) {
@@ -100,18 +105,18 @@ export async function enhanceContent(
     }
     
     if (fullOptions.types.includes(EnhancementType.READABILITY)) {
-      prompt += "- Improve readability without changing meaning (fix awkward phrasing, run-on sentences).\n";
+      prompt += "- Improve readability without changing meaning (fix awkward phrasing, run-on sentences) while preserving the original text structure.\n";
     }
     
     if (fullOptions.types.includes(EnhancementType.STRUCTURE)) {
-      prompt += "- Improve the structure with appropriate headings, subheadings, and lists.\n";
+      prompt += "- Improve the structure only by fixing issues with existing headings and paragraphs. DO NOT add new bullet points, asterisks, or reorganize content if not already organized that way.\n";
     }
     
     if (fullOptions.types.includes(EnhancementType.COMPLETE)) {
-      prompt += "- Apply all possible improvements while preserving the original meaning.\n";
+      prompt += "- Apply improvements while preserving the original meaning and formatting structure.\n";
     }
 
-    prompt += `\nCONTENT:\n${chunk.content}\n\nReturn ONLY the enhanced content in ${detectedLanguage}, with no additional explanations or commentary.`;
+    prompt += `\nCONTENT:\n${chunk.content}\n\nReturn ONLY the enhanced content in ${detectedLanguage}, with no additional explanations or commentary. PRESERVE THE ORIGINAL TEXT STRUCTURE.`;
 
     // Call Gemini API
     const result = await model.generateContent({

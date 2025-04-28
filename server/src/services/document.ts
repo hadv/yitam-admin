@@ -163,26 +163,118 @@ export const parsePdfByPages = async (filePath: string): Promise<{ pages: { page
     await pdfParse(pdfBuffer, {
       // This function is called for each page
       pagerender: async (pageData: any) => {
-        // Extract text content from the page
-        const content = await pageData.getTextContent();
-        let pageText = '';
-        
-        // Combine all text items on the page
-        for (const item of content.items) {
-          if ('str' in item) {
-            pageText += item.str + ' ';
+        try {
+          // Extract text content from the page with more detailed options
+          const content = await pageData.getTextContent({
+            normalizeWhitespace: false,
+            disableCombineTextItems: false
+          });
+          
+          // Improved text extraction logic for better handling of Vietnamese text
+          let textItems: { 
+            str: string, 
+            x: number, 
+            y: number, 
+            width?: number,
+            height?: number,
+            fontName?: string
+          }[] = [];
+          
+          // Process each text item while preserving position information
+          content.items.forEach((item: any) => {
+            if ('str' in item && item.str.trim()) {
+              textItems.push({
+                str: item.str,
+                x: item.transform[4], // x position
+                y: item.transform[5],  // y position
+                width: item.width,
+                height: item.height,
+                fontName: item.fontName
+              });
+            }
+          });
+          
+          // Sort items by y-position (top to bottom), then by x-position (left to right)
+          textItems.sort((a, b) => {
+            // Use a tolerance value to group items on the same line
+            const yTolerance = 3; // Adjust based on your document's font size
+            if (Math.abs(a.y - b.y) <= yTolerance) {
+              return a.x - b.x; // Same line, sort left to right
+            }
+            return b.y - a.y; // Different lines, sort top to bottom
+          });
+          
+          // Combine text with proper spacing based on positions
+          let pageText = '';
+          let currentY: number | null = null;
+          let currentLineText = '';
+          
+          // Process text items into lines
+          for (let i = 0; i < textItems.length; i++) {
+            const item = textItems[i];
+            
+            // Check if this is a new line
+            if (currentY === null || Math.abs(item.y - currentY) > 3) {
+              // Add the previous line to the page text if it exists
+              if (currentLineText) {
+                pageText += currentLineText + '\n';
+                currentLineText = '';
+              }
+              
+              currentY = item.y;
+              currentLineText = item.str;
+            } else {
+              // Check if we need a space between words
+              const prevItem = textItems[i - 1];
+              
+              // More intelligent space detection using character width
+              const expectedGapWidth = prevItem.width ? prevItem.str.length * (prevItem.width / prevItem.str.length) * 0.3 : 4;
+              const actualGap = item.x - (prevItem.x + (prevItem.width || 0));
+              
+              // Add space if the gap is significant or if last item didn't end with space
+              const spaceNeeded = (actualGap > expectedGapWidth && 
+                               !prevItem.str.endsWith(' ') && 
+                               !item.str.startsWith(' '));
+              
+              currentLineText += (spaceNeeded ? ' ' : '') + item.str;
+            }
           }
+          
+          // Add the last line
+          if (currentLineText) {
+            pageText += currentLineText;
+          }
+          
+          // Fix common Vietnamese ligature issues directly in the PDF parsing
+          const cleanedText = pageText
+            // Fix common Vietnamese OCR errors
+            .replace(/([A-ZÀ-Ỹa-zà-ỹ])\s+([àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹ])/g, '$1$2')
+            .replace(/\b([A-ZÀ-Ỹa-zà-ỹ])\s+([A-ZÀ-Ỹa-zà-ỹ])\s+([A-ZÀ-Ỹa-zà-ỹ])\s+([A-ZÀ-Ỹa-zà-ỹ])\b/g, '$1$2$3$4')
+            .replace(/h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "huyết")
+            .replace(/t\s*h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "thuyết")
+            .replace(/huyếch/gi, "huyết");
+          
+          // Add page to the result
+          pages.push({
+            pageNumber: pageData.pageNumber,
+            content: cleanedText
+          });
+          
+          // Return an empty string as we're storing pages separately
+          return '';
+        } catch (pageError) {
+          console.error(`Error extracting text from page ${pageData.pageNumber}:`, pageError);
+          
+          // Fall back to basic extraction
+          pages.push({
+            pageNumber: pageData.pageNumber,
+            content: pageData.getTextContent ? 
+                     (await pageData.getTextContent()).items.map((item: any) => item.str || '').join(' ') : 
+                     ''
+          });
+          
+          return '';
         }
-        
-        // Clean up text and add to pages array
-        pageText = pageText.replace(/\s+/g, ' ').trim();
-        pages.push({
-          pageNumber: pageData.pageNumber,
-          content: pageText
-        });
-        
-        // Return an empty string as we're storing pages separately
-        return '';
       }
     });
     
@@ -612,106 +704,160 @@ const removeHeadersFooters = (
 };
 
 /**
- * Use LLM to correct OCR errors
+ * Use LLM to correct OCR errors with specific focus on Vietnamese text
  */
 export const correctOcrWithLLM = async (text: string): Promise<string> => {
   if (!text.trim()) return '';
-  if (!GEMINI_API_KEY) return text;
   
   try {
-    // Apply targeted regex fixes for the most common OCR issues before sending to LLM
+    // First, apply targeted regex fixes for the most common Vietnamese OCR errors
     let preProcessedText = text;
     
-    // 1. Fix words with incorrectly attached numbers (e.g., "con21" → "con 21")
-    preProcessedText = preProcessedText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1 $2$3');
+    // FIX SPECIFIC CHARACTER ERRORS WITHOUT CHANGING MEANING
     
-    // 2. Fix words with numbers and punctuation (e.g., "khí17." → "khí 17.")
-    preProcessedText = preProcessedText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])/g, '$1 $2$3');
+    // Fix spacing in Vietnamese diacritics (this is critical)
+    preProcessedText = preProcessedText.replace(/h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "huyết");
+    preProcessedText = preProcessedText.replace(/t\s*h\s*u\s*y\s*[eé]\s*[́̀̉̃]\s*t/gi, "thuyết");
+    preProcessedText = preProcessedText.replace(/c\s*h\s*ư\s*([oơ])\s*n\s*g/gi, "chương");
+    preProcessedText = preProcessedText.replace(/h\s*o\s*à\s*n/gi, "hoàn");
+    preProcessedText = preProcessedText.replace(/h\s*u\s*y\s*[eé]\s*[́̀̉̃]?\s*c\s*h/gi, "huyết");
     
-    // 3. Fix numbers in quotes (e.g., "chị" sinh ra3, → "chị" sinh ra 3,)
-    preProcessedText = preProcessedText.replace(/([\"""'][\s\w])([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1$2 $3$4');
+    // Fix specific problem cases
+    preProcessedText = preProcessedText.replace(/huyếch/gi, "huyết");
+    preProcessedText = preProcessedText.replace(/\b(LỤC VỊ HOÀN|Lục Vị Hoàn) Thuật\b/gi, "$1 Thuyết");
     
-    // 4. Fix sentence-ending patterns (e.g., "con21." → "con 21.")
-    preProcessedText = preProcessedText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])(\s|$)/g, '$1 $2$3$4');
-    
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-    
-    // Prepare prompt for OCR correction with specific examples
-    const prompt = `Correct OCR errors in this Vietnamese text, focusing on these specific patterns:
+    // Get API key - try to use the AI model
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
+    if (!apiKey) {
+      console.warn('⚠️ No AI API key found for OCR correction. Basic regex corrections applied but full correction unavailable.');
+      return preProcessedText;
+    }
 
-1. Words with attached numbers (VERY COMMON ERROR):
-   - "con21" → "con 21"
-   - "khí17" → "khí 17"
-   - "ra3" → "ra 3"
-   - "sinh nở19" → "sinh nở 19"
-   - "dương hỏa nên mới có con21. Đến năm" → "dương hỏa nên mới có con 21. Đến năm"
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-pro", 
+        generationConfig: {
+          temperature: 0,
+          topP: 0.1,
+          maxOutputTokens: 4096,
+        }
+      });
+      
+      // Enhanced prompt for Vietnamese OCR correction with EXACT examples from user
+      const prompt = `
+Nhiệm vụ: Sửa lỗi font chữ và ký tự trong văn bản tiếng Việt.
 
-2. Other OCR issues to fix:
-   - Spacing and line breaks (merge broken lines)
-   - Fix obvious OCR character substitutions
-   - Preserve all factual information and content meaning
+QUY TẮC QUAN TRỌNG:
+1. CHỈ sửa lỗi ký tự bị tách rời và lỗi font (ví dụ: "huy ế t" → "huyết")
+2. KHÔNG thay đổi cấu trúc đoạn văn gốc hay ý nghĩa của văn bản
+3. KHÔNG thêm hoặc xóa đoạn văn, câu, từ
+4. Giữ nguyên vị trí của các dấu câu và khoảng cách giữa các đoạn
+5. Duy trì chính xác các thuật ngữ y học cổ truyền và triết học
+6. TUYỆT ĐỐI KHÔNG thêm dấu đầu dòng, không thêm bullet points hoặc asterisk (*)
+7. KHÔNG thay đổi định dạng, KHÔNG định dạng lại văn bản, giữ nguyên cấu trúc gốc
+8. KHÔNG đánh số hoặc thêm ký tự đặc biệt trang trí vào văn bản
 
-3. EXPLANATION: These attached numbers are usually:
-   - Footnote references
-   - Page numbers that got merged during scanning
-   - Line numbers from source documents
-   - Section references
+SỬA CHÍNH XÁC những lỗi này:
+- "huy ế t" → "huyết" (KHÔNG phải "huyếch")
+- "thuy ế t" → "thuyết" (KHÔNG phải "thuật")
+- "t ấ t" → "tất"
+- "trư ớ c" → "trước"
+- "Chư ơng" → "Chương"
 
-TEXT:
+VÍ DỤ CỤ THỂ:
+1. Gốc: "Thoát huy ế t trư ớ c t ấ t ích khí."
+   Đúng: "Thoát huyết trước tất ích khí."
+   Sai: "Thoát huyếch trước tất ích khí."
+
+2. Gốc: "Chư ơng 1 5 L Ụ C V Ị HOÀN THUY Ế T"
+   Đúng: "Chương 15 LỤC VỊ HOÀN THUYẾT"
+   Sai: "Chương 15 Lục Vị Hoàn Thuật"
+
+3. Gốc: "là vị thuốc trong trọc ở trong loại thuốc trong trọc, có tác dụng cứng mạnh gân xương, bệnh nội thương, bệnh gân xương của can thận đều phải dùng nó."
+   Đúng: "là vị thuốc trong trọc ở trong loại thuốc trong trọc, có tác dụng cứng mạnh gân xương, bệnh nội thương, bệnh gân xương của can thận đều phải dùng nó."
+   Sai: "• Là vị thuốc trong trọc: Thuộc loại thuốc trong trọc, có tác dụng cứng mạnh gân xương, chữa bệnh nội thương và bệnh gân xương của can thận."
+
+VĂN BẢN CẦN SỬA:
 ${preProcessedText}
 
-Return ONLY the corrected text with proper spacing between words and numbers.`;
+(Instructions in English for model understanding:
+Task: Fix ONLY character and font errors in Vietnamese text.
+DO NOT change paragraph structure or meanings.
+DO NOT add or remove sentences or words.
+DO NOT reorganize the text flow.
+DO NOT add bullet points, asterisks, or any formatting.
+DO NOT reorganize content into lists or add numbering.
+KEEP the exact same text structure as the original.
+Specifically fix "huy ế t" to "huyết" (NOT "huyếch") and "thuy ế t" to "thuyết" (NOT "thuật").
+Return ONLY the corrected text, preserving original structure exactly as provided.)`;
 
-    // Call Gemini API
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 8000,
+      // Call API with retry mechanism
+      let retryCount = 0;
+      const maxRetries = 3;
+      let correctedText = preProcessedText;
+      let currentPrompt = prompt;
+      
+      while (retryCount < maxRetries) {
+        try {
+          const result = await model.generateContent({
+            contents: [{ role: "user", parts: [{ text: currentPrompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 8000,
+            }
+          });
+          
+          correctedText = result.response.text().trim();
+          
+          // Check if corrections are properly applied
+          const hasHuyech = correctedText.includes("huyếch");
+          const hasThuat = /\b(LỤC VỊ HOÀN|Lục Vị Hoàn) Thuật\b/i.test(correctedText);
+          
+          if (hasHuyech || hasThuat) {
+            console.log(`⚠️ AI still produced incorrect corrections (retry ${retryCount + 1}/${maxRetries})`);
+            retryCount++;
+            
+            // Make the prompt more specific on problem areas
+            currentPrompt += `\n\nCHÚ Ý ĐẶC BIỆT: Văn bản vẫn có các lỗi sau cần sửa:
+            ${hasHuyech ? '- "huyếch" phải sửa thành "huyết"' : ''}
+            ${hasThuat ? '- "LỤC VỊ HOÀN Thuật" phải sửa thành "LỤC VỊ HOÀN THUYẾT"' : ''}`;
+            
+            continue;
+          }
+          
+          // Post-process to catch any remaining issues
+          correctedText = correctedText
+            .replace(/huyếch/gi, "huyết")
+            .replace(/\b(LỤC VỊ HOÀN|Lục Vị Hoàn) Thuật\b/gi, "$1 Thuyết");
+          
+          break;
+        } catch (error) {
+          console.error(`❌ API error (attempt ${retryCount + 1}/${maxRetries}):`, error);
+          retryCount++;
+          
+          // Short delay before retrying
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
       }
-    });
-    
-    const correctedText = result.response.text().trim();
-    
-    // Apply final thorough regex fixes for any remaining issues
-    let finalText = correctedText;
-    
-    // More aggressive final pass to catch any remaining issues
-    // 1. General word-number separation (both directions)
-    finalText = finalText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)/g, '$1 $2');
-    finalText = finalText.replace(/(\d+)([a-zà-ỹA-ZÀ-Ỹ])/g, '$1 $2');
-    
-    // 2. Special case for Vietnamese text ending with numbers
-    finalText = finalText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])(\s|$)/g, '$1 $2$3$4');
-    
-    // 3. Handle specific patterns from user examples
-    finalText = finalText.replace(/có con(\d+)/g, 'có con $1');
-    finalText = finalText.replace(/khí(\d+)/g, 'khí $1');
-    finalText = finalText.replace(/ra(\d+),/g, 'ra $1,');
-    finalText = finalText.replace(/sinh nở(\d+)/g, 'sinh nở $1');
-    
-    console.log(`Corrected OCR text: ${finalText.length} characters`);
-    return finalText;
+      
+      // Verify it's not translated and hasn't lost content
+      if (detectTranslationToEnglish(preProcessedText, correctedText) || 
+          correctedText.length < preProcessedText.length * 0.8) {
+        console.warn('❌ AI correction issue detected. Using pre-processed text with regex fixes instead.');
+        return preProcessedText;
+      }
+      
+      console.log(`✅ Enhanced text with AI (${correctedText.length} characters)`);
+      return correctedText;
+    } catch (error) {
+      console.error('❌ Error using AI for text correction:', error);
+      // Return regex-processed text if AI fails
+      return preProcessedText;
+    }
   } catch (error) {
-    console.error('Error correcting OCR with LLM:', error);
-    
-    // Apply comprehensive regex fixes as fallback if LLM fails
-    let fallbackText = text;
-    
-    // Apply all the same regex fixes from the pre-processing
-    fallbackText = fallbackText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1 $2$3');
-    fallbackText = fallbackText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])/g, '$1 $2$3');
-    fallbackText = fallbackText.replace(/([\"""'][\s\w])([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?\s]|$)/g, '$1$2 $3$4');
-    fallbackText = fallbackText.replace(/([a-zà-ỹA-ZÀ-Ỹ])(\d+)([.,;:!?])(\s|$)/g, '$1 $2$3$4');
-    
-    // Add the specific patterns from user examples
-    fallbackText = fallbackText.replace(/có con(\d+)/g, 'có con $1');
-    fallbackText = fallbackText.replace(/khí(\d+)/g, 'khí $1');
-    fallbackText = fallbackText.replace(/ra(\d+),/g, 'ra $1,');
-    fallbackText = fallbackText.replace(/sinh nở(\d+)/g, 'sinh nở $1');
-    
-    return fallbackText;
+    console.error('Error correcting text:', error);
+    return text;
   }
 };
 
@@ -775,17 +921,14 @@ export async function createCompleteSentencePages(document: Document): Promise<D
 export async function prepareContentForChunking(document: Document): Promise<Document> {
   console.log(`🔍 Preparing ${document.pages.length} pages for chunking...`);
   
-  // 1. Process pages to ensure complete sentences
-  const completePages = document.pages.map((page, index, allPages) => {
-    // Keep original page properties and add __preProcessed flag
-    return {
-      ...page,
-      __preProcessed: true
-    };
-  });
+  // Clean raw pages to prepare for processing
+  const rawPages = document.pages.map(page => ({
+    ...page,
+    content: page.content.trim()
+  }));
   
-  // 2. Create complete sentence pages with proper types
-  const improvedPagesPromises = completePages.map(async (page, index, allPages) => {
+  // First pass: Use the LLM approach to fix obvious issues
+  const enhancedPagesPromises = rawPages.map(async (page, index, allPages) => {
     const prevPage = index > 0 ? allPages[index - 1] : null;
     const nextPage = index < allPages.length - 1 ? allPages[index + 1] : null;
     
@@ -798,131 +941,306 @@ export async function prepareContentForChunking(document: Document): Promise<Doc
     };
   });
   
-  // Process all pages sequentially
-  const improvedPages = await Promise.all(improvedPagesPromises).then(processedPages => {
-    // 3. Additional post-processing for edge cases
-    for (let i = 0; i < processedPages.length; i++) {
-      const currPage = processedPages[i];
-      const nextPage = i < processedPages.length - 1 ? processedPages[i + 1] : null;
+  const enhancedPages = await Promise.all(enhancedPagesPromises);
+  
+  // Second pass: Manual fixes for remaining issues
+  const finalPages = [...enhancedPages];
+  
+  // Track which pages we've modified to avoid double-modification
+  const modifiedIndices = new Set<number>();
+  
+  for (let i = 0; i < finalPages.length; i++) {
+    if (modifiedIndices.has(i)) continue;
+    
+    const currPage = finalPages[i];
+    const prevPage = i > 0 ? finalPages[i - 1] : null;
+    const nextPage = i < finalPages.length - 1 ? finalPages[i + 1] : null;
+    
+    let currContent = currPage.content.trim();
+    let modified = false;
+    
+    // 1. Fix beginning of current page if it starts with a fragment
+    if (prevPage && !modifiedIndices.has(i - 1)) {
+      const prevContent = prevPage.content.trim();
       
-      // Check for partial syllables at the end of content
-      if (nextPage) {
-        const content = currPage.content.trim();
-        const lastWord = content.split(/\s+/).pop() || '';
+      // Check if current page begins with a fragment
+      const startsWithLowercase = /^[a-zà-ỹ]/.test(currContent);
+      const startsWithContinuationWord = /^(và|hoặc|hay|nhưng|bởi|vì|rằng|nên|để|mà|thì|là|với|cho|trong|từ|đến|bởi vì|tại vì|vào|ra|lên|xuống|ngoài|theo|sau|trước|cùng|cùng với)/i.test(currContent);
+      const startsWithPunctuation = /^[,;)}\]]/.test(currContent);
+      
+      if (startsWithLowercase || startsWithContinuationWord || startsWithPunctuation) {
+        console.log(`⚠️ Page ${currPage.pageNumber} begins with a fragment`);
         
-        // Comprehensive list of Vietnamese partial syllables that shouldn't end a chunk
-        const partialPatterns = [
-          // Single consonants
-          'b', 'c', 'd', 'đ', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't', 'v', 'x',
-          // Common Vietnamese onset consonant clusters
-          'gh', 'gi', 'kh', 'ng', 'nh', 'ph', 'th', 'tr', 'ch', 'nh', 'qu', 'gi',
-          // Common partial syllables
-          'vi', 'ba', 'bo', 'ca', 'co', 'cu', 'du', 'đi', 'đo', 'đa', 'ga', 'ha', 'ho', 'la', 'lo', 
-          'ma', 'mi', 'mo', 'mu', 'na', 'pa', 'ta', 'to', 'tu', 'xa', 'xu'
-        ];
+        // Find the last sentence from previous page
+        const sentenceRegex = /[^.!?:;。]+[.!?:;。]\s*$/;
+        const match = prevContent.match(sentenceRegex);
         
-        // Check if content ends with a partial Vietnamese syllable
-        const hasPartialSyllable = partialPatterns.some(pattern => 
-          content.endsWith(' ' + pattern) || content.endsWith('\n' + pattern)
-        );
-        
-        // Additional regex checks for partial words
-        const endsWithConsonantPattern = /[bcdfghjklmnpqrstvwxzđ]$/i.test(content);
-        const endsWithConsonantVowelPattern = /[bcdfghjklmnpqrstvwxzđ][aeiouăâêôơư]$/i.test(content);
-        
-        if (hasPartialSyllable || endsWithConsonantPattern || endsWithConsonantVowelPattern) {
-          console.log(`⚠️ Page ${currPage.pageNumber} ends with a partial syllable "${lastWord}"`);
+        if (match && match[0]) {
+          const lastSentence = match[0].trim();
           
-          // Find a good amount of text to borrow from the next page
-          const nextPageContent = nextPage.content.trim();
-          let borrowedText = '';
-          
-          // Look for the first complete sentence or reasonable chunk
-          const firstSentenceMatch = nextPageContent.match(/^[^.!?:;。]*[.!?:;。]/);
-          if (firstSentenceMatch && firstSentenceMatch[0]) {
-            borrowedText = firstSentenceMatch[0];
-          } else {
-            // If no complete sentence found, take first 150 characters or first paragraph
-            const firstParaMatch = nextPageContent.match(/^[^\n\r]*/);
-            if (firstParaMatch && firstParaMatch[0] && firstParaMatch[0].length > 0) {
-              borrowedText = firstParaMatch[0];
-            } else {
-              borrowedText = nextPageContent.substring(0, Math.min(150, nextPageContent.length));
-            }
+          // Only prepend if it's not too long and not already there
+          if (lastSentence.length < 200 && !currContent.startsWith(lastSentence)) {
+            currContent = lastSentence + ' ' + currContent;
+            modified = true;
+            console.log(`✅ Added last sentence from page ${currPage.pageNumber-1} to beginning of page ${currPage.pageNumber}`);
           }
+        } else {
+          // If no clear sentence, get last 150 characters
+          const lastChars = prevContent.substring(Math.max(0, prevContent.length - 150));
           
-          if (borrowedText) {
-            // Identify where to cut the current content by finding the last complete word
-            const lastWordIndex = content.lastIndexOf(' ' + lastWord);
-            
-            if (lastWordIndex !== -1) {
-              // Remove the partial word and append the borrowed text
-              const fixedContent = content.substring(0, lastWordIndex) + ' ' + borrowedText;
-              
-              // Update the current page's content
-              processedPages[i] = {
-                ...currPage,
-                content: fixedContent,
-                __modified: true
-              };
-              
-              console.log(`✅ Fixed partial syllable by borrowing text: "${borrowedText.substring(0, 40)}..."`);
-            } else {
-              // If we can't find where to cut precisely, just append
-              processedPages[i] = {
-                ...currPage,
-                content: content + ' ' + borrowedText,
-                __modified: true
-              };
-              console.log(`⚠️ Couldn't find exact cut point, appended borrowed text`);
-            }
+          // Find a good break point
+          const breakPoint = lastChars.search(/[.!?:;。,]\s+[A-ZÀ-Ỹ]/);
+          const textToAdd = breakPoint > 0 ? 
+                            lastChars.substring(breakPoint + 2) : 
+                            lastChars;
+          
+          if (!currContent.startsWith(textToAdd)) {
+            currContent = textToAdd + ' ' + currContent;
+            modified = true;
+            console.log(`✅ Added ${textToAdd.length} chars from page ${currPage.pageNumber-1} to beginning of page ${currPage.pageNumber}`);
           }
         }
       }
+    }
+    
+    // 2. Fix end of current page if it ends with a fragment
+    if (nextPage && !modifiedIndices.has(i + 1)) {
+      const nextContent = nextPage.content.trim();
       
-      // One more check: if the last "word" is suspiciously short (1-2 characters)
-      const content = processedPages[i].content.trim();
-      const lastWord = content.split(/\s+/).pop() || '';
+      // Check if current page ends with a fragment
+      const endsWithoutPunctuation = !/[.!?:;。]\s*$/.test(currContent);
+      const lastWord = currContent.split(/\s+/).pop() || '';
+      const endsWithPartialWord = lastWord.length <= 2 || /[bcdfghjklmnpqrstvwxzđ]$/i.test(lastWord);
       
-      if (lastWord.length <= 2 && nextPage && 
-         !/[.!?:;。,)}\]]$/.test(content) && // Not ending with punctuation
-         !/^[0-9]+$/.test(lastWord)) { // Not a number
-        console.log(`⚠️ Page ${processedPages[i].pageNumber} ends with suspicious short word "${lastWord}"`);
+      if (endsWithoutPunctuation || endsWithPartialWord) {
+        console.log(`⚠️ Page ${currPage.pageNumber} ends with a fragment`);
         
-        // Get the first few words from the next page
-        const nextWords = nextPage.content.trim().split(/\s+/).slice(0, 3).join(' ');
+        // Find the first sentence from next page
+        const sentenceRegex = /^[^.!?:;。]+[.!?:;。]/;
+        const match = nextContent.match(sentenceRegex);
         
-        // Append them to complete the potential partial word
-        processedPages[i] = {
-          ...processedPages[i],
-          content: content + ' ' + nextWords,
-          __modified: true
-        };
-        
-        console.log(`✅ Added "${nextWords}" to complete potential partial word`);
+        if (match && match[0]) {
+          const firstSentence = match[0].trim();
+          
+          // Only append if it's not too long and not already there
+          if (firstSentence.length < 200 && !currContent.endsWith(firstSentence)) {
+            currContent = currContent + ' ' + firstSentence;
+            modified = true;
+            console.log(`✅ Added first sentence from page ${currPage.pageNumber+1} to end of page ${currPage.pageNumber}`);
+          }
+        } else {
+          // If no clear sentence, get first 150 characters
+          const firstChars = nextContent.substring(0, Math.min(nextContent.length, 150));
+          
+          // Find a good break point
+          const breakPoint = firstChars.search(/[.!?:;。]\s+/);
+          const textToAdd = breakPoint > 0 ? 
+                            firstChars.substring(0, breakPoint + 1) : 
+                            firstChars;
+          
+          if (!currContent.endsWith(textToAdd)) {
+            currContent = currContent + ' ' + textToAdd;
+            modified = true;
+            console.log(`✅ Added ${textToAdd.length} chars from page ${currPage.pageNumber+1} to end of page ${currPage.pageNumber}`);
+          }
+        }
       }
     }
     
-    return processedPages;
-  });
+    // Update the page if modified
+    if (modified) {
+      finalPages[i] = {
+        ...currPage,
+        content: currContent,
+        __modified: true
+      };
+      modifiedIndices.add(i);
+    }
+  }
+  
+  // Third pass: Check for overlaps between adjacent pages
+  for (let i = 0; i < finalPages.length - 1; i++) {
+    if (modifiedIndices.has(i) || modifiedIndices.has(i + 1)) continue;
+    
+    const currPage = finalPages[i];
+    const nextPage = finalPages[i + 1];
+    
+    const currContent = currPage.content.trim();
+    const nextContent = nextPage.content.trim();
+    
+    // Check for overlap between end of current page and start of next page
+    let overlap = 0;
+    
+    for (let length = 50; length >= 20; length -= 5) {
+      if (currContent.length < length || nextContent.length < length) continue;
+      
+      const currEnd = currContent.substring(currContent.length - length);
+      
+      if (nextContent.startsWith(currEnd)) {
+        overlap = length;
+        break;
+      }
+    }
+    
+    // Fix overlap if found
+    if (overlap > 0) {
+      console.log(`✅ Found ${overlap} character overlap between pages ${currPage.pageNumber} and ${nextPage.pageNumber}`);
+      
+      const fixedNextContent = nextContent.substring(overlap);
+      finalPages[i + 1] = {
+        ...nextPage,
+        content: fixedNextContent,
+        __modified: true
+      };
+      modifiedIndices.add(i + 1);
+    }
+  }
+  
+  // Final cleanup to fix any remaining issues
+  for (let i = 0; i < finalPages.length; i++) {
+    if (modifiedIndices.has(i)) continue;
+    
+    const page = finalPages[i];
+    let content = page.content.trim();
+    let modified = false;
+    
+    // Ensure the page doesn't start with partial word or punctuation
+    if (/^[,;)}\]]/.test(content)) {
+      content = content.replace(/^[,;)}\]]+\s*/, '');
+      modified = true;
+    }
+    
+    // Ensure the page doesn't end with a partial word
+    const lastWord = content.split(/\s+/).pop() || '';
+    if (lastWord.length <= 2 && !/[.!?:;。,]$/.test(content)) {
+      content = content.replace(/\s+\S{1,2}$/, '.');
+      modified = true;
+    }
+    
+    // Update if modified
+    if (modified) {
+      finalPages[i] = {
+        ...page,
+        content: content,
+        __modified: true
+      };
+    }
+  }
   
   // Log the results
-  const modifiedPages = improvedPages.filter(p => p.__modified).length;
+  const modifiedPages = finalPages.filter(p => p.__modified).length;
   console.log(`✅ Content preparation complete: ${modifiedPages} pages were modified to ensure complete sentences`);
   
   // Return document with processed pages
   return {
     ...document,
-    pages: improvedPages
+    pages: finalPages
   };
 }
 
 // Type definition for genAI static property
 interface EnsureCompleteSentencesFunction extends Function {
   genAI: GoogleGenerativeAI | null;
+  apiFailureCount: number;
+  maxApiFailures: number;
+  apiDisabled: boolean;
 }
 
+// Add this helper function to sanitize content before sending to the API
+function sanitizeContentForAPI(text: string): string {
+  if (!text) return '';
+  
+  // 1. Remove control characters except for normal whitespace
+  let sanitized = text.replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+  
+  // 2. Replace unusual Unicode characters that might cause issues
+  // This is a conservative approach that keeps most Unicode but removes rare characters
+  sanitized = sanitized.replace(/[\uFFF0-\uFFFF]/g, '');
+  
+  // 3. Trim extremely long content to avoid token limits
+  const MAX_PROMPT_CHARS = 8000; // More conservative limit (reduced from 12000)
+  
+  if (sanitized.length > MAX_PROMPT_CHARS) {
+    console.log(`⚠️ Content too long (${sanitized.length} chars), truncating to ${MAX_PROMPT_CHARS} chars`);
+    
+    // Check if the text contains "CURRENT PAGE:" marker
+    const currentPageIndex = sanitized.indexOf("CURRENT PAGE:");
+    
+    if (currentPageIndex !== -1) {
+      // Find the previous and next page markers
+      const prevPageIndex = sanitized.indexOf("PREVIOUS PAGE:");
+      const nextPageIndex = sanitized.indexOf("NEXT PAGE:");
+      
+      // Determine how to distribute the characters
+      // Keep most of the CURRENT PAGE content, which is the most important
+      const currentPageContent = 
+        nextPageIndex !== -1 ? 
+        sanitized.substring(currentPageIndex, nextPageIndex) : 
+        sanitized.substring(currentPageIndex);
+      
+      // Give 70% of the budget to the current page
+      const currentPageBudget = Math.floor(MAX_PROMPT_CHARS * 0.7);
+      let truncatedCurrentPage = currentPageContent;
+      
+      if (currentPageContent.length > currentPageBudget) {
+        truncatedCurrentPage = currentPageContent.substring(0, currentPageBudget);
+        console.log(`  - Truncated current page content to ${truncatedCurrentPage.length} chars`);
+      }
+      
+      // Give 15% each to previous and next pages
+      const otherPagesBudget = Math.floor(MAX_PROMPT_CHARS * 0.15);
+      
+      // Get previous page portion
+      let prevPageContent = prevPageIndex !== -1 ? 
+        sanitized.substring(prevPageIndex, currentPageIndex) : "";
+      
+      if (prevPageContent.length > otherPagesBudget) {
+        prevPageContent = prevPageContent.substring(0, otherPagesBudget);
+        console.log(`  - Truncated previous page content to ${prevPageContent.length} chars`);
+      }
+      
+      // Get next page portion
+      let nextPageContent = nextPageIndex !== -1 ? 
+        sanitized.substring(nextPageIndex) : "";
+      
+      if (nextPageContent.length > otherPagesBudget) {
+        nextPageContent = nextPageContent.substring(0, otherPagesBudget);
+        console.log(`  - Truncated next page content to ${nextPageContent.length} chars`);
+      }
+      
+      // Reassemble the prompt with truncated content
+      sanitized = prevPageContent + truncatedCurrentPage + nextPageContent;
+      console.log(`  - Final prompt length: ${sanitized.length} chars`);
+    } else {
+      // Simple truncation if we can't find the structure
+      sanitized = sanitized.substring(0, MAX_PROMPT_CHARS);
+    }
+  }
+  
+  return sanitized;
+}
+
+// Add this simple sleep function to throttle requests
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function ensureCompleteSentences(prevPage: DocumentPage | null, currPage: DocumentPage, nextPage: DocumentPage | null): Promise<DocumentPage> {
+  // Check if API has been disabled due to too many failures
+  const funcWithProps = ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction;
+  
+  // Check environment variable to completely disable API usage
+  const skipApiCompletely = process.env.DISABLE_GEMINI_API === 'true' || process.env.DISABLE_AI_APIS === 'true';
+  
+  if (skipApiCompletely || funcWithProps.apiDisabled) {
+    const reason = skipApiCompletely ? 'disabled by environment variable' : 'too many failures';
+    console.log(`⚠️ API is ${reason}. Using manual fallback for page ${currPage.pageNumber}`);
+    return manuallyFixTruncations(
+      prevPage?.content?.trim() || '', 
+      currPage?.content?.trim() || '', 
+      nextPage?.content?.trim() || '',
+      false, false, currPage
+    );
+  }
+
   if (!currPage || !currPage.content) {
     return currPage;
   }
@@ -948,155 +1266,207 @@ async function ensureCompleteSentences(prevPage: DocumentPage | null, currPage: 
   // Expanded checking for sentence fragments at start of current page
   const startsWithFragment = continuationPatterns.some(pattern => pattern.test(currentPageContent));
   
+  // Vietnamese word endings that shouldn't be at the end of content
+  const partialWordEndings = [
+    /[bcdfghjklmnpqrstvwxzđ]$/i,  // Ends with a consonant
+    /(ch|nh|ng|th|tr|ph|kh|gh|gi|qu)$/i,  // Common Vietnamese consonant clusters
+    /(vi|đi|xe|ba|bo|ca|co|cu|du|ma)$/i  // Common Vietnamese syllable starts
+  ];
+  
+  // Check for partial words at the end
+  const endsWithPartialWord = partialWordEndings.some(pattern => pattern.test(currentPageContent));
+  
   // Check if page ends without proper sentence terminator
-  // Includes Vietnamese-specific ending patterns
   const endsWithFragment = !/[.!?:;。]\s*$|[.:;]\s*"?\s*$/.test(currentPageContent);
   
-  // Check for words that are often split across pages in Vietnamese
-  const endsWithPartialWord = /[bcdfghjklmnpqrstvwxzđ]$/i.test(currentPageContent.trim()) || 
-                              /(vi|đi|xe|ba|bo|ca|co|cu|du|ma|ph|th|tr|ch|nh|kh|gi|qu|ng|gh|đ|b|t|c|l|m|n|p|h|r|x|v|k|g|d)$/i.test(currentPageContent.trim().split(/\s+/).pop() || '');
-  
-  // If no issues detected, return the original content
-  if (!startsWithFragment && !endsWithFragment && !endsWithPartialWord) {
-    console.log(`✅ Page ${currPage.pageNumber} has complete sentences. No changes needed.`);
+  // If the content already looks complete (doesn't start or end with fragments), return as is
+  if (!startsWithFragment && !endsWithPartialWord && !endsWithFragment) {
     return currPage;
   }
   
-  // Log the detected issues
-  if (startsWithFragment) {
-    console.log(`⚠️ Page ${currPage.pageNumber} starts with a continuation (fragment detected)`);
-  }
+  // Get content from previous and next pages if available
+  const prevPageContent = prevPage?.content?.trim() || '';
+  const nextPageContent = nextPage?.content?.trim() || '';
   
-  if (endsWithFragment) {
-    console.log(`⚠️ Page ${currPage.pageNumber} ends with an incomplete sentence`);
-  }
-  
-  if (endsWithPartialWord) {
-    console.log(`⚠️ Page ${currPage.pageNumber} ends with a partial word`);
-  }
-  
-  // Prepare content from previous, current and next pages
-  // Increased context window to capture more content
-  let prevPageContent = '';
-  let nextPageContent = '';
-  
-  if (prevPage && (startsWithFragment || (prevPage.content && currentPageContent.length > 0))) {
-    // Get more content from end of previous page (up to 2500 chars)
-    prevPageContent = prevPage.content.trim();
-    if (prevPageContent.length > 2500) {
-      prevPageContent = prevPageContent.substring(prevPageContent.length - 2500);
-    }
-  }
-  
-  if (nextPage && (endsWithFragment || endsWithPartialWord)) {
-    // Get more content from beginning of next page (up to 2500 chars)
-    nextPageContent = nextPage.content.trim();
-    if (nextPageContent.length > 2500) {
-      nextPageContent = nextPageContent.substring(0, 2500);
-    }
-  }
-
-  // Add logging to show context sizes
+  // Log context sizes for debugging
   console.log(`Context sizes - Previous: ${prevPageContent.length}, Current: ${currentPageContent.length}, Next: ${nextPageContent.length}`);
+  
+  // Create a prompt for the language model with stronger language preservation instructions
+  const promptBase = `
+Please help fix incomplete sentences in a document page. I will provide the content of three consecutive pages (previous, current, and next).
+Your task is to ensure the current page has complete sentences by fixing truncated sentences at the beginning and end.
 
-  // Prepare a prompt for the LLM to fix incomplete sentences with more explicit instructions for Vietnamese
-  const prompt = `
-I have a page from a Vietnamese document that may have incomplete sentences at the beginning or end. 
-I need to create a version that ensures all sentences are complete by borrowing minimal necessary text from 
-adjacent pages. This is critical for proper document chunking.
+CRITICAL INSTRUCTION: DO NOT TRANSLATE THE TEXT. Keep the text in its original language (Vietnamese). Your task is only to fix sentence boundaries, not to translate.
 
-PREVIOUS PAGE END:
-"""
-${prevPageContent}
-"""
+CRITICAL FORMATTING RULES:
+1. DO NOT add bullet points, asterisks (*), or any formatting to the text
+2. DO NOT reorganize text into lists or add numbering
+3. KEEP the exact same text structure as the original
+4. PRESERVE the exact formatting, paragraph breaks, and layout
+5. DO NOT add section headers or text decoration
+6. If the original text has no bullet points, do not add them
 
-MIDDLE PAGE (the target content): 
-"""
-${currentPageContent}
-"""
+PREVIOUS PAGE: "${prevPageContent.substring(0, Math.min(500, prevPageContent.length))}..."
 
-NEXT PAGE START:
-"""
-${nextPageContent}
-"""
+CURRENT PAGE: "${currentPageContent}"
 
-Instructions:
-1. If the MIDDLE PAGE starts with a fragment (lowercase letter, continuation word, etc.), 
-   borrow the minimal necessary text from the PREVIOUS PAGE END to make it start with a complete sentence.
-   Vietnamese continuation words include: của, và, hoặc, hay, nhưng, bởi, vì, rằng, nên, để, mà, thì, etc.
-
-2. If the MIDDLE PAGE ends with an incomplete sentence or partial word, borrow the minimal necessary text 
-   from the NEXT PAGE START to complete it. Pay special attention to Vietnamese words that might be split across pages.
-
-3. Make sure no Vietnamese syllables are split (like "vi" + "ệc") by borrowing appropriately.
-
-4. Only modify the MIDDLE PAGE content, and only borrow what's ABSOLUTELY NECESSARY to complete sentences.
-   Do not alter meaning or remove content.
-
-5. Return ONLY the fixed MIDDLE PAGE content with complete sentences and words.
-
-6. Be extremely careful with Vietnamese text, ensuring complete grammatical units are preserved.
+NEXT PAGE: "${nextPageContent.substring(0, Math.min(500, nextPageContent.length))}..."
 
 I want the output to be the MIDDLE PAGE content with minimal changes - only fix incomplete sentences at 
 the beginning and end by borrowing minimally from adjacent pages. If the content already has complete sentences, 
-return it unchanged.`;
+return it unchanged.
+
+IMPORTANT: Output must be in the original language (Vietnamese). DO NOT translate to English, even if you detect the content is in Vietnamese.`;
+
+  const finalPrompt = `
+VIETNAMESE TEXT PROCESSING - DO NOT TRANSLATE TO ANY OTHER LANGUAGE
+${promptBase}
+YOUR RESPONSE MUST BE IN VIETNAMESE ONLY - NO ENGLISH WORDS ALLOWED
+PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
+`;
 
   try {
     // Use Gemini to fix the content
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
     if (!apiKey) {
       console.warn('⚠️ No AI API key found, using manual fallback for sentence completion');
-      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment || endsWithPartialWord, currPage);
+      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
     }
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-pro", 
-      generationConfig: {
-        temperature: 0,
-        topP: 0.1,
-        maxOutputTokens: 4096,
-      }
-    });
+    // Sanitize content before sending to API to avoid issues with problematic characters
+    const sanitizedPrompt = sanitizeContentForAPI(finalPrompt);
 
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-    });
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-pro", 
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8000,
+        }
+      });
 
-    const response = result.response;
-    const enhancedContent = response.text().trim();
-    
-    // Verify the LLM actually made meaningful changes
-    if (!enhancedContent || enhancedContent.length < currentPageContent.length * 0.5) {
-      console.warn(`⚠️ LLM output for page ${currPage.pageNumber} seems too short, using manual fallback`);
-      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment || endsWithPartialWord, currPage);
-    }
-
-    // Check if content was modified meaningfully
-    const wasChanged = enhancedContent !== currentPageContent;
-    
-    // More detailed logging about changes
-    if (wasChanged) {
-      const startDiff = !enhancedContent.startsWith(currentPageContent.substring(0, 50)) ? 
-        `Changed start: "${enhancedContent.substring(0, 50)}..."` : 'No changes at start';
-        
-      const endDiff = !enhancedContent.endsWith(currentPageContent.substring(currentPageContent.length - 50)) ?
-        `Changed end: "...${enhancedContent.substring(enhancedContent.length - 50)}"` : 'No changes at end';
+      // Add a throttling delay to avoid overwhelming the API
+      await sleep(500); // 500ms delay between API calls
       
-      console.log(`✅ Enhanced page ${currPage.pageNumber}: ${startDiff}, ${endDiff}`);
-    } else {
-      console.log(`ℹ️ Page ${currPage.pageNumber}: LLM didn't make changes, content may already be complete`);
+      // Set up a simple timeout with a flag
+      const timeoutMs = 30000; // 30 seconds
+      console.log(`⏱️ Setting API timeout of ${timeoutMs/1000} seconds for page ${currPage.pageNumber}`);
+      
+      let apiTimedOut = false;
+      const timeoutId = setTimeout(() => {
+        apiTimedOut = true;
+        console.error(`⏱️ API timeout for page ${currPage.pageNumber} after ${timeoutMs/1000} seconds`);
+        
+        // Track API failures
+        const funcWithProps = ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction;
+        funcWithProps.apiFailureCount = (funcWithProps.apiFailureCount || 0) + 1;
+        
+        // Log failure count and potentially disable API
+        console.log(`⚠️ API failure count: ${funcWithProps.apiFailureCount}/${funcWithProps.maxApiFailures}`);
+        
+        if (funcWithProps.apiFailureCount >= funcWithProps.maxApiFailures) {
+          console.log(`🚫 Disabling API due to too many failures (${funcWithProps.apiFailureCount})`);
+          funcWithProps.apiDisabled = true;
+        }
+      }, timeoutMs);
+      
+      console.log(`📤 Sending API request for page ${currPage.pageNumber} (content length: ${sanitizedPrompt.length} chars)`);
+      const startTime = Date.now();
+      
+      try {
+        // Make the API call with retry
+        const result = await retryApiCall(async () => {
+          return await model.generateContent({
+            contents: [{ role: "user", parts: [{ text: sanitizedPrompt }] }],
+          });
+        }, 3, 1000); // 3 retries with 1s initial delay
+        
+        // Clear the timeout as the request completed
+        clearTimeout(timeoutId);
+        
+        // If the timeout already occurred, don't process the result
+        if (apiTimedOut) {
+          console.log(`⚠️ API result arrived after timeout for page ${currPage.pageNumber}, ignoring`);
+          return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+        }
+        
+        const elapsedTime = (Date.now() - startTime) / 1000;
+        console.log(`✅ API request completed in ${elapsedTime.toFixed(2)} seconds for page ${currPage.pageNumber}`);
+        
+        // Process the result
+        const response = result.response;
+        const enhancedContent = response.text().trim();
+        
+        // Check if the content was accidentally translated to English
+        const wasTranslated = detectTranslationToEnglish(currentPageContent, enhancedContent);
+        
+        // If it was translated, use the original content instead
+        if (wasTranslated) {
+          console.warn(`🚫 Ignoring API result for page ${currPage.pageNumber} due to translation to English`);
+          return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+        }
+        
+        // Verify the LLM actually made meaningful changes
+        if (!enhancedContent || enhancedContent.length < currentPageContent.length * 0.5) {
+          console.warn(`⚠️ LLM output for page ${currPage.pageNumber} seems too short, using manual fallback`);
+          return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+        }
+
+        // Check if content was modified meaningfully
+        const wasChanged = enhancedContent !== currentPageContent;
+        
+        // More detailed logging about changes
+        if (wasChanged) {
+          const startDiff = !enhancedContent.startsWith(currentPageContent.substring(0, 50)) ? 
+            `Changed start: "${enhancedContent.substring(0, 50)}..."` : 'No changes at start';
+            
+          const endDiff = !enhancedContent.endsWith(currentPageContent.substring(currentPageContent.length - 50)) ?
+            `Changed end: "...${enhancedContent.substring(enhancedContent.length - 50)}"` : 'No changes at end';
+          
+          console.log(`✅ Enhanced page ${currPage.pageNumber}: ${startDiff}, ${endDiff}`);
+        } else {
+          console.log(`ℹ️ Page ${currPage.pageNumber}: LLM didn't make changes, content may already be complete`);
+        }
+        
+        return { 
+          ...currPage,
+          content: enhancedContent,
+          __modified: wasChanged
+        };
+      } catch (error: any) {
+        // Clear the timeout if an error occurs
+        clearTimeout(timeoutId);
+        
+        // Don't count the error if we already timed out
+        if (!apiTimedOut) {
+          // Track API failures
+          const funcWithProps = ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction;
+          funcWithProps.apiFailureCount = (funcWithProps.apiFailureCount || 0) + 1;
+          
+          console.error(`❌ API error for page ${currPage.pageNumber}:`, error);
+          
+          // Log failure count and potentially disable API
+          console.log(`⚠️ API failure count: ${funcWithProps.apiFailureCount}/${funcWithProps.maxApiFailures}`);
+          
+          if (funcWithProps.apiFailureCount >= funcWithProps.maxApiFailures) {
+            console.log(`🚫 Disabling API due to too many failures (${funcWithProps.apiFailureCount})`);
+            funcWithProps.apiDisabled = true;
+          }
+        }
+        
+        console.log(`⚠️ Falling back to manual processing for page ${currPage.pageNumber}`);
+        return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
+      }
+    } catch (error) {
+      console.error(`❌ Unexpected error when enhancing page ${currPage.pageNumber}:`, error);
+      // Try manual fallback for any other errors
+      return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
     }
-    
-    return { 
-      ...currPage,
-      content: enhancedContent,
-      __modified: wasChanged
-    };
   } catch (error) {
     console.error(`❌ Error enhancing page ${currPage.pageNumber}:`, error);
     // Try manual fallback if LLM fails
-    return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment || endsWithPartialWord, currPage);
+    return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
   }
 }
 
@@ -1117,55 +1487,110 @@ function manuallyFixTruncations(
   
   // Fix start truncation
   if (startsWithFragment && prevPageContent) {
-    // Find last sentence in previous page
-    const sentencePattern = /[^.!?:;。]+[.!?:;。][^\w]*$/;
-    const lastSentenceMatch = prevPageContent.match(sentencePattern);
+    // Try multiple strategies to find a good sentence break in the previous page
+    const strategies = [
+      // Strategy 1: Find last full sentence with punctuation
+      /[^.!?:;。]+[.!?:;。][^\w]*$/,
+      // Strategy 2: Find last paragraph
+      /\n\s*([^\n]+)$/,
+      // Strategy 3: Take last 150 characters
+      /(.{1,150})$/
+    ];
     
-    if (lastSentenceMatch && lastSentenceMatch[0]) {
-      const lastSentence = lastSentenceMatch[0].trim();
-      enhancedContent = lastSentence + ' ' + enhancedContent;
-      console.log(`✅ Manually added content from previous page: "${lastSentence.substring(0, 30)}..."`);
-      wasModified = true;
+    let lastContent = '';
+    for (const pattern of strategies) {
+      const match = prevPageContent.match(pattern);
+      if (match && match[0]) {
+        lastContent = match[0].trim();
+        console.log(`✅ Found content from previous page using pattern: ${pattern}`);
+        break;
+      }
+    }
+    
+    if (lastContent) {
+      // Avoid duplicate content - check if current page already starts with this content
+      if (!currentPageContent.startsWith(lastContent)) {
+        enhancedContent = lastContent + ' ' + enhancedContent;
+        console.log(`✅ Manually added content from previous page: "${lastContent.substring(0, 30)}..."`);
+        wasModified = true;
+      } else {
+        console.log(`ℹ️ Current page already starts with the content from previous page`);
+      }
     } else {
-      // If no sentence break found, take last few lines or chunk
-      const lastLines = prevPageContent.split('\n').slice(-3).join('\n');
-      enhancedContent = lastLines + ' ' + enhancedContent;
-      console.log(`✅ Manually added last lines from previous page`);
+      // Fallback: Take last 100 characters or so
+      lastContent = prevPageContent.substring(Math.max(0, prevPageContent.length - 100));
+      enhancedContent = lastContent + ' ' + enhancedContent;
+      console.log(`✅ Manually added last 100 chars from previous page as fallback`);
       wasModified = true;
     }
   }
   
   // Fix end truncation
   if (endsWithFragment && nextPageContent) {
-    // Find first sentence in next page
-    const firstSentencePattern = /^[^.!?:;。]+[.!?:;。][^\w]*/;
-    const firstSentenceMatch = nextPageContent.match(firstSentencePattern);
+    // Try multiple strategies to find a good sentence break in the next page
+    const strategies = [
+      // Strategy 1: Find first full sentence with punctuation
+      /^[^.!?:;。]+[.!?:;。][^\w]*/,
+      // Strategy 2: Find first paragraph
+      /^([^\n]+)\n/,
+      // Strategy 3: Take first 150 characters
+      /^(.{1,150})/
+    ];
     
-    if (firstSentenceMatch && firstSentenceMatch[0]) {
-      const firstSentence = firstSentenceMatch[0].trim();
-      enhancedContent = enhancedContent + ' ' + firstSentence;
-      console.log(`✅ Manually added content from next page: "${firstSentence.substring(0, 30)}..."`);
-      wasModified = true;
+    let nextContent = '';
+    for (const pattern of strategies) {
+      const match = nextPageContent.match(pattern);
+      if (match && match[0]) {
+        nextContent = match[0].trim();
+        console.log(`✅ Found content from next page using pattern: ${pattern}`);
+        break;
+      }
+    }
+    
+    if (nextContent) {
+      // Avoid duplicate content - check if current page already ends with this content
+      if (!currentPageContent.endsWith(nextContent)) {
+        enhancedContent = enhancedContent + ' ' + nextContent;
+        console.log(`✅ Manually added content from next page: "${nextContent.substring(0, 30)}..."`);
+        wasModified = true;
+      } else {
+        console.log(`ℹ️ Current page already ends with the content from next page`);
+      }
     } else {
-      // If no sentence break found, take first few lines or chunk
-      const firstLines = nextPageContent.split('\n').slice(0, 3).join('\n');
-      enhancedContent = enhancedContent + ' ' + firstLines;
-      console.log(`✅ Manually added first lines from next page`);
+      // Fallback: Take first 100 characters
+      nextContent = nextPageContent.substring(0, 100);
+      enhancedContent = enhancedContent + ' ' + nextContent;
+      console.log(`✅ Manually added first 100 chars from next page as fallback`);
       wasModified = true;
     }
   }
   
   // Better fix for partial words at the end
   const lastWord = currentPageContent.trim().split(/\s+/).pop() || '';
+  
+  // Check if the last word is likely to be a partial word
   const endsWithPartialWord = /^[bcdfghjklmnpqrstvwxzđ]$/i.test(lastWord) || 
-    /(vi|đi|xe|ba|bo|ca|co|cu|du|ma|ph|th|tr|ch|nh|kh|gi|qu|ng|gh)$/i.test(lastWord);
+    /(vi|đi|xe|ba|bo|ca|co|cu|du|ma|ph|th|tr|ch|nh|kh|gi|qu|ng|gh|tr|ph|Tr|Ph|Kh|Ngh|Gi)$/i.test(lastWord) ||
+    lastWord.length <= 2;
   
   if (endsWithPartialWord && nextPageContent && !wasModified) {
-    // Try to find the completion in the next page
+    // Try to find the completion in the next page - take multiple words to ensure we get a complete phrase
     const nextWords = nextPageContent.trim().split(/\s+/).slice(0, 5).join(' ');
-    enhancedContent = enhancedContent + ' ' + nextWords;
-    console.log(`✅ Manually fixed partial word "${lastWord}" by adding "${nextWords}"`);
-    wasModified = true;
+    
+    if (nextWords && nextWords.length > 0) {
+      enhancedContent = enhancedContent + ' ' + nextWords;
+      console.log(`✅ Manually fixed potential partial word "${lastWord}" by adding "${nextWords}"`);
+      wasModified = true;
+    }
+  }
+  
+  // Ensure we don't have double spaces
+  enhancedContent = enhancedContent.replace(/\s{2,}/g, ' ');
+  
+  // If we really couldn't fix anything, just keep the original content
+  if (!wasModified) {
+    console.log(`ℹ️ No manual fixes applied to page ${originalPage.pageNumber}`);
+    return originalPage;
   }
   
   return {
@@ -1175,8 +1600,11 @@ function manuallyFixTruncations(
   };
 }
 
-// Add this static property to the function
+// Add static properties to the function
 (ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).genAI = null;
+(ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).apiFailureCount = 0;
+(ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).maxApiFailures = 5; // After 5 failures, disable API
+(ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).apiDisabled = false;
 
 // Make sure the Document type has pages property - find its definition
 interface Document {
@@ -1237,4 +1665,85 @@ const markSentenceBoundaries = (text: string): string => {
   markedText = markedText.replace(/\[SENTENCE_BOUNDARY\]\s*\[SENTENCE_START\]/g, '[SENTENCE_BOUNDARY]');
   
   return markedText;
-}; 
+};
+
+// Add this helper function for retrying API calls with exponential backoff
+async function retryApiCall<T>(
+  operation: () => Promise<T>,
+  maxRetries: number = 3,
+  initialDelayMs: number = 1000
+): Promise<T> {
+  let lastError: any;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      
+      // Check if we should retry based on the error
+      const isNetworkError = 
+        error.message?.includes('fetch failed') || 
+        error.message?.includes('network') ||
+        error.message?.includes('timeout') ||
+        error.message?.includes('ECONNRESET');
+      
+      // Don't retry if it's not a network error
+      if (!isNetworkError) {
+        console.log(`❌ Non-retryable error: ${error.message}`);
+        throw error;
+      }
+      
+      // If this was the last retry, throw the error
+      if (attempt === maxRetries) {
+        console.log(`❌ Failed after ${maxRetries} retries`);
+        throw error;
+      }
+      
+      // Calculate exponential backoff delay
+      const delayMs = initialDelayMs * Math.pow(2, attempt - 1);
+      console.log(`⏱️ Retry ${attempt}/${maxRetries} after ${delayMs}ms delay (${error.message})`);
+      
+      // Wait before retrying
+      await sleep(delayMs);
+    }
+  }
+  
+  // This should never happen, but TypeScript requires a return
+  throw lastError;
+}
+
+// Add a simple function to detect if text might have been accidentally translated to English
+function detectTranslationToEnglish(originalText: string, enhancedText: string): boolean {
+  // Skip empty content
+  if (!originalText || !enhancedText) return false;
+  
+  // Common English words that shouldn't appear much in Vietnamese text
+  const englishWords = [
+    'the', 'and', 'is', 'in', 'are', 'to', 'of', 'for', 'with', 'that', 'this',
+    'fire', 'water', 'page', 'chapter', 'women', 'men', 'people', 'should', 'must', 
+    'could', 'would', 'caution', 'extreme', 'fundamental'
+  ];
+  
+  // Count English words
+  let englishWordCount = 0;
+  const enhancedWords = enhancedText.toLowerCase().split(/\s+/);
+  
+  for (const word of enhancedWords) {
+    if (englishWords.includes(word.replace(/[.,;:!?'"]/g, ''))) {
+      englishWordCount++;
+    }
+  }
+  
+  // If more than 20% of the words seem to be English, it's likely translated
+  const threshold = 0.20;
+  const englishRatio = englishWordCount / enhancedWords.length;
+  
+  if (englishRatio > threshold) {
+    console.error(`⚠️ TRANSLATION DETECTED! Content appears to have been translated to English (${(englishRatio * 100).toFixed(1)}% English words)`);
+    console.error(`⚠️ Original language should have been preserved. Using original content instead.`);
+    return true;
+  }
+  
+  return false;
+}
