@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { createEmbedding } from '../services/embedding';
-import { parseDocument, parsePdfByPages, processImageFolder, prepareContentForChunking } from '../services/document';
+import { parseDocument, parsePdfByPages, parseDocxByPages, processImageFolder, prepareContentForChunking, correctOcrWithLLM } from '../services/document';
 import { DatabaseService } from '../core/database-service';
 import { TaskType } from '@google/generative-ai';
 import { chunkDocument, ChunkingConfig } from '../services/chunking';
@@ -18,6 +18,7 @@ dbService.initialize().catch(err => {
 // Parse a document, split into chunks, embed each chunk and store in vector DB
 export const parseAndStoreDocument = async (req: Request, res: Response) => {
   try {
+    // Validate that file exists
     if (!req.file) {
       return res.status(400).json({ message: 'No file uploaded' });
     }
@@ -44,7 +45,6 @@ export const parseAndStoreDocument = async (req: Request, res: Response) => {
     // Get domains from request body or use default
     let domains: string[] = ['default'];
     if (req.body.domains) {
-      // If domains is provided as a string, parse it as JSON
       if (typeof req.body.domains === 'string') {
         try {
           domains = JSON.parse(req.body.domains);
@@ -52,25 +52,20 @@ export const parseAndStoreDocument = async (req: Request, res: Response) => {
             domains = [req.body.domains];
           }
         } catch (error) {
-          // If parsing fails, use the string as a single domain
           domains = [req.body.domains];
         }
-      } 
-      // If domains is already an array, use it directly
-      else if (Array.isArray(req.body.domains)) {
+      } else if (Array.isArray(req.body.domains)) {
         domains = req.body.domains;
-      }
-      // If domain is provided as a single string, use it
-      else if (req.body.domain) {
+      } else if (req.body.domain) {
         domains = [req.body.domain];
       }
     }
     
     // Get document title from request body if provided
-    const documentTitle = req.body.documentTitle || '';
+    const documentTitle = req.body.documentTitle || req.file.originalname;
 
-    // Parse document into chunks based on document type
-    let chunks;
+    // Process document and create chunks
+    let chunks: any[] = [];
     
     if (req.file.mimetype === 'application/pdf') {
       console.log(`Processing PDF document: ${req.file.originalname}`);
@@ -88,9 +83,27 @@ export const parseAndStoreDocument = async (req: Request, res: Response) => {
       
       // Chunk the PDF by pages
       chunks = await chunkDocument(preparedDocument, req.file.path, chunkingConfig, domains, documentTitle);
-    } else {
-      console.log(`Processing non-PDF document: ${req.file.originalname} (${req.file.mimetype})`);
-      // For non-PDF documents, treat as a single page and chunk it
+    } 
+    else if (req.file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      console.log(`Processing DOCX document: ${req.file.originalname}`);
+      // Parse DOCX into logical pages/sections
+      const docxPages = await parseDocxByPages(req.file.path);
+      
+      // Create proper document structure with ID
+      const document = {
+        id: path.basename(req.file.originalname, path.extname(req.file.originalname)),
+        pages: docxPages.pages
+      };
+      
+      // Prepare content for better sentence boundaries and potentially OCR correction
+      const preparedDocument = await prepareContentForChunking(document);
+      
+      // Chunk the DOCX by sections
+      chunks = await chunkDocument(preparedDocument, req.file.path, chunkingConfig, domains, documentTitle);
+    }
+    else {
+      console.log(`Processing other document type: ${req.file.originalname} (${req.file.mimetype})`);
+      // For other document types, treat as a single page and chunk it
       const fileContent = await parseDocument(req.file.path, req.file.mimetype);
       
       // Create a single page document structure

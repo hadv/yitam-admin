@@ -105,6 +105,156 @@ export const parseDocument = async (filePath: string, mimeType: string): Promise
   }
 };
 
+// Parse DOCX document into sections/pages for better chunking
+export const parseDocxByPages = async (filePath: string): Promise<{ pages: { pageNumber: number; content: string }[] }> => {
+  try {
+    // Make sure the file exists
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    // Read DOCX file
+    const docxBuffer = await readFile(filePath);
+    
+    // Extract raw text
+    const docxResult = await mammoth.extractRawText({ buffer: docxBuffer });
+    const fullText = docxResult.value;
+    
+    console.log(`📄 Extracted ${fullText.length} characters from DOCX document`);
+    
+    // Array to store page data
+    const pages: { pageNumber: number; content: string }[] = [];
+    
+    // Split document into logical sections
+    // Method 1: Split by paragraph markers (double newlines)
+    const paragraphs = fullText.split(/\n\s*\n/).filter(p => p.trim());
+    
+    // Method 2: Look for headings as section dividers
+    const headingRegex = /^(?:[\s\t]*)(#{1,6}|[A-Z\d][\.\)]\s+|[IVXLCDM]+\.\s+|Chapter\s+\d+|Section\s+\d+|Phần\s+\d+|Chương\s+\d+|Mục\s+\d+)(?:[\s\t]*)([^\n]+)$/gm;
+    const headingMatches = [...fullText.matchAll(headingRegex)];
+    
+    // Method 3: Estimate page breaks (~ 3000 characters per "page")
+    const estimatedPageSize = 3000;
+    
+    // If we have clear headings, use them to split
+    if (headingMatches.length > 4) {
+      console.log(`🔍 Found ${headingMatches.length} headings to use as section breaks`);
+      
+      let lastIndex = 0;
+      let pageNumber = 1;
+      
+      // Create a map of heading positions
+      const headingPositions = headingMatches.map(match => match.index).filter(index => index !== undefined) as number[];
+      
+      // Split by headings
+      for (let i = 0; i < headingPositions.length; i++) {
+        const startPos = lastIndex;
+        const endPos = i < headingPositions.length - 1 ? headingPositions[i + 1] : fullText.length;
+        
+        // Extract content for this section
+        const content = fullText.substring(startPos, endPos).trim();
+        
+        // Only add non-empty sections
+        if (content.length > 10) {
+          pages.push({
+            pageNumber,
+            content
+          });
+          pageNumber++;
+        }
+        
+        lastIndex = endPos;
+      }
+      
+      // Add any remaining content
+      if (lastIndex < fullText.length) {
+        const remainingContent = fullText.substring(lastIndex).trim();
+        if (remainingContent.length > 10) {
+          pages.push({
+            pageNumber,
+            content: remainingContent
+          });
+        }
+      }
+    } 
+    // If we have enough paragraphs, use them to create logical sections
+    else if (paragraphs.length > 10) {
+      console.log(`🔍 Using ${paragraphs.length} paragraphs to create logical sections`);
+      
+      // Group paragraphs into sections of roughly equal size
+      const paragraphsPerSection = Math.max(3, Math.ceil(paragraphs.length / 15)); // Aim for ~15 sections
+      let currentSection: string[] = [];
+      let pageNumber = 1;
+      
+      paragraphs.forEach((para, index) => {
+        currentSection.push(para);
+        
+        // When we reach the paragraphs per section limit, or at the end
+        if (currentSection.length >= paragraphsPerSection || index === paragraphs.length - 1) {
+          pages.push({
+            pageNumber,
+            content: currentSection.join('\n\n')
+          });
+          pageNumber++;
+          currentSection = [];
+        }
+      });
+    } 
+    // Otherwise, just split by estimated page size
+    else {
+      console.log(`🔍 Splitting document into ${Math.ceil(fullText.length / estimatedPageSize)} estimated pages`);
+      
+      // Find reasonable break points (end of paragraphs) near our target page size
+      let currentPos = 0;
+      let pageNumber = 1;
+      
+      while (currentPos < fullText.length) {
+        // Calculate the target end position
+        let targetEndPos = Math.min(currentPos + estimatedPageSize, fullText.length);
+        
+        // If we're not at the end, find a good break point (end of paragraph)
+        if (targetEndPos < fullText.length) {
+          // Look for paragraph break within 500 chars of target
+          const searchArea = fullText.substring(targetEndPos - 500, targetEndPos + 500);
+          const paragraphBreaks = [...searchArea.matchAll(/\.\s+(?=[A-Z])/g)];
+          
+          if (paragraphBreaks.length > 0) {
+            // Find break point closest to our target
+            let closestBreak = paragraphBreaks.reduce((closest, match) => {
+              const pos = (match.index || 0) + targetEndPos - 500;
+              const distance = Math.abs(pos - targetEndPos);
+              return distance < Math.abs(closest - targetEndPos) ? pos : closest;
+            }, targetEndPos);
+            
+            targetEndPos = closestBreak + 2; // +2 to include the period and space
+          }
+        }
+        
+        // Extract content for this page
+        const content = fullText.substring(currentPos, targetEndPos).trim();
+        
+        // Only add non-empty pages
+        if (content.length > 10) {
+          pages.push({
+            pageNumber,
+            content
+          });
+          pageNumber++;
+        }
+        
+        currentPos = targetEndPos;
+      }
+    }
+    
+    console.log(`📑 Created ${pages.length} logical pages/sections from DOCX document`);
+    
+    return { pages };
+  } catch (error) {
+    console.error(`Error parsing DOCX by pages ${path.basename(filePath)}:`, error);
+    throw new Error('Failed to parse DOCX document by pages');
+  }
+};
+
 // Process an image with Google Cloud Vision OCR
 const processImageWithOCR = async (imagePath: string): Promise<string> => {
   try {
