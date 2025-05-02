@@ -24,7 +24,7 @@ const storage = multer.diskStorage({
 });
 
 // File filter to accept only specific document types
-const fileFilter = (req: Express.Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+const fileFilter = (req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
   const allowedFileTypes = [
     'application/pdf',
     'text/plain',

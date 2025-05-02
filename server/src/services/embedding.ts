@@ -122,7 +122,7 @@ async function generateGeminiEmbedding(
  * Split text into chunks that don't exceed the maximum size
  * Tries to split on paragraph boundaries first, then sentences if needed
  */
-function chunkText(text: string, maxChunkSize: number): string[] {
+export function chunkText(text: string, maxChunkSize: number): string[] {
   // Split by paragraphs first (double newlines)
   const paragraphs = text.split(/\n\s*\n/);
   

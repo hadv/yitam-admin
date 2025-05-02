@@ -2,30 +2,11 @@ import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import axios from 'axios'
 import { FiUpload, FiFile, FiFolder } from 'react-icons/fi'
+import { availableDomains } from '../constants/domains'
 
 interface DocumentUploadProps {
   onUploadSuccess: () => void
 }
-
-// List of available domains
-const availableDomains = [
-  'nội kinh',
-  'đông y',
-  'y học cổ truyền',
-  'y tông tâm lĩnh',
-  'hải thượng lãn ông',
-  'lê hữu trác',
-  'y quán',
-  'y quán đường',
-  'âm dương ngũ hành',
-  'dịch lý',
-  'lão kinh',
-  'lão tử',
-  'phong thủy',
-  'đạo phật',
-  'thích nhất hạnh',
-  'viên minh'
-]
 
 const DocumentUpload = ({ onUploadSuccess }: DocumentUploadProps) => {
   const [isUploading, setIsUploading] = useState(false)
