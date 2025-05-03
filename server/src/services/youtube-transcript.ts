@@ -1,6 +1,6 @@
 import { getTranscript } from 'youtube-transcript-api';
 import { createEmbedding } from './embedding';
-import { TaskType } from '@google/generative-ai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { enhanceContent, EnhancementType } from './content-enhancement';
@@ -367,186 +367,175 @@ export const getTranscriptWithApiList = async (videoId: string, accessToken: str
 export const processYoutubeTranscript = async (
   videoId: string,
   domains: string[],
-  chunkSize: number = 1000,
-  chunkOverlap: number = 200,
-  userId?: string, // Optional user ID for OAuth authentication
-  accessToken?: string // Optional direct access token
+  chunkSize: number = 4000,
+  chunkOverlap: number = 500,
+  userId?: string,
+  accessToken?: string
 ): Promise<any[]> => {
   try {
-    // Get the transcript data once and format it
-    console.log(`Fetching transcript for video ID: ${videoId}`);
-    
-    // Get video details (actual title from YouTube)
+    // Get video details
     const videoDetails = await getVideoDetails(videoId);
-    
-    let finalTranscript = '';
-    let useOAuth = false;
+    let transcript = '';
+    let errors: string[] = [];
     
     // Try direct web scraping first as the most reliable method
     try {
-      console.log('Attempting to extract transcript directly from YouTube webpage');
-      finalTranscript = await scrapeTranscriptFromYouTube(videoId);
-      console.log(`Successfully extracted transcript by scraping, length: ${finalTranscript.length} characters`);
-    } catch (scrapeError) {
-      console.error('Web scraping method failed:', scrapeError);
+      console.log('Attempting to get transcript using web scraping (primary method)');
+      transcript = await scrapeTranscriptFromYouTube(videoId);
+      console.log(`Successfully retrieved transcript via web scraping with length: ${transcript.length} characters`);
+    } catch (error: any) {
+      const errorMsg = `Web scraping (primary method) failed: ${error.message}`;
+      console.log(errorMsg + '. Falling back to API methods');
+      errors.push(errorMsg);
       
-      // If scraping fails, try the API methods
-      // 1. First try with direct access token if provided
-      if (accessToken) {
+      // If web scraping fails, proceed with API methods
+      // Attempt to get the transcript using API methods
+      if (userId) {
+        // Try OAuth if a userId is provided
         try {
-          console.log('Attempting to get transcript with direct access token');
-          finalTranscript = await getTranscriptWithDirectToken(videoId, accessToken);
-          useOAuth = true;
-          console.log('Successfully retrieved transcript with direct access token');
-        } catch (directTokenError) {
-          console.error('Direct token method failed:', directTokenError);
+          console.log('Attempting to get transcript using OAuth authentication');
+          transcript = await getYouTubeTranscriptWithOAuth(videoId, userId);
+          console.log('Successfully retrieved transcript via OAuth');
+        } catch (error: any) {
+          const errorMsg = `OAuth method failed: ${error.message}`;
+          console.log(errorMsg + '. Trying next method');
+          errors.push(errorMsg);
         }
       }
       
-      // 2. Then try with OAuth if user is authenticated but direct token failed
-      if (!finalTranscript && userId) {
+      // Try direct access token if provided and previous methods failed
+      if (!transcript && accessToken) {
         try {
-          console.log('Attempting to get transcript with OAuth authentication');
-          finalTranscript = await getYouTubeTranscriptWithOAuth(videoId, userId);
-          useOAuth = true;
-          console.log('Successfully retrieved transcript with OAuth authentication');
-        } catch (oauthError) {
-          console.error('OAuth method failed:', oauthError);
+          console.log('Attempting to get transcript using direct access token');
+          transcript = await getTranscriptWithDirectToken(videoId, accessToken);
+          console.log('Successfully retrieved transcript via direct token');
+        } catch (error: any) {
+          const errorMsg = `Direct token method failed: ${error.message}`;
+          console.log(errorMsg + '. Trying next method');
+          errors.push(errorMsg);
         }
       }
       
-      // 3. Then try with the public API methods if both authenticated methods failed
-      if (!finalTranscript) {
+      // If we still don't have a transcript, try API list method
+      if (!transcript && accessToken) {
         try {
-          console.log('Trying public API transcript methods');
-          finalTranscript = await getTranscriptFromPublicApi(videoId);
-          console.log(`Successfully retrieved transcript using public API methods, length: ${finalTranscript.length} characters`);
-        } catch (publicApiError) {
-          console.error('Public API methods failed:', publicApiError);
+          console.log('Attempting to get transcript using API list method');
+          transcript = await getTranscriptWithApiList(videoId, accessToken);
+          console.log('Successfully retrieved transcript via API list method');
+        } catch (error: any) {
+          const errorMsg = `API list method failed: ${error.message}`;
+          console.log(errorMsg + '. Trying next method');
+          errors.push(errorMsg);
+        }
+      }
+      
+      // Try public API approach with youtube-transcript-api
+      if (!transcript) {
+        try {
+          console.log('Attempting to get transcript using YouTube transcript API');
+          const transcriptItems = await getAutoGeneratedTranscript(videoId);
+          transcript = transcriptItems.map(item => `[${Math.floor(item.offset / 60000)}:${Math.floor((item.offset % 60000) / 1000)}] ${item.text}`).join('\n');
+          console.log(`Successfully retrieved transcript with ${transcriptItems.length} items using YouTube transcript API`);
+        } catch (error: any) {
+          const errorMsg = `YouTube transcript API failed: ${error.message}`;
+          console.log(errorMsg);
+          errors.push(errorMsg);
           
-          // 4. Last resort: use youtube-transcript-api library
-          try {
-            console.log('Trying youtube-transcript-api library as last resort');
-            const transcript = await getAutoGeneratedTranscript(videoId);
-            
-            // Format with timestamps
-            const formattedTranscript = transcript.map((item: TranscriptItem) => {
-              const timeInSeconds = item.offset / 1000;
-              const minutes = Math.floor(timeInSeconds / 60);
-              const seconds = Math.floor(timeInSeconds % 60);
-              const formattedTime = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-              
-              return `[${formattedTime}] ${item.text}`;
-            }).join('\n');
-            
-            finalTranscript = formattedTranscript;
-            console.log(`Successfully got transcript from youtube-transcript-api, length: ${finalTranscript.length} characters`);
-          } catch (directApiError) {
-            console.error('All transcript methods failed');
-            
-            // Absolute last resort: just use the video metadata
-            finalTranscript = `Title: ${videoDetails.title}\n\nDescription: ${videoDetails.description || ''}\n\n(No transcript available from any source. Using video metadata only.)`;
-            console.log('Using video metadata as fallback');
+          // If all methods have failed, throw a detailed error
+          if (!transcript) {
+            throw new Error(`All transcript retrieval methods failed for video ${videoId}. Errors: ${errors.join(' | ')}`);
           }
         }
       }
     }
     
-    // If transcript is still empty after all attempts, throw an error
-    if (!finalTranscript.trim()) {
-      throw new Error('Could not retrieve any transcript or metadata from this video');
+    if (!transcript || transcript.trim().length === 0) {
+      throw new Error('Failed to retrieve transcript: All methods returned empty results');
     }
     
-    // If transcript is too short, include video title and description to augment it
-    let textToChunk = finalTranscript;
-    if (finalTranscript.length < 200 && videoDetails.description) {
-      textToChunk = `${videoDetails.title}\n\n${videoDetails.description}\n\n${finalTranscript}`;
-      console.log(`Augmented transcript with title and description, new length: ${textToChunk.length} characters`);
+    console.log(`Successfully retrieved transcript with length: ${transcript.length} characters`);
+    
+    // Include video title in documentName for better readability
+    // But keep a consistent id format for duplicate checking
+    const documentName = videoDetails.title;
+    const idPrefix = `youtube_${videoId}`;
+    
+    // Split the text into chunks
+    const chunks = splitTextIntoChunks(transcript, chunkSize, chunkOverlap);
+    
+    if (chunks.length === 0) {
+      throw new Error('Failed to create text chunks from transcript');
     }
     
-    // Try to enhance the transcript with AI
-    try {
-      // Create a temporary document chunk for AI enhancement
-      const chunk: DocumentChunk = {
-        id: `youtube-transcript-${videoId}`,
-        documentName: `YouTube Video ${videoId}`,
-        content: textToChunk,
-        embedding: [],
-        title: videoDetails.title,
-        summary: '',
+    console.log(`Split transcript into ${chunks.length} chunks`);
+    
+    // Process each chunk
+    const documentChunks: DocumentChunk[] = [];
+    
+    // Try to detect the language of the transcript for AI generation
+    const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(transcript);
+    const detectedLanguage = hasVietnameseChars ? 'Vietnamese' : 'English';
+    
+    for (let i = 0; i < chunks.length; i++) {
+      const content = chunks[i];
+      console.log(`Processing chunk ${i+1}/${chunks.length}, length: ${content.length} characters`);
+      
+      // Create embedding for the chunk
+      const embedding = await createEmbedding(content);
+      
+      // Create clean content for AI processing
+      const cleanContent = content.replace(/\[\d{1,2}:\d{1,2}(:\d{1,2})?\]/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      
+      // Create base document chunk with id format for duplicate checking
+      const tempChunk: DocumentChunk = {
+        id: `${idPrefix}_chunk_${i}`, // Use consistent id format with videoId for duplicate checking
+        documentName: documentName, // Include video title in documentName for readability
+        content: content, // Keep original content with timestamps
+        embedding: embedding,
+        title: `Part ${i+1} of ${videoDetails.title}`, // Default title in case AI generation fails
+        summary: `Part ${i+1} of transcript for video: ${videoDetails.title}`, // Default summary
         sourceFile: `https://www.youtube.com/watch?v=${videoId}`,
         domains: domains || ['youtube']
       };
       
-      // Enhance content using the existing service
-      const enhancedChunk = await enhanceContent(chunk, {
-        types: [EnhancementType.FORMATTING, EnhancementType.READABILITY],
-        temperature: 0.2
-      });
-      
-      if (enhancedChunk.enhancedContent) {
-        textToChunk = enhancedChunk.enhancedContent;
-        console.log(`Enhanced transcript with AI, new length: ${textToChunk.length} characters`);
+      // Enhance the chunk and generate AI title and summary
+      try {
+        // First generate AI title and summary for this chunk in the original language
+        const aiEnhancedMetadata = await generateTitleAndSummary(cleanContent, videoDetails.title, i+1, chunks.length, detectedLanguage);
+        
+        // Create a clean temp chunk with AI-generated metadata for enhancement
+        const cleanTempChunk = {
+          ...tempChunk,
+          content: cleanContent,
+          title: aiEnhancedMetadata.title,
+          summary: aiEnhancedMetadata.summary
+        };
+        
+        // Now enhance the content itself
+        const enhancedChunk = await enhanceContent(cleanTempChunk, {
+          types: [EnhancementType.FORMATTING, EnhancementType.READABILITY]
+        });
+        
+        // Keep the original content with timestamps, but use the enhanced content without timestamps
+        // and the AI-generated title and summary
+        documentChunks.push({
+          ...enhancedChunk,
+          content: tempChunk.content, // Keep original content with timestamps
+          title: aiEnhancedMetadata.title,
+          summary: aiEnhancedMetadata.summary
+        });
+      } catch (error) {
+        console.error(`Error enhancing chunk ${i+1}:`, error);
+        // If enhancement fails, use the original chunk
+        documentChunks.push(tempChunk);
       }
-    } catch (aiError) {
-      console.warn('Failed to enhance transcript with AI:', aiError);
     }
     
-    // Chunk the transcript
-    const textChunks = splitTextIntoChunks(textToChunk, chunkSize, chunkOverlap);
-    
-    console.log(`Created ${textChunks.length} chunks from transcript`);
-    
-    if (textChunks.length === 0) {
-      console.error(`Failed to create chunks from transcript. Final transcript length: ${textToChunk.length}`);
-      
-      // Fallback: Create a single chunk with whatever content we have
-      textChunks.push(textToChunk);
-      console.log('Fallback: Created a single chunk with the entire transcript');
-    }
-    
-    // Create embeddings and format data for storage
-    const chunks = [];
-    
-    for (let i = 0; i < textChunks.length; i++) {
-      const chunkText = textChunks[i];
-      
-      console.log(`Processing chunk ${i+1}/${textChunks.length}, length: ${chunkText.length} characters`);
-      
-      // Generate embedding vector
-      const embedding = await createEmbedding(chunkText, TaskType.RETRIEVAL_DOCUMENT);
-      
-      // Create metadata for the chunk
-      const chunk = {
-        id: `youtube-${videoId}-chunk-${i}`,
-        videoId,
-        content: chunkText,
-        embedding,
-        domains,
-        metadata: {
-          source: 'youtube',
-          sourceId: videoId,
-          sourceUrl: `https://www.youtube.com/watch?v=${videoId}`,
-          documentTitle: videoDetails.title,
-          documentDescription: videoDetails.description || '',
-          chunkIndex: i,
-          totalChunks: textChunks.length,
-          timestamp: new Date().toISOString()
-        }
-      };
-      
-      chunks.push(chunk);
-    }
-    
-    return chunks;
+    return documentChunks;
   } catch (error) {
     console.error('Error processing YouTube transcript:', error);
-    // Enhanced error details
-    if (error instanceof Error) {
-      console.error('Error name:', error.name);
-      console.error('Error message:', error.message);
-      console.error('Error stack:', error.stack);
-    }
     throw error;
   }
 };
@@ -563,7 +552,7 @@ const splitTextIntoChunks = (
     return [text];
   }
   
-  // Try to split by timestamps
+  // Try to split by timestamps - this is the YouTube specific format
   const timestampPattern = /\[\d{2}:\d{2}\]/g;
   const timestamps = text.match(timestampPattern);
   
@@ -574,7 +563,7 @@ const splitTextIntoChunks = (
   }
   
   // Otherwise use timestamp-aware chunking
-  console.log('Using timestamp-aware chunking');
+  console.log('Using timestamp-aware chunking for YouTube transcript');
   const segments = text.split(timestampPattern);
   
   // Reconstruct segments with their timestamps
@@ -583,36 +572,57 @@ const splitTextIntoChunks = (
     lines.push(`${timestamps[i-1]}${segments[i]}`);
   }
   
-  // Now create chunks
+  // Now create chunks, ensuring we keep logical content together
   const chunks: string[] = [];
   let currentChunk = '';
+  let timestampCount = 0;  // Track number of timestamps in current chunk
   
   for (const line of lines) {
-    if ((currentChunk + '\n' + line).length <= chunkSize) {
-      currentChunk += (currentChunk ? '\n' : '') + line;
-    } else {
+    // If this line would exceed chunk size and we already have substantial content
+    if ((currentChunk + '\n' + line).length > chunkSize && timestampCount >= 5) {
+      // Only break if we have at least a few timestamps worth of content
       chunks.push(currentChunk);
       
       // Start new chunk with overlap by including the last few lines from previous chunk
       if (chunkOverlap > 0 && currentChunk.length > 0) {
-        // Take the last few lines that fit within overlap size
-        const lines = currentChunk.split('\n');
+        // Take the last few timestamp segments that fit within overlap size
+        const chunkLines = currentChunk.split('\n');
         let overlapText = '';
         let overlapSize = 0;
+        let overlapTimestamps = 0;
         
-        for (let i = lines.length - 1; i >= 0; i--) {
-          if (overlapSize + lines[i].length <= chunkOverlap) {
-            overlapText = lines[i] + (overlapText ? '\n' + overlapText : '');
-            overlapSize += lines[i].length;
+        // Start from the end and work backward to include enough context
+        for (let i = chunkLines.length - 1; i >= 0; i--) {
+          if (overlapSize + chunkLines[i].length <= chunkOverlap || overlapTimestamps < 3) {
+            // Add to overlap if under size limit or we need more timestamp context
+            overlapText = chunkLines[i] + (overlapText ? '\n' + overlapText : '');
+            overlapSize += chunkLines[i].length + 1; // +1 for newline
+            if (chunkLines[i].match(timestampPattern)) {
+              overlapTimestamps++;
+            }
           } else {
             break;
           }
         }
         
-        currentChunk = overlapText + '\n' + line;
+        currentChunk = overlapText;
+        timestampCount = overlapTimestamps;
       } else {
-        currentChunk = line;
+        currentChunk = '';
+        timestampCount = 0;
       }
+    }
+    
+    // Add the current line to the chunk
+    if (currentChunk) {
+      currentChunk += '\n' + line;
+    } else {
+      currentChunk = line;
+    }
+    
+    // Increment timestamp counter if this line has a timestamp
+    if (line.match(timestampPattern)) {
+      timestampCount++;
     }
   }
   
@@ -760,92 +770,182 @@ export const scrapeTranscriptFromYouTube = async (videoId: string): Promise<stri
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const response = await axios.get(videoUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
       }
     });
     
     const html = response.data;
     
-    // Extract serializedShareEntity which contains caption info
-    const serializedShareEntityMatch = html.match(/"captions":\s*(\{.*?\}\s*\})/);
-    if (!serializedShareEntityMatch || !serializedShareEntityMatch[1]) {
-      throw new Error('No caption data found in video page');
+    // Try different regex patterns to locate caption data
+    let captionData;
+    let captionUrl;
+    
+    // Pattern 1: Try to find the newer format of caption data
+    const newPatternMatch = html.match(/\{"captionTracks":(\[.*?\])/);
+    if (newPatternMatch && newPatternMatch[1]) {
+      try {
+        const captionTracksJson = JSON.parse(newPatternMatch[1]);
+        if (captionTracksJson && captionTracksJson.length > 0) {
+          captionUrl = captionTracksJson[0].baseUrl;
+        }
+      } catch (e) {
+        console.log('Failed to parse new caption format:', e);
+      }
     }
     
-    try {
-      // Try to extract the caption track URL
-      const captionData = JSON.parse('{' + serializedShareEntityMatch[1] + '}');
-      
-      if (captionData && captionData.playerCaptionsTracklistRenderer && 
-          captionData.playerCaptionsTracklistRenderer.captionTracks && 
-          captionData.playerCaptionsTracklistRenderer.captionTracks.length > 0) {
-        
-        // Get the first available caption track URL
-        const captionTrack = captionData.playerCaptionsTracklistRenderer.captionTracks[0];
-        const captionUrl = captionTrack.baseUrl;
-        
-        if (captionUrl) {
-          // Fetch the caption content (XML format)
-          const captionResponse = await axios.get(captionUrl);
-          const captionXml = captionResponse.data;
-          
-          // Parse XML to extract text with timestamps
-          const $ = cheerio.load(captionXml, { xmlMode: true });
-          const transcriptLines: string[] = [];
-          
-          $('text').each((i, elem) => {
-            const start = parseFloat($(elem).attr('start') || '0');
-            const minutes = Math.floor(start / 60);
-            const seconds = Math.floor(start % 60);
-            const timeCode = `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
-            
-            const text = $(elem).text().trim();
-            if (text) {
-              transcriptLines.push(`${timeCode} ${text}`);
-            }
-          });
-          
-          return transcriptLines.join('\n');
+    // Pattern 2: Try the older format
+    if (!captionUrl) {
+      const oldPatternMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
+      if (oldPatternMatch && oldPatternMatch[1]) {
+        try {
+          const captionTracksJson = JSON.parse(oldPatternMatch[1].replace(/\\"/g, '"').replace(/\\u0026/g, '&'));
+          if (captionTracksJson && captionTracksJson.length > 0) {
+            captionUrl = captionTracksJson[0].baseUrl;
+          }
+        } catch (e) {
+          console.log('Failed to parse old caption format:', e);
         }
       }
+    }
+    
+    // Pattern 3: Try direct URL regex (most reliable fallback)
+    if (!captionUrl) {
+      const directUrlMatch = html.match(/https:\/\/www.youtube.com\/api\/timedtext[^"]*/) || 
+                            html.match(/https:\/\/www.youtube.com\/api\/timedtext[^&]*/) ||
+                            html.match(/"(https:\/\/www\.youtube\.com\/api\/timedtext[^"]*)"/);
       
-      throw new Error('No caption tracks found in video data');
-    } catch (parseError) {
-      console.error('Error parsing caption data:', parseError);
-      
-      // Alternative method using regex to find caption URL directly
-      const captionUrlMatch = html.match(/captionTracks.*?(https:\/\/www.youtube.com\/api\/timedtext[^"]*)/);
-      if (!captionUrlMatch || !captionUrlMatch[1]) {
-        throw new Error('Could not find caption URL in video page');
+      if (directUrlMatch && directUrlMatch[0]) {
+        captionUrl = directUrlMatch[0].replace(/\\u0026/g, '&');
       }
+    }
+    
+    if (!captionUrl) {
+      throw new Error('Could not find caption URL in video page. The video may not have captions enabled.');
+    }
+    
+    console.log(`Found caption URL: ${captionUrl}`);
+    
+    // Fetch the caption content (XML format)
+    const captionResponse = await axios.get(captionUrl);
+    const captionXml = captionResponse.data;
+    
+    if (!captionXml || captionXml.length < 10) {
+      throw new Error('Received empty caption data from YouTube');
+    }
+    
+    // Parse XML to extract text with timestamps
+    const $ = cheerio.load(captionXml, { xmlMode: true });
+    const transcriptLines: string[] = [];
+    
+    $('text').each((i, elem) => {
+      const start = parseFloat($(elem).attr('start') || '0');
       
-      const captionUrl = captionUrlMatch[1].replace(/\\u0026/g, '&');
-      
-      // Fetch the caption content
-      const captionResponse = await axios.get(captionUrl);
-      const captionXml = captionResponse.data;
-      
-      // Parse XML to extract text with timestamps
-      const $ = cheerio.load(captionXml, { xmlMode: true });
-      const transcriptLines: string[] = [];
-      
-      $('text').each((i, elem) => {
-        const start = parseFloat($(elem).attr('start') || '0');
+      // Format the timestamp with hours if needed
+      let timeCode: string;
+      if (start >= 3600) {
+        // Format as [HH:MM:SS] for videos longer than 1 hour
+        const hours = Math.floor(start / 3600);
+        const minutes = Math.floor((start % 3600) / 60);
+        const seconds = Math.floor(start % 60);
+        timeCode = `[${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
+      } else {
+        // Format as [MM:SS] for shorter videos
         const minutes = Math.floor(start / 60);
         const seconds = Math.floor(start % 60);
-        const timeCode = `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
-        
-        const text = $(elem).text().trim();
-        if (text) {
-          transcriptLines.push(`${timeCode} ${text}`);
-        }
-      });
+        timeCode = `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
+      }
       
-      return transcriptLines.join('\n');
+      const text = $(elem).text().trim();
+      if (text) {
+        transcriptLines.push(`${timeCode} ${text}`);
+      }
+    });
+    
+    if (transcriptLines.length === 0) {
+      throw new Error('No transcript lines found after parsing caption data');
     }
+    
+    return transcriptLines.join('\n');
   } catch (error) {
     console.error('Error scraping transcript from YouTube:', error);
     throw new Error(`Failed to scrape transcript: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
-}; 
+};
+
+/**
+ * Generate a specific title and summary for a chunk using generative AI
+ */
+async function generateTitleAndSummary(
+  content: string,
+  videoTitle: string,
+  chunkNumber: number,
+  totalChunks: number,
+  language: string = 'English'
+): Promise<{ title: string; summary: string }> {
+  try {
+    // Initialize Gemini API
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+
+    // Extract a shorter sample of the content for the title/summary generation
+    // to avoid token limits (first 1500 chars should be enough for context)
+    const contentSample = content.length > 1500 ? content.substring(0, 1500) + "..." : content;
+    
+    // Create a prompt for generating title and summary
+    const prompt = `You are analyzing a segment of a transcript from the YouTube video titled "${videoTitle}". 
+This is part ${chunkNumber} of ${totalChunks} from the transcript.
+
+The transcript is in ${language}. YOU MUST GENERATE THE TITLE AND SUMMARY IN ${language} as well.
+
+Here's the transcript segment:
+"""
+${contentSample}
+"""
+
+Please generate:
+1. A descriptive title (maximum 10 words) for just this specific segment that captures its main topic or theme
+2. A concise summary (maximum 100 words) of the key points covered in this specific segment
+
+Format your response exactly like this:
+TITLE: [your generated title in ${language}]
+SUMMARY: [your generated summary in ${language}]`;
+
+    // Call Gemini API to generate title and summary
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 1000,
+      }
+    });
+
+    const responseText = result.response.text().trim();
+    
+    // Parse the response to extract title and summary
+    let title = `Part ${chunkNumber} of ${videoTitle}`;
+    let summary = `Part ${chunkNumber} of transcript for video: ${videoTitle}`;
+    
+    const titleMatch = responseText.match(/TITLE:\s*(.*?)(?=\n|$)/i);
+    if (titleMatch && titleMatch[1]) {
+      title = titleMatch[1].trim();
+    }
+    
+    const summaryMatch = responseText.match(/SUMMARY:\s*([\s\S]*?)(?=\n\n|$)/i);
+    if (summaryMatch && summaryMatch[1]) {
+      summary = summaryMatch[1].trim();
+    }
+    
+    console.log(`Generated AI title for chunk ${chunkNumber}: "${title}"`);
+    return { title, summary };
+  } catch (error) {
+    console.error('Error generating title and summary:', error);
+    // Return defaults if generation fails
+    return { 
+      title: `Part ${chunkNumber} of ${videoTitle}`,
+      summary: `Part ${chunkNumber} of transcript for video: ${videoTitle}`
+    };
+  }
+} 

@@ -22,6 +22,18 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Invalid YouTube URL' });
     }
     
+    // First, check if this video has already been transcribed
+    const transcriptExists = await dbService.doesTranscriptExist(videoId);
+    
+    if (transcriptExists) {
+      return res.status(200).json({
+        message: 'This video has already been transcribed',
+        videoId,
+        videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        alreadyProcessed: true
+      });
+    }
+    
     // Get video details first
     const videoDetails = await getVideoDetails(videoId);
     
@@ -45,8 +57,8 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
     }
     
     // Extract chunking options from request if available
-    const chunkSize = req.body.chunkSize ? parseInt(req.body.chunkSize, 10) : 1000;
-    const chunkOverlap = req.body.chunkOverlap ? parseInt(req.body.chunkOverlap, 10) : 200;
+    const chunkSize = req.body.chunkSize ? parseInt(req.body.chunkSize, 10) : 4000;
+    const chunkOverlap = req.body.chunkOverlap ? parseInt(req.body.chunkOverlap, 10) : 500;
     
     console.log(`Processing YouTube video: "${videoDetails.title}" (${videoId}) in domains: ${domains.join(', ')}`);
     
@@ -156,4 +168,30 @@ export const checkTranscriptAccess = (req: Request, res: Response) => {
     authenticated: isAuthorized,
     userId: isAuthorized ? userId : null
   });
+};
+
+// Check if a transcript already exists for a given videoId
+export const checkTranscriptExists = async (req: Request, res: Response) => {
+  try {
+    const { videoId } = req.params;
+    
+    if (!videoId) {
+      return res.status(400).json({ message: 'Video ID is required' });
+    }
+    
+    // Check if the transcript exists in the database
+    const exists = await dbService.doesTranscriptExist(videoId);
+    
+    res.status(200).json({
+      exists,
+      videoId
+    });
+  } catch (error) {
+    console.error('Error checking transcript existence:', error);
+    
+    res.status(500).json({ 
+      message: 'Failed to check if transcript exists',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
 }; 

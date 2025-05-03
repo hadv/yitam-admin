@@ -204,4 +204,63 @@ export class DatabaseService {
       this.fallbackService.isFallbackActive()
     );
   }
+
+  // Check if a transcript already exists for a specific videoId
+  public async doesTranscriptExist(videoId: string): Promise<boolean> {
+    const idPattern = `youtube_${videoId}`;
+    
+    return this.fallbackService.withFallback(
+      'doesTranscriptExist',
+      // Fallback function
+      () => {
+        // Search in-memory documents for the videoId in the id field
+        return Array.from(inMemoryDocuments.values())
+          .some(item => {
+            const doc = item.document;
+            return doc.id.startsWith(idPattern);
+          });
+      },
+      // Qdrant function
+      async () => {
+        // Search for documents with an ID that starts with the pattern
+        const filter = {
+          must: [
+            {
+              key: 'id',
+              match: {
+                text: idPattern,
+                exact: false // Using non-exact match to find IDs that start with this pattern
+              }
+            }
+          ]
+        };
+        
+        try {
+          const results = await this.qdrantClient.scroll(COLLECTION_NAME, {
+            filter: filter,
+            limit: 1,
+            with_payload: true
+          });
+          
+          return results.points.length > 0;
+        } catch (error) {
+          // If text matching is not supported, try alternative approach
+          console.error('Error searching by ID pattern:', error);
+          
+          // Alternative: Get all documents and check client-side
+          const allResults = await this.qdrantClient.scroll(COLLECTION_NAME, {
+            limit: 100, // Reasonable limit to check
+            with_payload: true
+          });
+          
+          // Check if any document ID starts with the pattern
+          return allResults.points.some(point => {
+            const payload = point.payload as any;
+            return payload.id && payload.id.startsWith(idPattern);
+          });
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
 } 
