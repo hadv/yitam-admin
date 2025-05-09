@@ -1,15 +1,23 @@
 import { useState } from 'react'
 import DocumentUpload from '@components/DocumentUpload'
 import YoutubeUpload from '@components/YoutubeUpload'
+import YoutubeDelete from '@components/YoutubeDelete'
 
 function App() {
   const [uploadSuccess, setUploadSuccess] = useState<boolean>(false)
+  const [deleteSuccess, setDeleteSuccess] = useState<boolean>(false)
   const [activeTab, setActiveTab] = useState<'document' | 'youtube'>('document')
 
   const handleUploadSuccess = () => {
     setUploadSuccess(true)
     // Reset after a short delay
     setTimeout(() => setUploadSuccess(false), 3000)
+  }
+
+  const handleDeleteSuccess = () => {
+    setDeleteSuccess(true)
+    // Reset after a short delay
+    setTimeout(() => setDeleteSuccess(false), 3000)
   }
 
   return (
@@ -25,6 +33,12 @@ function App() {
             {uploadSuccess && (
               <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
                 Content processed and embedded successfully!
+              </div>
+            )}
+            
+            {deleteSuccess && (
+              <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
+                YouTube video chunks deleted successfully!
               </div>
             )}
             
@@ -62,8 +76,15 @@ function App() {
             </div>
             ) : (
               <div>
-                <h2 className="text-xl font-semibold mb-4">Process YouTube Transcript</h2>
-                <YoutubeUpload onUploadSuccess={handleUploadSuccess} />
+                <h2 className="text-xl font-semibold mb-4">YouTube Transcript Management</h2>
+                <div className="mb-8">
+                  <h3 className="text-lg font-semibold mb-4">Process YouTube Transcript</h3>
+                  <YoutubeUpload onUploadSuccess={handleUploadSuccess} />
+                </div>
+                <div className="mt-10">
+                  <h3 className="text-lg font-semibold mb-4">Delete YouTube Transcript</h3>
+                  <YoutubeDelete onDeleteSuccess={handleDeleteSuccess} />
+                </div>
               </div>
             )}
           </div>
