@@ -12,4 +12,7 @@ router.get('/auth-status', youtubeController.checkTranscriptAccess);
 // Route for checking if a transcript exists for a videoId
 router.get('/check-transcript/:videoId', youtubeController.checkTranscriptExists);
 
+// Route for deleting all chunks for a specific videoId to enable re-extraction
+router.delete('/delete-transcript/:videoId', youtubeController.deleteYoutubeVideoChunks);
+
 export default router; 
