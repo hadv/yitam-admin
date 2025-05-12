@@ -104,14 +104,16 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
         
         const response = await axios.get(apiUrl, { 
           headers: { 'Content-Type': 'application/json' },
-          withCredentials: useDirectUrl // Only send credentials for cross-origin requests
+          withCredentials: useDirectUrl, // Only send credentials for cross-origin requests
+          timeout: 10000 // 10 second timeout
         });
         
         console.log('Document chunks response:', response.data);
         setDocumentChunks(response.data.chunks || [])
         setSelectedDocument(documentName)
+        setLoading(false) // Make sure we set loading to false on success
         return; // Success, exit
-      } catch (err) {
+      } catch (err: any) {
         console.error(`Error fetching document chunks (attempt ${retries + 1}):`, err)
         retries++;
         
@@ -122,7 +124,11 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
         }
         
         if (retries >= maxRetries) {
-          setError('Failed to load document chunks. Please try again.')
+          const errorMessage = err.code === 'ECONNABORTED' 
+            ? 'Request timed out. The server may be busy.' 
+            : 'Failed to load document chunks. Please try again.';
+          setError(errorMessage)
+          setDocumentChunks([]) // Reset chunks to empty array on final failure
         } else {
           // Wait before retrying
           await new Promise(resolve => setTimeout(resolve, 1000));
@@ -130,7 +136,7 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
       }
     }
     
-    setLoading(false)
+    setLoading(false) // Make sure loading is set to false even after all retries fail
   }
 
   // Toggle chunk selection
@@ -144,6 +150,8 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
 
   // Select all chunks
   const selectAllChunks = () => {
+    if (loading) return; // Don't allow selection during loading
+    
     if (selectedChunks.length === documentChunks.length) {
       // If all are selected, deselect all
       setSelectedChunks([])
@@ -163,7 +171,7 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
 
   // Delete selected chunks
   const deleteSelectedChunks = async () => {
-    if (selectedChunks.length === 0) return
+    if (selectedChunks.length === 0 || loading) return
     
     if (!confirm(`Are you sure you want to delete ${selectedChunks.length} selected chunks?`)) {
       return
@@ -189,7 +197,8 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
         const response = await axios.delete(apiUrl, {
           data: { chunkIds: selectedChunks },
           headers: { 'Content-Type': 'application/json' },
-          withCredentials: useDirectUrl // Only send credentials for cross-origin requests
+          withCredentials: useDirectUrl, // Only send credentials for cross-origin requests
+          timeout: 10000 // 10 second timeout
         });
         
         console.log('Delete response:', response.data);
@@ -198,6 +207,7 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
         // Refresh the document chunks list
         if (selectedDocument) {
           await fetchDocumentChunks(selectedDocument)
+          return; // Skip setting loading to false here as fetchDocumentChunks will do it
         }
         
         // Clear selection
@@ -208,8 +218,9 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
           onChunksDeleted()
         }
         
+        setLoading(false)
         return; // Success, exit
-      } catch (err) {
+      } catch (err: any) {
         console.error(`Error deleting chunks (attempt ${retries + 1}):`, err)
         retries++;
         
@@ -220,7 +231,10 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
         }
         
         if (retries >= maxRetries) {
-          setError('Failed to delete chunks. Please try again.')
+          const errorMessage = err.code === 'ECONNABORTED' 
+            ? 'Request timed out. The server may be busy.' 
+            : 'Failed to delete chunks. Please try again.';
+          setError(errorMessage)
         } else {
           // Wait before retrying
           await new Promise(resolve => setTimeout(resolve, 1000));
@@ -353,7 +367,12 @@ const DocumentManagement = ({ onChunksDeleted }: DocumentManagementProps) => {
               </div>
               
               {loading && (
-                <div className="p-4 text-gray-700 text-center font-medium">Loading chunks...</div>
+                <div className="p-4 text-gray-700 text-center font-medium">
+                  <div className="animate-pulse flex flex-col items-center">
+                    <div className="w-8 h-8 rounded-full bg-blue-400 mb-2"></div>
+                    <p>Loading chunks...</p>
+                  </div>
+                </div>
               )}
               
               {!loading && documentChunks.length === 0 && (
