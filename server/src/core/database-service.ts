@@ -333,4 +333,202 @@ export class DatabaseService {
       this.fallbackService.isFallbackActive()
     );
   }
+
+  // Get all unique document names in the database
+  public async getUniqueDocumentNames(): Promise<string[]> {
+    return this.fallbackService.withFallback(
+      'getUniqueDocumentNames',
+      // Fallback function
+      () => {
+        const documentNames = new Set<string>();
+        
+        // Collect unique document names from in-memory storage
+        Array.from(inMemoryDocuments.values()).forEach(item => {
+          if (item.document.documentName) {
+            documentNames.add(item.document.documentName);
+          }
+        });
+        
+        return Array.from(documentNames);
+      },
+      // Qdrant function
+      async () => {
+        try {
+          // We need to scroll through all documents to get unique document names
+          // Note: This is not the most efficient solution for large collections
+          // In a production environment, consider using a separate index or database
+          
+          const documentNames = new Set<string>();
+          let nextPageOffset: string | undefined;
+          const limit = 100;
+          
+          do {
+            const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+              with_payload: { include: ['documentName'] },
+              limit,
+              offset: nextPageOffset,
+            });
+            
+            response.points.forEach(point => {
+              const payload = point.payload as any;
+              if (payload.documentName) {
+                documentNames.add(payload.documentName);
+              }
+            });
+            
+            nextPageOffset = response.next_page_offset as string | undefined;
+          } while (nextPageOffset);
+          
+          return Array.from(documentNames);
+        } catch (error) {
+          console.error('Error getting unique document names:', error);
+          return [];
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+  
+  // Get all chunks for a specific document name
+  public async getChunksByDocumentName(documentName: string): Promise<SearchResult[]> {
+    return this.fallbackService.withFallback(
+      'getChunksByDocumentName',
+      // Fallback function
+      () => {
+        // Get chunks from in-memory storage
+        return Array.from(inMemoryDocuments.values())
+          .filter(item => item.document.documentName === documentName)
+          .map(item => {
+            const doc = item.document;
+            return {
+              id: doc.id,
+              documentName: doc.documentName,
+              content: doc.content,
+              enhancedContent: doc.enhancedContent,
+              title: doc.title,
+              summary: doc.summary,
+              sourceFile: doc.sourceFile,
+              domains: doc.domains,
+              score: 1.0 // Not relevant for this query but needed for type
+            };
+          });
+      },
+      // Qdrant function
+      async () => {
+        const filter = {
+          must: [
+            {
+              key: 'documentName',
+              match: { 
+                value: documentName
+              }
+            }
+          ]
+        };
+        
+        try {
+          // Use scroll to get all chunks
+          const chunks: SearchResult[] = [];
+          let nextPageOffset: string | undefined;
+          const limit = 100;
+          
+          do {
+            const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+              filter,
+              with_payload: true,
+              limit,
+              offset: nextPageOffset,
+            });
+            
+            const resultsPage = response.points.map(point => {
+              const payload = point.payload as any;
+              
+              return {
+                id: payload.id,
+                documentName: payload.documentName,
+                content: payload.content,
+                enhancedContent: payload.enhancedContent,
+                title: payload.title,
+                summary: payload.summary,
+                sourceFile: payload.sourceFile,
+                domains: payload.domains || ['default'],
+                score: 1.0 // Not relevant for this query but needed for type
+              };
+            });
+            
+            chunks.push(...resultsPage);
+            nextPageOffset = response.next_page_offset as string | undefined;
+          } while (nextPageOffset);
+          
+          return chunks;
+        } catch (error) {
+          console.error(`Error getting chunks for document ${documentName}:`, error);
+          return [];
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+  
+  // Delete chunks by their IDs
+  public async deleteChunksByIds(chunkIds: string[]): Promise<number> {
+    return this.fallbackService.withFallback(
+      'deleteChunksByIds',
+      // Fallback function
+      () => {
+        let deletedCount = 0;
+        
+        // Delete each matching document
+        for (const id of chunkIds) {
+          if (inMemoryDocuments.has(id)) {
+            inMemoryDocuments.delete(id);
+            deletedCount++;
+          }
+        }
+        
+        console.log(`Deleted ${deletedCount} in-memory chunks`);
+        return deletedCount;
+      },
+      // Qdrant function
+      async () => {
+        if (chunkIds.length === 0) return 0;
+        
+        try {
+          // In Qdrant, we need to create a filter that matches these IDs
+          const filter = {
+            should: chunkIds.map(id => ({
+              key: 'id',
+              match: { value: id }
+            }))
+          };
+          
+          console.log(`Attempting to delete ${chunkIds.length} chunks`);
+          
+          // Count how many points match our filter
+          const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
+          const pointCount = countResponse.count;
+          
+          if (pointCount === 0) {
+            console.log('No matching chunks found to delete');
+            return 0;
+          }
+          
+          console.log(`Found ${pointCount} chunks to delete`);
+          
+          // Use the delete method with the filter
+          await this.qdrantClient.delete(COLLECTION_NAME, {
+            filter,
+            wait: true
+          });
+          
+          console.log(`Deleted ${pointCount} chunks`);
+          return pointCount;
+        } catch (error) {
+          console.error('Error deleting chunks:', error);
+          return 0;
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
 } 

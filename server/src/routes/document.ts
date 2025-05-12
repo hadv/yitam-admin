@@ -53,4 +53,10 @@ router.post('/upload', upload.single('document'), documentController.parseAndSto
 router.post('/upload-folder', upload.array('documents', 50), documentController.parseAndStoreImageFolder);
 router.get('/search', documentController.searchDocuments);
 
+// New routes for document management
+router.get('/list', documentController.listDocuments);
+router.get('/search-by-name', documentController.searchDocumentsByName);
+router.get('/chunks/:documentName', documentController.getChunksByDocumentName);
+router.delete('/chunks', documentController.deleteChunks);
+
 export default router; 
