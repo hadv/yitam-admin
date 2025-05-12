@@ -344,4 +344,110 @@ export const searchDocuments = async (req: Request, res: Response) => {
     console.error('Error searching documents:', error);
     res.status(500).json({ message: 'Failed to search documents' });
   }
+};
+
+// List all unique document names
+export const listDocuments = async (req: Request, res: Response) => {
+  try {
+    const { limit } = req.query;
+    
+    // Get the limit parameter with a default value
+    const documentLimit = limit && !isNaN(Number(limit)) ? Number(limit) : 0;
+    
+    const documentNames = await dbService.getUniqueDocumentNames();
+    
+    // Return either all documents or just the limited number
+    res.status(200).json({
+      documents: documentLimit > 0 ? documentNames.slice(0, documentLimit) : documentNames,
+      total: documentNames.length,
+      hasMore: documentLimit > 0 && documentNames.length > documentLimit
+    });
+  } catch (error) {
+    console.error('Error listing documents:', error);
+    res.status(500).json({ message: 'Failed to list documents' });
+  }
+};
+
+// Get all chunks for a specific document name
+export const getChunksByDocumentName = async (req: Request, res: Response) => {
+  try {
+    const { documentName } = req.params;
+    
+    if (!documentName) {
+      return res.status(400).json({ message: 'Document name is required' });
+    }
+    
+    const chunks = await dbService.getChunksByDocumentName(documentName);
+    
+    res.status(200).json({
+      documentName,
+      chunks,
+      totalChunks: chunks.length
+    });
+  } catch (error) {
+    console.error('Error getting document chunks:', error);
+    res.status(500).json({ message: 'Failed to get document chunks' });
+  }
+};
+
+// Delete selected chunks by their IDs
+export const deleteChunks = async (req: Request, res: Response) => {
+  try {
+    const { chunkIds } = req.body;
+    
+    if (!chunkIds || !Array.isArray(chunkIds) || chunkIds.length === 0) {
+      return res.status(400).json({ message: 'Chunk IDs array is required' });
+    }
+    
+    const deletedCount = await dbService.deleteChunksByIds(chunkIds);
+    
+    res.status(200).json({
+      message: `Successfully deleted ${deletedCount} chunks`,
+      deletedCount
+    });
+  } catch (error) {
+    console.error('Error deleting chunks:', error);
+    res.status(500).json({ message: 'Failed to delete chunks' });
+  }
+};
+
+// Search documents by name
+export const searchDocumentsByName = async (req: Request, res: Response) => {
+  try {
+    const { term, limit } = req.query;
+    
+    if (!term || typeof term !== 'string') {
+      return res.status(400).json({ message: 'Search term is required' });
+    }
+    
+    // Get the limit parameter with a default value
+    const searchLimit = limit && !isNaN(Number(limit)) ? Number(limit) : 20;
+    
+    // Properly decode the search term
+    const decodedTerm = decodeURIComponent(term);
+    console.log(`Searching for documents with decoded term: "${decodedTerm}"`);
+    
+    // First get all documents
+    const allDocuments = await dbService.getUniqueDocumentNames();
+    
+    // Filter documents by name using case-insensitive and normalized comparison
+    const filteredDocuments = allDocuments.filter(docName => {
+      // Normalize both strings for comparison to handle diacritics properly
+      const normalizedDocName = docName.toLowerCase().normalize('NFC');
+      const normalizedTerm = decodedTerm.toLowerCase().normalize('NFC');
+      return normalizedDocName.includes(normalizedTerm);
+    });
+    
+    console.log(`Found ${filteredDocuments.length} documents matching term "${decodedTerm}"`);
+    
+    // Return the filtered list, limited to the specified count
+    res.status(200).json({
+      documents: filteredDocuments.slice(0, searchLimit),
+      total: filteredDocuments.length,
+      hasMore: filteredDocuments.length > searchLimit
+    });
+  } catch (error) {
+    console.error('Error searching documents by name:', error);
+    res.status(500).json({ message: 'Failed to search documents' });
+  }
 }; 
