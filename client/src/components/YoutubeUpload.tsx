@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import axios, { AxiosError } from 'axios';
 import { FiYoutube } from 'react-icons/fi';
 import { availableDomains } from '../constants/domains';
+import { socketService } from '../services/socketService';
+import { ProgressStage, ProgressUpdate } from '../types/progress';
 
 // Extend AxiosError with our custom properties
 interface CustomAxiosError extends AxiosError {
@@ -53,6 +55,117 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const tokenClientRef = useRef<any>(null);
   
+  // Progress tracking state
+  const [progressData, setProgressData] = useState<ProgressUpdate | null>(null);
+  const [videoId, setVideoId] = useState<string | null>(null);
+
+  // Initialize socket connection on component mount
+  useEffect(() => {
+    // Connect to socket
+    const connectSocket = async () => {
+      console.log('Initializing socket connection');
+      const connected = await socketService.connect();
+      console.log('Socket connection established:', connected);
+    };
+    
+    connectSocket();
+
+    // Cleanup on component unmount
+    return () => {
+      console.log('Component unmounting, cleaning up socket listeners');
+      if (videoId) {
+        socketService.unregisterProgressListener(videoId);
+      }
+    };
+  }, []);
+
+  // Set up progress listener when videoId changes
+  useEffect(() => {
+    if (!videoId) return;
+    
+    console.log('Setting up progress listener for videoId:', videoId);
+    
+    // Ensure we're connected to the socket
+    const setupListener = async () => {
+      const connected = await socketService.connect();
+      
+      if (!connected) {
+        console.error('Failed to connect to socket server for progress updates');
+        return;
+      }
+      
+      // Register progress listener for this videoId
+      socketService.registerProgressListener(videoId, (update: ProgressUpdate) => {
+        console.log(`Progress update for ${videoId}:`, update);
+        setProgressData(update);
+        
+        // Update processing message based on progress stage
+        switch (update.stage) {
+          case ProgressStage.INITIALIZING:
+            setProcessingMessage('Initializing YouTube video processing...');
+            break;
+          case ProgressStage.TRANSCRIPT_FETCH:
+            setProcessingMessage(`Fetching transcript: ${update.message}`);
+            break;
+          case ProgressStage.TRANSCRIPT_PROCESS:
+            setProcessingMessage(`Processing transcript: ${update.message}`);
+            break;
+          case ProgressStage.CHUNK_CREATION:
+            setProcessingMessage(`Creating chunks: ${update.message}`);
+            break;
+          case ProgressStage.EMBEDDING_GENERATION:
+            setProcessingMessage(`Generating embeddings: ${update.message}`);
+            break;
+          case ProgressStage.CHUNK_STORAGE:
+            setProcessingMessage(`Storing chunks: ${update.message}`);
+            break;
+          case ProgressStage.COMPLETED:
+            setIsProcessing(false);
+            setProcessingMessage('Processing completed successfully!');
+            setTimeout(() => setProcessingMessage(null), 3000); // Clear message after 3 seconds
+            
+            // Store the processing result
+            setProcessingResult({
+              videoTitle: update.message.includes('Created') 
+                ? update.message.replace('Processing completed successfully. Created ', '').replace(' chunks.', '')
+                : 'YouTube Video',
+              totalChunks: update.totalItems || 0,
+              videoId: update.videoId
+            });
+            
+            onUploadSuccess();
+            break;
+          case ProgressStage.ERROR:
+            setIsProcessing(false);
+            setError(update.message);
+            setProcessingMessage(null);
+            break;
+        }
+      });
+      
+      // Explicitly join room for this video
+      socketService.joinVideoRoom(videoId);
+      
+      // If we don't receive any updates within 5 seconds, request the latest progress
+      const noUpdateTimer = setTimeout(() => {
+        console.log('No progress updates received, requesting latest progress');
+        if (socketService.isConnected()) {
+          // Request the latest progress
+          socketService.requestLatestProgress(videoId);
+        }
+      }, 5000);
+      
+      return () => clearTimeout(noUpdateTimer);
+    };
+    
+    setupListener();
+
+    return () => {
+      console.log('Cleaning up progress listener for videoId:', videoId);
+      socketService.unregisterProgressListener(videoId);
+    };
+  }, [videoId, onUploadSuccess]);
+
   // Initialize Google Identity Services 
   useEffect(() => {
     const CLIENT_ID = '1027650180838-6ora2sdrjre213ujv9hjah4m8mu3v8ju.apps.googleusercontent.com';
@@ -198,10 +311,41 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       return;
     }
     
+    // Make sure socket is connected before proceeding
+    const socketConnected = await socketService.connect();
+    if (!socketConnected) {
+      setError('Could not establish WebSocket connection for progress tracking. Please refresh the page and try again.');
+      return;
+    }
+    
     setIsProcessing(true);
     setError(null);
     setProcessingResult(null);
-    setProcessingMessage('Processing YouTube transcript. This might take a few minutes for longer videos...');
+    setProcessingMessage('Preparing to process YouTube transcript...');
+    setProgressData(null);
+
+    // Extract YouTube ID from URL to use for progress tracking
+    const matches = youtubeUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    const extractedVideoId = matches && matches[1];
+    
+    if (!extractedVideoId) {
+      setError('Could not extract valid YouTube ID from URL');
+      setIsProcessing(false);
+      return;
+    }
+    
+    // Set the video ID which will trigger the useEffect for socket listeners
+    setVideoId(extractedVideoId);
+    
+    // Track if we've received any WebSocket updates
+    let receivedSocketUpdates = false;
+    
+    // Register a temporary listener to detect if we're receiving socket updates
+    const socketCallback = () => {
+      receivedSocketUpdates = true;
+    };
+    
+    socketService.registerProgressListener(extractedVideoId, socketCallback);
     
     try {
       // Add token to the request if authenticated
@@ -209,59 +353,156 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         Authorization: `Bearer ${accessToken}` 
       } : undefined;
       
+      // Add socket ID to the request for tracking
+      const socketId = socketService.getSocketId();
+      console.log('Using socket ID for tracking:', socketId);
+      
       const response = await axios.post('/api/youtube/process', {
         youtubeUrl,
-        domains: selectedDomains
+        domains: selectedDomains,
+        socketId
       }, { headers });
       
-      // Clear the processing message
-      setProcessingMessage(null);
+      // Unregister the temporary callback
+      socketService.unregisterProgressListener(extractedVideoId);
       
-      // Store the processing result
-      setProcessingResult({
-        videoTitle: response.data.videoTitle,
-        totalChunks: response.data.totalChunks,
-        videoId: response.data.videoId
-      });
+      // If this video was already processed, update the UI
+      if (response.data.alreadyProcessed) {
+        console.log('Video was already processed:', response.data);
+        setProcessingMessage(null);
+        setIsProcessing(false);
+        
+        // Store the processing result
+        setProcessingResult({
+          videoTitle: response.data.videoTitle || 'YouTube Video',
+          totalChunks: response.data.totalChunks || 0,
+          videoId: response.data.videoId
+        });
+        
+        onUploadSuccess();
+      }
       
-      onUploadSuccess();
       setYoutubeUrl('');
       setSelectedDomains([]);
     } catch (err) {
-      setProcessingMessage(null);
-      if (axios.isAxiosError(err) && err.response) {
-        // Check if the error is due to authentication
-        if (err.response.status === 401) {
-          setError('Authentication required to access YouTube transcripts. Please sign in with Google.');
-          setIsAuthenticated(false);
-          localStorage.removeItem('youtube_access_token');
-          localStorage.removeItem('youtube_token_expiry');
-        } else {
-          // More detailed error message including the server response
-          const serverErrorMsg = err.response.data.error || err.response.data.message || 'Unknown server error';
-          setError(`Failed to process YouTube transcript: ${serverErrorMsg}`);
-        }
-        console.error('Response error:', err.response.data);
-      } else if (axios.isAxiosError(err) && err.request) {
-        // Network error handling
-        const networkErr = err as CustomAxiosError;
-        if (networkErr.isTimeout) {
-          setError(networkErr.customMessage || 'The request timed out. YouTube transcript extraction can take longer for some videos. Please try again or try with a shorter video.');
-        } else if (networkErr.isNetworkError) {
-          setError(networkErr.customMessage || 'Network connection error. Please check your internet connection and try again.');
-        } else {
-          setError('Server not responding. Please check your connection or try again later.');
-        }
-        console.error('Request error:', err.request);
-      } else {
-        setError('An unexpected error occurred while processing the video');
-        console.error('Error:', err);
+      // Unregister the temporary callback
+      socketService.unregisterProgressListener(extractedVideoId);
+      
+      // If we're receiving socket updates, don't show timeout errors as the process is working via WebSockets
+      if (receivedSocketUpdates && axios.isAxiosError(err) && err.code === 'ECONNABORTED') {
+        console.log('Ignoring timeout error as WebSocket connection is active');
+        return; // Don't update UI state negatively, WebSockets will handle progress
       }
-    } finally {
-      setIsProcessing(false);
+      
+      // If we're not receiving socket updates, show the error
+      if (!receivedSocketUpdates) {
+        setIsProcessing(false);
+        setProcessingMessage(null);
+        
+        if (axios.isAxiosError(err) && err.response) {
+          // Check if the error is due to authentication
+          if (err.response.status === 401) {
+            setError('Authentication required to access YouTube transcripts. Please sign in with Google.');
+            setIsAuthenticated(false);
+            localStorage.removeItem('youtube_access_token');
+            localStorage.removeItem('youtube_token_expiry');
+          } else {
+            // More detailed error message including the server response
+            const serverErrorMsg = err.response.data.error || err.response.data.message || 'Unknown server error';
+            setError(`Failed to process YouTube transcript: ${serverErrorMsg}`);
+          }
+          console.error('Response error:', err.response.data);
+        } else if (axios.isAxiosError(err) && err.request) {
+          // Network error handling
+          const networkErr = err as CustomAxiosError;
+          // Only show timeout errors if we're not receiving WebSocket updates
+          if (networkErr.isTimeout) {
+            setError(networkErr.customMessage || 'The request timed out. Please try again with a different video or try authenticating with Google.');
+          } else if (networkErr.isNetworkError) {
+            setError(networkErr.customMessage || 'Network connection error. Please check your internet connection and try again.');
+          } else {
+            setError('Server not responding. Please check your connection or try again later.');
+          }
+          console.error('Request error:', err.request);
+        } else {
+          setError('An unexpected error occurred while processing the video');
+          console.error('Error:', err);
+        }
+      }
     }
   };
   
+  // Add progress bar to the processing section
+  const renderProcessingState = () => {
+    if (isProcessing) {
+      // Calculate progress percentage - protect against edge cases
+      const progress = progressData?.progress || 0;
+      const currentItem = progressData?.currentItem || 0;
+      const totalItems = progressData?.totalItems || 1;
+      
+      // Debug info
+      console.log('Progress rendering:', { 
+        progress, 
+        currentItem, 
+        totalItems, 
+        stage: progressData?.stage,
+        message: processingMessage
+      });
+      
+      // Function to request progress refresh
+      const refreshProgress = () => {
+        if (videoId) {
+          socketService.requestLatestProgress(videoId);
+        }
+      };
+      
+      return (
+        <div className="mt-4 text-center">
+          <div className="flex flex-col items-center justify-center">
+            <div className="animate-pulse text-blue-500 mb-2">
+              <svg className="animate-spin h-8 w-8" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </div>
+            <p className="text-gray-700 mb-2">{processingMessage || 'Processing...'}</p>
+            
+            {/* Progress bar */}
+            <div className="w-full h-2 bg-gray-200 rounded-full mb-2 max-w-md">
+              <div 
+                className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-in-out"
+                style={{ width: `${Math.max(1, progress)}%` }}
+              ></div>
+            </div>
+            
+            {/* Progress text */}
+            <p className="text-sm text-gray-500">
+              {progressData ? `${progress}% Complete` : 'Initializing...'}
+              {currentItem > 0 && totalItems > 0 && ` (${currentItem}/${totalItems})`}
+            </p>
+            
+            {/* Socket connection status with refresh button */}
+            <div className="flex items-center justify-center mt-2 text-xs text-gray-400">
+              <p>
+                {socketService.isConnected() 
+                  ? `✓ Socket connected (ID: ${socketService.getSocketId()})` 
+                  : '⚠ Socket disconnected'}
+              </p>
+              <button 
+                onClick={refreshProgress}
+                className="ml-2 text-blue-500 hover:text-blue-700 focus:outline-none"
+                title="Refresh progress"
+              >
+                ↻
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
+
   return (
     <div className="bg-white shadow rounded-lg overflow-hidden">
       <div className="p-4">
@@ -423,6 +664,9 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             </button>
           </div>
         </form>
+        
+        {/* Processing spinner */}
+        {renderProcessingState()}
       </div>
     </div>
   );
