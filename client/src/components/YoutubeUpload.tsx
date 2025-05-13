@@ -1,7 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import { FiYoutube } from 'react-icons/fi';
 import { availableDomains } from '../constants/domains';
+
+// Extend AxiosError with our custom properties
+interface CustomAxiosError extends AxiosError {
+  isNetworkError?: boolean;
+  isTimeout?: boolean;
+  customMessage?: string;
+}
 
 // Configure axios to include credentials with every request
 axios.defaults.withCredentials = true;
@@ -37,6 +44,7 @@ interface ProcessingResult {
 const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
@@ -193,6 +201,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     setIsProcessing(true);
     setError(null);
     setProcessingResult(null);
+    setProcessingMessage('Processing YouTube transcript. This might take a few minutes for longer videos...');
     
     try {
       // Add token to the request if authenticated
@@ -205,6 +214,9 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         domains: selectedDomains
       }, { headers });
       
+      // Clear the processing message
+      setProcessingMessage(null);
+      
       // Store the processing result
       setProcessingResult({
         videoTitle: response.data.videoTitle,
@@ -216,6 +228,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       setYoutubeUrl('');
       setSelectedDomains([]);
     } catch (err) {
+      setProcessingMessage(null);
       if (axios.isAxiosError(err) && err.response) {
         // Check if the error is due to authentication
         if (err.response.status === 401) {
@@ -230,8 +243,15 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         }
         console.error('Response error:', err.response.data);
       } else if (axios.isAxiosError(err) && err.request) {
-        // The request was made but no response was received
-        setError('Server not responding. Please check your connection or try again later.');
+        // Network error handling
+        const networkErr = err as CustomAxiosError;
+        if (networkErr.isTimeout) {
+          setError(networkErr.customMessage || 'The request timed out. YouTube transcript extraction can take longer for some videos. Please try again or try with a shorter video.');
+        } else if (networkErr.isNetworkError) {
+          setError(networkErr.customMessage || 'Network connection error. Please check your internet connection and try again.');
+        } else {
+          setError('Server not responding. Please check your connection or try again later.');
+        }
         console.error('Request error:', err.request);
       } else {
         setError('An unexpected error occurred while processing the video');
@@ -250,11 +270,46 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         <div className="mb-4 bg-blue-50 border border-blue-400 text-blue-700 px-4 py-3 rounded text-sm">
           <p className="font-medium">About YouTube Transcripts</p>
           <p className="mt-1">While authentication helps access some YouTube captions, certain videos may have restricted transcripts. The system will attempt multiple methods to extract content, including direct webpage extraction if the API fails.</p>
+          <p className="mt-1 font-medium">Note: Extracting transcripts via web scraping can take several minutes for longer videos.</p>
         </div>
+        
+        {processingMessage && (
+          <div className="mb-4 bg-yellow-50 border border-yellow-400 text-yellow-700 px-4 py-3 rounded">
+            <div className="flex items-center">
+              <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-yellow-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <p>{processingMessage}</p>
+            </div>
+            <p className="mt-2 text-sm">Please don't close this window. This operation can take longer for videos with web-based extraction.</p>
+          </div>
+        )}
         
         {error && (
           <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
             {error}
+            {error.includes('connection') && (
+              <div className="mt-2 text-sm">
+                <p><strong>Troubleshooting:</strong></p>
+                <ul className="list-disc pl-5">
+                  <li>Verify your internet connection is working properly</li>
+                  <li>Check if the server is running (typically on port 3001)</li>
+                  <li>Try refreshing the page and attempting again</li>
+                </ul>
+              </div>
+            )}
+            {error.includes('timed out') && (
+              <div className="mt-2 text-sm">
+                <p><strong>Troubleshooting:</strong></p>
+                <ul className="list-disc pl-5">
+                  <li>Try processing a shorter video</li>
+                  <li>Ensure the video has captions available</li>
+                  <li>Try authenticating with Google for better access</li>
+                  <li>Wait a few minutes and try again</li>
+                </ul>
+              </div>
+            )}
           </div>
         )}
         

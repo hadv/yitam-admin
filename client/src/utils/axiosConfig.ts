@@ -1,7 +1,7 @@
 import axios from 'axios';
 
-// Default timeout
-axios.defaults.timeout = 10000; // 10 seconds
+// Increase timeout for long-running operations like web scraping
+axios.defaults.timeout = 120000; // 2 minutes for web scraping operations
 
 // Request interceptor
 axios.interceptors.request.use(config => {
@@ -28,11 +28,19 @@ axios.interceptors.response.use(response => {
     });
   } else if (error.request) {
     // The request was made but no response was received
-    console.error('[Axios Network Error]', {
-      request: error.request,
-      url: error.config?.url,
-      message: 'No response received from server'
-    });
+    // This is likely a network connection issue
+    console.error('[Axios Network Error]', error);
+    
+    // Add custom property to identify network errors for better handling
+    error.isNetworkError = true;
+    
+    // Check if this might be a timeout
+    if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+      error.customMessage = 'The request timed out. YouTube transcript extraction can take longer for some videos. Please try again or try with a shorter video.';
+      error.isTimeout = true;
+    } else {
+      error.customMessage = 'Network connection error. The server may be unavailable or your internet connection is disrupted.';
+    }
   } else {
     // Something happened in setting up the request that triggered an Error
     console.error('[Axios Error]', {
