@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { extractYouTubeId, processYoutubeTranscript, getVideoDetails } from '../services/youtube-transcript';
 import { DatabaseService } from '../core/database-service';
 import { isAuthenticated, tokenStore } from '../services/youtube-auth';
+import { progressTracker } from '../services/progress-tracker';
 
 // Create a singleton instance of the database service
 const dbService = new DatabaseService();
@@ -10,6 +11,7 @@ const dbService = new DatabaseService();
 export const processYoutubeVideo = async (req: Request, res: Response) => {
   try {
     const { youtubeUrl } = req.body;
+    const socketId = req.body.socketId; // Optional socket ID for tracking
     
     if (!youtubeUrl) {
       return res.status(400).json({ message: 'YouTube URL is required' });
@@ -22,10 +24,15 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Invalid YouTube URL' });
     }
     
+    // Initialize progress tracking
+    progressTracker.initializeProgressTracking(videoId, socketId);
+    
     // First, check if this video has already been transcribed
+    progressTracker.updateTranscriptFetch(videoId, 'Checking if transcript already exists', 10);
     const transcriptExists = await dbService.doesTranscriptExist(videoId);
     
     if (transcriptExists) {
+      progressTracker.completeProcessing(videoId, 0);
       return res.status(200).json({
         message: 'This video has already been transcribed',
         videoId,
@@ -35,6 +42,7 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
     }
     
     // Get video details first
+    progressTracker.updateTranscriptFetch(videoId, 'Fetching video details', 20);
     const videoDetails = await getVideoDetails(videoId);
     
     // Get domains from request body or use default
@@ -61,6 +69,7 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
     const chunkOverlap = req.body.chunkOverlap ? parseInt(req.body.chunkOverlap, 10) : 500;
     
     console.log(`Processing YouTube video: "${videoDetails.title}" (${videoId}) in domains: ${domains.join(', ')}`);
+    progressTracker.updateTranscriptFetch(videoId, `Processing YouTube video: "${videoDetails.title}"`, 30);
     
     // Authentication data from multiple sources
     // 1. Check for user authentication in session
@@ -88,21 +97,60 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
     // Note: Authentication is preferred but no longer strictly required
     // due to our web scraping fallback approach
     console.log(`User authentication status: ${useOAuth ? 'Authenticated' : 'Not authenticated (using fallback methods)'}`);
+    progressTracker.updateTranscriptFetch(
+      videoId, 
+      `Auth status: ${useOAuth ? 'Authenticated' : 'Not authenticated (will use fallback methods)'}`,
+      40
+    );
     
     // Process transcript and create chunks with embeddings
+    progressTracker.updateTranscriptFetch(videoId, 'Starting transcript extraction', 50);
+    
+    // Initialize an estimated total chunks value for progress tracking
+    // This will be updated with actual value once chunks are created
+    let totalChunks = 100; // Default estimate
+    
     const chunks = await processYoutubeTranscript(
       videoId,
       domains,
       chunkSize,
       chunkOverlap,
       userId, // Pass the userId for OAuth if authenticated via session
-      accessToken // Pass the access token if provided in the header
+      accessToken, // Pass the access token if provided in the header
+      (stage, message, progress) => {
+        // Progress callback function
+        switch (stage) {
+          case 'transcript_fetch':
+            progressTracker.updateTranscriptFetch(videoId, message, progress);
+            break;
+          case 'transcript_process':
+            progressTracker.updateTranscriptProcess(videoId, message, progress);
+            // Check if this is the special message containing total chunks info
+            if (message.startsWith('Total chunks:')) {
+              totalChunks = progress || totalChunks;
+            }
+            break;
+          case 'chunk_creation':
+            if (typeof progress === 'number') {
+              progressTracker.updateChunkCreation(videoId, progress, totalChunks);
+            }
+            break;
+          case 'embedding_generation':
+            if (typeof progress === 'number') {
+              progressTracker.updateEmbeddingGeneration(videoId, progress, totalChunks);
+            }
+            break;
+        }
+      }
     );
     
     console.log(`Created ${chunks.length} chunks for YouTube video ${videoId}`);
+    progressTracker.updateChunkStorage(videoId, `Storing ${chunks.length} chunks`, 90);
     
     // Store all chunks in database
     await dbService.addDocumentChunks(chunks);
+    
+    progressTracker.completeProcessing(videoId, chunks.length);
     
     res.status(200).json({
       message: 'YouTube transcript extracted, chunked and embedded successfully',
@@ -116,6 +164,9 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error processing YouTube transcript:', error);
+    
+    // Get videoId from request body if available for error reporting
+    const videoId = extractYouTubeId(req.body.youtubeUrl);
     
     // Provide more specific error messages based on the type of error
     let errorMessage = 'Failed to process YouTube transcript';
@@ -132,6 +183,10 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
       } else if (error.message.includes('network')) {
         errorMessage = 'Network error while fetching the transcript. Please check your connection.';
         statusCode = 503;
+      } else if (error.message.includes('timed out') || error.message.includes('timeout')) {
+        errorMessage = 'The request timed out, but processing is continuing via WebSocket. Please check the progress indicator.';
+        // Use a 200 status since the operation is still in progress via WebSocket
+        statusCode = 200; 
       } else if (error.message.includes('Invalid YouTube ID')) {
         errorMessage = 'Invalid YouTube video ID.';
         statusCode = 400;
@@ -149,6 +204,11 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
         message: error.message,
         stack: error.stack
       });
+      
+      // Report error via progress tracker if we have a video ID
+      if (videoId) {
+        progressTracker.reportError(videoId, errorMessage, error.message);
+      }
     }
     
     res.status(statusCode).json({ 

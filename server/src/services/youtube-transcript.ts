@@ -363,14 +363,26 @@ export const getTranscriptWithApiList = async (videoId: string, accessToken: str
   }
 };
 
-// Process YouTube transcript into vector chunks for embedding
+/**
+ * Progress callback function type
+ */
+export type ProgressCallback = (
+  stage: 'transcript_fetch' | 'transcript_process' | 'chunk_creation' | 'embedding_generation',
+  message: string,
+  progress?: number
+) => void;
+
+/**
+ * Process YouTube video to extract transcript, chunk it, and create embeddings
+ */
 export const processYoutubeTranscript = async (
   videoId: string,
   domains: string[],
   chunkSize: number = 4000,
   chunkOverlap: number = 500,
   userId?: string,
-  accessToken?: string
+  accessToken?: string,
+  progressCallback?: ProgressCallback
 ): Promise<any[]> => {
   try {
     // Get video details
@@ -378,15 +390,29 @@ export const processYoutubeTranscript = async (
     let transcript = '';
     let errors: string[] = [];
     
+    // Update progress if callback is provided
+    const updateProgress = (
+      stage: 'transcript_fetch' | 'transcript_process' | 'chunk_creation' | 'embedding_generation',
+      message: string,
+      progress?: number
+    ) => {
+      if (progressCallback) {
+        progressCallback(stage, message, progress);
+      }
+    };
+    
     // Try direct web scraping first as the most reliable method
     try {
       console.log('Attempting to get transcript using web scraping (primary method)');
+      updateProgress('transcript_fetch', 'Attempting to get transcript using web scraping', 55);
       transcript = await scrapeTranscriptFromYouTube(videoId);
       console.log(`Successfully retrieved transcript via web scraping with length: ${transcript.length} characters`);
+      updateProgress('transcript_fetch', 'Successfully retrieved transcript via web scraping', 60);
     } catch (error: any) {
       const errorMsg = `Web scraping (primary method) failed: ${error.message}`;
       console.log(errorMsg + '. Falling back to API methods');
       errors.push(errorMsg);
+      updateProgress('transcript_fetch', 'Web scraping failed, trying API methods', 55);
       
       // If web scraping fails, proceed with API methods
       // Attempt to get the transcript using API methods
@@ -394,12 +420,15 @@ export const processYoutubeTranscript = async (
         // Try OAuth if a userId is provided
         try {
           console.log('Attempting to get transcript using OAuth authentication');
+          updateProgress('transcript_fetch', 'Attempting to get transcript using OAuth authentication', 57);
           transcript = await getYouTubeTranscriptWithOAuth(videoId, userId);
           console.log('Successfully retrieved transcript via OAuth');
+          updateProgress('transcript_fetch', 'Successfully retrieved transcript via OAuth', 60);
         } catch (error: any) {
           const errorMsg = `OAuth method failed: ${error.message}`;
           console.log(errorMsg + '. Trying next method');
           errors.push(errorMsg);
+          updateProgress('transcript_fetch', 'OAuth method failed, trying next method', 57);
         }
       }
       
@@ -407,12 +436,15 @@ export const processYoutubeTranscript = async (
       if (!transcript && accessToken) {
         try {
           console.log('Attempting to get transcript using direct access token');
+          updateProgress('transcript_fetch', 'Attempting to get transcript using direct access token', 58);
           transcript = await getTranscriptWithDirectToken(videoId, accessToken);
           console.log('Successfully retrieved transcript via direct token');
+          updateProgress('transcript_fetch', 'Successfully retrieved transcript via direct token', 60);
         } catch (error: any) {
           const errorMsg = `Direct token method failed: ${error.message}`;
           console.log(errorMsg + '. Trying next method');
           errors.push(errorMsg);
+          updateProgress('transcript_fetch', 'Direct token method failed, trying next method', 58);
         }
       }
       
@@ -420,12 +452,15 @@ export const processYoutubeTranscript = async (
       if (!transcript && accessToken) {
         try {
           console.log('Attempting to get transcript using API list method');
+          updateProgress('transcript_fetch', 'Attempting to get transcript using API list method', 59);
           transcript = await getTranscriptWithApiList(videoId, accessToken);
           console.log('Successfully retrieved transcript via API list method');
+          updateProgress('transcript_fetch', 'Successfully retrieved transcript via API list method', 60);
         } catch (error: any) {
           const errorMsg = `API list method failed: ${error.message}`;
           console.log(errorMsg + '. Trying next method');
           errors.push(errorMsg);
+          updateProgress('transcript_fetch', 'API list method failed, trying next method', 59);
         }
       }
       
@@ -433,13 +468,16 @@ export const processYoutubeTranscript = async (
       if (!transcript) {
         try {
           console.log('Attempting to get transcript using YouTube transcript API');
+          updateProgress('transcript_fetch', 'Attempting to get transcript using YouTube transcript API', 60);
           const transcriptItems = await getAutoGeneratedTranscript(videoId);
           transcript = transcriptItems.map(item => `[${Math.floor(item.offset / 60000)}:${Math.floor((item.offset % 60000) / 1000)}] ${item.text}`).join('\n');
           console.log(`Successfully retrieved transcript with ${transcriptItems.length} items using YouTube transcript API`);
+          updateProgress('transcript_fetch', `Successfully retrieved transcript with ${transcriptItems.length} items`, 65);
         } catch (error: any) {
           const errorMsg = `YouTube transcript API failed: ${error.message}`;
           console.log(errorMsg);
           errors.push(errorMsg);
+          updateProgress('transcript_fetch', 'YouTube transcript API failed', 60);
           
           // If all methods have failed, throw a detailed error
           if (!transcript) {
@@ -454,6 +492,7 @@ export const processYoutubeTranscript = async (
     }
     
     console.log(`Successfully retrieved transcript with length: ${transcript.length} characters`);
+    updateProgress('transcript_process', 'Transcript retrieved successfully, starting processing', 70);
     
     // Include video title in documentName for better readability
     // But keep a consistent id format for duplicate checking
@@ -461,6 +500,7 @@ export const processYoutubeTranscript = async (
     const idPrefix = `youtube_${videoId}`;
     
     // Split the text into chunks
+    updateProgress('transcript_process', 'Splitting transcript into chunks', 75);
     const chunks = splitTextIntoChunks(transcript, chunkSize, chunkOverlap);
     
     if (chunks.length === 0) {
@@ -468,6 +508,12 @@ export const processYoutubeTranscript = async (
     }
     
     console.log(`Split transcript into ${chunks.length} chunks`);
+    updateProgress('transcript_process', `Split transcript into ${chunks.length} chunks`, 80);
+    
+    // Immediately send the actual total chunks count to update progress tracking
+    if (progressCallback) {
+      progressCallback('transcript_process', `Total chunks: ${chunks.length}`, chunks.length);
+    }
     
     // Process each chunk
     const documentChunks: DocumentChunk[] = [];
@@ -476,11 +522,21 @@ export const processYoutubeTranscript = async (
     const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(transcript);
     const detectedLanguage = hasVietnameseChars ? 'Vietnamese' : 'English';
     
+    // Now that we know the actual number of chunks, update the progress functions to use this information
+    const totalChunks = chunks.length;
+    const chunkProgressUpdate = (stage: 'chunk_creation' | 'embedding_generation', message: string, index: number) => {
+      if (progressCallback) {
+        progressCallback(stage, message, index);
+      }
+    };
+    
     for (let i = 0; i < chunks.length; i++) {
       const content = chunks[i];
-      console.log(`Processing chunk ${i+1}/${chunks.length}, length: ${content.length} characters`);
+      console.log(`Processing chunk ${i+1}/${totalChunks}, length: ${content.length} characters`);
+      chunkProgressUpdate('chunk_creation', `Processing chunk ${i+1}/${totalChunks}`, i+1);
       
       // Create embedding for the chunk
+      chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i+1}/${totalChunks}`, i+1);
       const embedding = await createEmbedding(content);
       
       // Create clean content for AI processing
@@ -503,7 +559,7 @@ export const processYoutubeTranscript = async (
       // Enhance the chunk and generate AI title and summary
       try {
         // First generate AI title and summary for this chunk in the original language
-        const aiEnhancedMetadata = await generateTitleAndSummary(cleanContent, videoDetails.title, i+1, chunks.length, detectedLanguage);
+        const aiEnhancedMetadata = await generateTitleAndSummary(cleanContent, videoDetails.title, i+1, totalChunks, detectedLanguage);
         
         // Create a clean temp chunk with AI-generated metadata for enhancement
         const cleanTempChunk = {

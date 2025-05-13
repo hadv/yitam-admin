@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Increase timeout for long-running operations like web scraping
-axios.defaults.timeout = 120000; // 2 minutes for web scraping operations
+axios.defaults.timeout = 300000; // 5 minutes for web scraping operations
 
 // Request interceptor
 axios.interceptors.request.use(config => {

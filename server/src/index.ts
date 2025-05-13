@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import session from 'express-session';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
 import documentRoutes from './routes/document';
 import youtubeRoutes from './routes/youtube';
 import authRoutes from './routes/auth';
@@ -15,6 +17,92 @@ dotenv.config();
 // Initialize Express
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Create HTTP server
+const httpServer = createServer(app);
+
+// Initialize socket.io
+const io = new Server(httpServer, {
+  cors: {
+    origin: [
+      'http://localhost:5173',
+      'http://localhost:3000',
+      'http://127.0.0.1:5173'
+    ],
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
+// Socket.io connection handler
+io.on('connection', (socket) => {
+  console.log('New client connected', socket.id);
+  
+  // Handle joining a specific video room for progress updates
+  socket.on('join-video-room', (data: { videoId: string }) => {
+    if (data.videoId) {
+      socket.join(`video-${data.videoId}`);
+      console.log(`Socket ${socket.id} joined room for video ${data.videoId}`);
+      
+      // Send an immediate connection confirmation to the client
+      socket.emit('room-joined', { 
+        videoId: data.videoId,
+        message: `Successfully joined room for video ${data.videoId}` 
+      });
+      
+      // Import the progress tracker when needed to avoid circular dependencies
+      const { progressTracker } = require('./services/progress-tracker');
+      
+      // Try to resend the latest update for this video
+      const resent = progressTracker.resendLatestUpdate(data.videoId);
+      
+      // If no updates to resend, send a test progress update to verify communication
+      if (!resent) {
+        io.to(`video-${data.videoId}`).emit('progress-update', {
+          videoId: data.videoId,
+          stage: 'initializing',
+          message: 'WebSocket connection established successfully',
+          progress: 1
+        });
+      }
+    } else {
+      console.error('Socket tried to join a room without providing videoId', socket.id);
+    }
+  });
+  
+  // Handle client requesting the latest progress for a video
+  socket.on('request-latest-progress', (data: { videoId: string }) => {
+    if (data.videoId) {
+      console.log(`Socket ${socket.id} requested latest progress for video ${data.videoId}`);
+      
+      // Import the progress tracker when needed to avoid circular dependencies
+      const { progressTracker } = require('./services/progress-tracker');
+      
+      // Try to resend the latest update for this video
+      const resent = progressTracker.resendLatestUpdate(data.videoId);
+      
+      if (!resent) {
+        socket.emit('progress-update', {
+          videoId: data.videoId,
+          stage: 'unknown',
+          message: 'No recent progress updates available for this video',
+          progress: 0
+        });
+      }
+    }
+  });
+  
+  socket.on('error', (error) => {
+    console.error('Socket error:', socket.id, error);
+  });
+  
+  socket.on('disconnect', (reason) => {
+    console.log('Client disconnected', socket.id, 'Reason:', reason);
+  });
+});
+
+// Export socket.io instance for use in other modules
+export { io };
 
 // Initialize database service
 const dbService = new DatabaseService();
@@ -87,7 +175,7 @@ dbService.initialize().then(() => {
   }
 
   // Start server
-  app.listen(PORT, () => {
+  httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
 }).catch(error => {
