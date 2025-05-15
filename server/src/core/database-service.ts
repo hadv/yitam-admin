@@ -236,98 +236,219 @@ export class DatabaseService {
         };
         
         try {
-          const results = await this.qdrantClient.scroll(COLLECTION_NAME, {
-            filter: filter,
-            limit: 1,
-            with_payload: true
-          });
-          
-          return results.points.length > 0;
+          // Try with count first as it's more efficient
+          const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
+          return countResponse.count > 0;
         } catch (error) {
-          // If text matching is not supported, try alternative approach
-          console.error('Error searching by ID pattern:', error);
+          console.error('Error checking transcript existence with count:', error);
           
-          // Alternative: Get all documents and check client-side
-          const allResults = await this.qdrantClient.scroll(COLLECTION_NAME, {
-            limit: 100, // Reasonable limit to check
-            with_payload: true
-          });
-          
-          // Check if any document ID starts with the pattern
-          return allResults.points.some(point => {
-            const payload = point.payload as any;
-            return payload.id && payload.id.startsWith(idPattern);
-          });
+          // Alternative approach if count with text matching doesn't work
+          try {
+            // Use scroll to check if any documents match
+            const results = await this.qdrantClient.scroll(COLLECTION_NAME, {
+              filter,
+              limit: 1,
+              with_payload: true
+            });
+            
+            return results.points.length > 0;
+          } catch (scrollFilterError) {
+            console.error('Error with filter scroll check:', scrollFilterError);
+            
+            // Last resort: get first few results and check client-side
+            try {
+              const allResults = await this.qdrantClient.scroll(COLLECTION_NAME, {
+                limit: 100, // Reasonable limit to check
+                with_payload: true
+              });
+              
+              // Check if any document ID starts with the pattern
+              return allResults.points.some(point => {
+                const payload = point.payload as any;
+                return payload.id && payload.id.startsWith(idPattern);
+              });
+            } catch (scrollError) {
+              console.error('Error with fallback scroll check:', scrollError);
+              return false;
+            }
+          }
         }
       },
       this.fallbackService.isFallbackActive()
     );
   }
 
-  // Delete all chunks for a specific YouTube video by videoId
+  // Delete YouTube video transcript chunks
   public async deleteYoutubeTranscriptChunks(videoId: string): Promise<number> {
     const idPattern = `youtube_${videoId}`;
     
     return this.fallbackService.withFallback(
       'deleteYoutubeTranscriptChunks',
-      // Fallback function for in-memory storage
+      // Fallback function
       () => {
         let deletedCount = 0;
-        // Get all keys that start with the pattern
-        const keysToDelete = Array.from(inMemoryDocuments.keys())
-          .filter(key => {
-            const doc = inMemoryDocuments.get(key)?.document;
-            return doc && doc.id.startsWith(idPattern);
-          });
-        
-        // Delete each matching document
-        keysToDelete.forEach(key => {
-          inMemoryDocuments.delete(key);
-          deletedCount++;
+        // Filter out documents from the specified YouTube video
+        Array.from(inMemoryDocuments.keys()).forEach(key => {
+          const doc = inMemoryDocuments.get(key)?.document;
+          if (doc && doc.id.startsWith(idPattern)) {
+            inMemoryDocuments.delete(key);
+            deletedCount++;
+          }
         });
-        
-        console.log(`Deleted ${deletedCount} in-memory chunks for YouTube video ${videoId}`);
         return deletedCount;
       },
       // Qdrant function
       async () => {
         try {
-          // Create a filter that matches points with id starting with the pattern
           const filter = {
             must: [
               {
                 key: 'id',
                 match: {
-                  text: idPattern 
+                  text: idPattern,
+                  exact: false // Using non-exact match to find IDs that start with this pattern
                 }
               }
             ]
           };
           
-          console.log(`Attempting to delete chunks that match filter:`, JSON.stringify(filter, null, 2));
+          // First, count how many chunks will be deleted
+          const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
+          const count = countResponse.count;
           
-          // First, find all points that have ids starting with the pattern to count them
-          const countResult = await this.qdrantClient.count(COLLECTION_NAME, {
-            filter: filter
-          });
-          
-          const pointCount = countResult.count || 0;
-          console.log(`Found ${pointCount} chunks to delete for YouTube video ${videoId}`);
-          
-          if (pointCount === 0) {
+          if (count === 0) {
             return 0;
           }
           
-          // Use the delete method with the filter
+          // Then delete the chunks
           await this.qdrantClient.delete(COLLECTION_NAME, {
-            filter: filter
+            filter,
+            wait: true
           });
           
-          console.log(`Deleted ${pointCount} chunks for YouTube video ${videoId}`);
-          return pointCount;
+          return count;
         } catch (error) {
-          console.error('Error deleting YouTube transcript chunks:', error);
-          throw error;
+          console.error(`Error deleting YouTube video chunks: ${error}`);
+          
+          // Fallback approach if text matching doesn't work
+          try {
+            // First get all chunks that match our criteria
+            let chunksToDelete: string[] = [];
+            let nextPageOffset: string | undefined;
+            const limit = 100;
+            
+            do {
+              const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+                with_payload: true,
+                limit,
+                offset: nextPageOffset,
+              });
+              
+              response.points.forEach(point => {
+                const payload = point.payload as any;
+                if (payload.id && payload.id.startsWith(idPattern)) {
+                  chunksToDelete.push(String(point.id));
+                }
+              });
+              
+              nextPageOffset = response.next_page_offset as string | undefined;
+            } while (nextPageOffset);
+            
+            if (chunksToDelete.length === 0) {
+              return 0;
+            }
+            
+            // Delete in batches to avoid request size limits
+            const batchSize = 100;
+            let deletedCount = 0;
+            
+            for (let i = 0; i < chunksToDelete.length; i += batchSize) {
+              const batch = chunksToDelete.slice(i, i + batchSize);
+              await this.qdrantClient.delete(COLLECTION_NAME, {
+                points: batch,
+                wait: true
+              });
+              deletedCount += batch.length;
+            }
+            
+            return deletedCount;
+          } catch (fallbackError) {
+            console.error('Error with fallback deletion approach:', fallbackError);
+            throw error;
+          }
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+
+  // Count YouTube video transcript chunks without deleting them
+  public async countYoutubeTranscriptChunks(videoId: string): Promise<number> {
+    const idPattern = `youtube_${videoId}`;
+    
+    return this.fallbackService.withFallback(
+      'countYoutubeTranscriptChunks',
+      // Fallback function
+      () => {
+        let count = 0;
+        // Count documents from the specified YouTube video
+        Array.from(inMemoryDocuments.values()).forEach(item => {
+          const doc = item.document;
+          if (doc && doc.id.startsWith(idPattern)) {
+            count++;
+          }
+        });
+        return count;
+      },
+      // Qdrant function
+      async () => {
+        try {
+          const filter = {
+            must: [
+              {
+                key: 'id',
+                match: {
+                  text: idPattern,
+                  exact: false // Using non-exact match to find IDs that start with this pattern
+                }
+              }
+            ]
+          };
+          
+          // Count how many chunks exist
+          const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
+          return countResponse.count;
+        } catch (error) {
+          console.error(`Error counting YouTube video chunks: ${error}`);
+          
+          // Fallback to client-side filtering if text matching doesn't work
+          try {
+            let count = 0;
+            let nextPageOffset: string | undefined;
+            const limit = 100;
+            
+            do {
+              const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+                with_payload: true,
+                limit,
+                offset: nextPageOffset,
+              });
+              
+              response.points.forEach(point => {
+                const payload = point.payload as any;
+                if (payload.id && payload.id.startsWith(idPattern)) {
+                  count++;
+                }
+              });
+              
+              nextPageOffset = response.next_page_offset as string | undefined;
+            } while (nextPageOffset);
+            
+            return count;
+          } catch (scrollError) {
+            console.error('Error with fallback scroll count:', scrollError);
+            throw error;
+          }
         }
       },
       this.fallbackService.isFallbackActive()

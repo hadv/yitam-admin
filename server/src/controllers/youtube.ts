@@ -256,6 +256,59 @@ export const checkTranscriptExists = async (req: Request, res: Response) => {
   }
 };
 
+// Count chunks for a specific YouTube video ID without deleting them
+export const countYoutubeVideoChunks = async (req: Request, res: Response) => {
+  try {
+    const { videoId } = req.params;
+    
+    if (!videoId) {
+      return res.status(400).json({ message: 'Video ID is required' });
+    }
+    
+    console.log(`Counting chunks for YouTube video: ${videoId}`);
+    
+    // Check if the transcript exists before counting
+    const transcriptExists = await dbService.doesTranscriptExist(videoId);
+    
+    if (!transcriptExists) {
+      console.log(`No transcript found for video ID: ${videoId}`);
+      return res.status(404).json({
+        message: 'No transcript found for this video ID',
+        videoId,
+        count: 0
+      });
+    }
+    
+    try {
+      console.log(`Transcript found for ${videoId}. Counting chunks...`);
+      const count = await dbService.countYoutubeTranscriptChunks(videoId);
+      
+      console.log(`Found ${count} chunks for YouTube video: ${videoId}`);
+      
+      return res.status(200).json({
+        message: `Found ${count} chunks for the video`,
+        videoId,
+        count
+      });
+    } catch (countError: any) {
+      console.error(`Error in Qdrant during countYoutubeTranscriptChunks:`, countError);
+      
+      // Provide a detailed error message
+      return res.status(500).json({
+        message: 'Failed to count YouTube transcript chunks',
+        error: countError.message || 'Unknown error',
+        videoId
+      });
+    }
+  } catch (error: any) {
+    console.error('Error in countYoutubeVideoChunks controller:', error);
+    return res.status(500).json({
+      message: 'An error occurred while processing your request',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
 // Delete all chunks for a specific YouTube video to allow re-extraction
 export const deleteYoutubeVideoChunks = async (req: Request, res: Response) => {
   try {

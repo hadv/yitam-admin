@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import axios from 'axios';
-import { FiYoutube, FiTrash2 } from 'react-icons/fi';
+import { FiYoutube, FiTrash2, FiSearch } from 'react-icons/fi';
 
 // Configure axios to include credentials with every request
 axios.defaults.withCredentials = true;
@@ -17,8 +17,12 @@ interface DeleteResult {
 const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
   const [youtubeInput, setYoutubeInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isChecking, setIsChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteResult, setDeleteResult] = useState<DeleteResult | null>(null);
+  const [hasChunks, setHasChunks] = useState<boolean | null>(null);
+  const [chunksCount, setChunksCount] = useState<number | null>(null);
+  const [checkedVideoId, setCheckedVideoId] = useState<string | null>(null);
 
   const extractYouTubeId = (input: string): string | null => {
     // If input is already a video ID (11 characters)
@@ -30,6 +34,65 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
     const youtubeRegex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i;
     const match = input.match(youtubeRegex);
     return match ? match[1] : null;
+  };
+
+  const checkVideoChunks = async () => {
+    if (!youtubeInput) {
+      setError('Please enter a YouTube URL or video ID');
+      return;
+    }
+
+    const videoId = extractYouTubeId(youtubeInput);
+    
+    if (!videoId) {
+      setError('Please enter a valid YouTube URL or video ID');
+      return;
+    }
+
+    setIsChecking(true);
+    setError(null);
+    setHasChunks(null);
+    setChunksCount(null);
+    setCheckedVideoId(null);
+    
+    try {
+      // First check if the transcript exists
+      const checkResponse = await axios.get(`/api/youtube/check-transcript/${videoId}`);
+      const exists = checkResponse.data.exists;
+      
+      if (exists) {
+        try {
+          // Get the count of chunks using the dedicated endpoint
+          const countResponse = await axios.get(`/api/youtube/count-chunks/${videoId}`);
+          setChunksCount(countResponse.data.count);
+        } catch (countErr) {
+          console.error('Count error:', countErr);
+          // If count fails, we still know chunks exist, just can't show the count
+          setChunksCount(null);
+        }
+      }
+      
+      setHasChunks(exists);
+      setCheckedVideoId(videoId);
+      
+      if (!exists) {
+        setError(`No transcript chunks found for this video ID: ${videoId}`);
+      }
+    } catch (err) {
+      console.error('Check error:', err);
+      
+      if (axios.isAxiosError(err) && err.response) {
+        const serverErrorMsg = err.response.data.error || err.response.data.message || 'Unknown server error';
+        setError(`Failed to check transcript chunks: ${serverErrorMsg}`);
+      } else {
+        setError('An unexpected error occurred while checking the video chunks');
+      }
+      
+      setHasChunks(false);
+      setChunksCount(null);
+    } finally {
+      setIsChecking(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -44,6 +107,21 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
     
     if (!videoId) {
       setError('Please enter a valid YouTube URL or video ID');
+      return;
+    }
+    
+    // If we haven't checked this video ID or it's a different one than previously checked
+    if (checkedVideoId !== videoId) {
+      await checkVideoChunks();
+      // If the check failed or no chunks found, don't proceed with deletion
+      if (!hasChunks) {
+        return;
+      }
+    }
+    
+    // Only proceed if there are chunks to delete
+    if (!hasChunks) {
+      setError(`No transcript chunks found for this video ID: ${videoId}`);
       return;
     }
     
@@ -62,6 +140,11 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
         videoId: response.data.videoId,
         deletedCount: response.data.deletedCount
       });
+      
+      // Reset check status
+      setHasChunks(null);
+      setChunksCount(null);
+      setCheckedVideoId(null);
       
       if (onDeleteSuccess) {
         onDeleteSuccess();
@@ -118,6 +201,24 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
           </div>
         )}
         
+        {hasChunks === true && checkedVideoId && (
+          <div className="mb-4 bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded">
+            <p>
+              <strong>Found transcript chunks</strong> for video ID: {checkedVideoId}
+              {chunksCount !== null && <> ({chunksCount} chunks)</>}
+            </p>
+            <p className="text-sm">You can proceed with deletion.</p>
+            <a 
+              href={`https://www.youtube.com/watch?v=${checkedVideoId}`} 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline text-sm"
+            >
+              View on YouTube
+            </a>
+          </div>
+        )}
+        
         {deleteResult && (
           <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
             <p><strong>Successfully deleted:</strong> {deleteResult.deletedCount} chunks</p>
@@ -149,10 +250,32 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
                   className="focus:ring-red-500 focus:border-red-500 block w-full pl-10 pr-12 sm:text-sm border-gray-300 rounded-md"
                   placeholder="https://www.youtube.com/watch?v=... or V3PvVOGCf7U"
                   value={youtubeInput}
-                  onChange={(e) => setYoutubeInput(e.target.value)}
-                  disabled={isProcessing}
+                  onChange={(e) => {
+                    setYoutubeInput(e.target.value);
+                    // Reset check status when input changes
+                    setHasChunks(null);
+                    setChunksCount(null);
+                    setCheckedVideoId(null);
+                  }}
+                  disabled={isProcessing || isChecking}
                 />
               </div>
+              <button
+                type="button"
+                className={`ml-2 inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
+                  isChecking ? 'opacity-50 cursor-not-allowed' : ''
+                }`}
+                onClick={checkVideoChunks}
+                disabled={isChecking || isProcessing}
+              >
+                {isChecking ? (
+                  'Checking...'
+                ) : (
+                  <>
+                    <FiSearch className="mr-1" /> Check
+                  </>
+                )}
+              </button>
             </div>
             <p className="mt-1 text-xs text-gray-500">
               Enter a YouTube video URL or directly paste the video ID (e.g., V3PvVOGCf7U)
@@ -163,9 +286,9 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
             <button
               type="submit"
               className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 ${
-                isProcessing ? 'opacity-50 cursor-not-allowed' : ''
+                isProcessing || isChecking || (youtubeInput && !hasChunks) ? 'opacity-50 cursor-not-allowed' : ''
               }`}
-              disabled={isProcessing}
+              disabled={!!(isProcessing || isChecking || (youtubeInput && !hasChunks))}
             >
               {isProcessing ? (
                 'Deleting...'
