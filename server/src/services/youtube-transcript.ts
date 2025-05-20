@@ -510,86 +510,197 @@ export const processYoutubeTranscript = async (
     console.log(`Split transcript into ${chunks.length} chunks`);
     updateProgress('transcript_process', `Split transcript into ${chunks.length} chunks`, 80);
     
-    // Immediately send the actual total chunks count to update progress tracking
-    if (progressCallback) {
-      progressCallback('transcript_process', `Total chunks: ${chunks.length}`, chunks.length);
-    }
+    // Verify that no chunk exceeds the embedding size limit
+    const EMBEDDING_MAX_SIZE = 7500; // Safe limit for embedding API
+    const oversizedChunks = chunks.filter(chunk => chunk.length > EMBEDDING_MAX_SIZE);
     
-    // Process each chunk
-    const documentChunks: DocumentChunk[] = [];
-    
-    // Try to detect the language of the transcript for AI generation
-    const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(transcript);
-    const detectedLanguage = hasVietnameseChars ? 'Vietnamese' : 'English';
-    
-    // Now that we know the actual number of chunks, update the progress functions to use this information
-    const totalChunks = chunks.length;
-    const chunkProgressUpdate = (stage: 'chunk_creation' | 'embedding_generation', message: string, index: number) => {
-      if (progressCallback) {
-        progressCallback(stage, message, index);
+    if (oversizedChunks.length > 0) {
+      console.log(`Found ${oversizedChunks.length} chunks that exceed the safe embedding size limit.`);
+      updateProgress('transcript_process', `Resizing ${oversizedChunks.length} large chunks for better embedding`, 82);
+      
+      // Replace oversized chunks with smaller ones
+      const finalChunks: string[] = [];
+      for (const chunk of chunks) {
+        if (chunk.length > EMBEDDING_MAX_SIZE) {
+          console.log(`Resizing chunk of size ${chunk.length} characters`);
+          const smallerChunks = resizeChunk(chunk, EMBEDDING_MAX_SIZE, chunkOverlap);
+          console.log(`Resized large chunk into ${smallerChunks.length} smaller chunks`);
+          finalChunks.push(...smallerChunks);
+        } else {
+          finalChunks.push(chunk);
+        }
       }
-    };
-    
-    for (let i = 0; i < chunks.length; i++) {
-      const content = chunks[i];
-      console.log(`Processing chunk ${i+1}/${totalChunks}, length: ${content.length} characters`);
-      chunkProgressUpdate('chunk_creation', `Processing chunk ${i+1}/${totalChunks}`, i+1);
       
-      // Create embedding for the chunk
-      chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i+1}/${totalChunks}`, i+1);
-      const embedding = await createEmbedding(content);
+      console.log(`After resizing, we have ${finalChunks.length} chunks (was ${chunks.length} before)`);
+      updateProgress('transcript_process', `Final chunk count after resizing: ${finalChunks.length}`, 85);
       
-      // Create clean content for AI processing
-      const cleanContent = content.replace(/\[\d{1,2}:\d{1,2}(:\d{1,2})?\]/g, '')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
+      // Use the resized chunks from now on
+      const resizedChunks = finalChunks;
       
-      // Create base document chunk with id format for duplicate checking
-      const tempChunk: DocumentChunk = {
-        id: `${idPrefix}_chunk_${i}`, // Use consistent id format with videoId for duplicate checking
-        documentName: documentName, // Include video title in documentName for readability
-        content: content, // Keep original content with timestamps
-        embedding: embedding,
-        title: `Part ${i+1} of ${videoDetails.title}`, // Default title in case AI generation fails
-        summary: `Part ${i+1} of transcript for video: ${videoDetails.title}`, // Default summary
-        sourceFile: `https://www.youtube.com/watch?v=${videoId}`,
-        domains: domains || ['youtube']
+      // Immediately send the actual total chunks count to update progress tracking
+      if (progressCallback) {
+        progressCallback('transcript_process', `Total chunks: ${resizedChunks.length}`, resizedChunks.length);
+      }
+      
+      // Process each chunk
+      const documentChunks: DocumentChunk[] = [];
+      
+      // Try to detect the language of the transcript for AI generation
+      const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(transcript);
+      const detectedLanguage = hasVietnameseChars ? 'Vietnamese' : 'English';
+      
+      // Now that we know the actual number of chunks, update the progress functions to use this information
+      const totalChunks = resizedChunks.length;
+      const chunkProgressUpdate = (stage: 'chunk_creation' | 'embedding_generation', message: string, index: number) => {
+        if (progressCallback) {
+          progressCallback(stage, message, index);
+        }
       };
       
-      // Enhance the chunk and generate AI title and summary
-      try {
-        // First generate AI title and summary for this chunk in the original language
-        const aiEnhancedMetadata = await generateTitleAndSummary(cleanContent, videoDetails.title, i+1, totalChunks, detectedLanguage);
+      for (let i = 0; i < resizedChunks.length; i++) {
+        const content = resizedChunks[i];
+        console.log(`Processing chunk ${i+1}/${totalChunks}, length: ${content.length} characters`);
+        chunkProgressUpdate('chunk_creation', `Processing chunk ${i+1}/${totalChunks}`, i+1);
         
-        // Create a clean temp chunk with AI-generated metadata for enhancement
-        const cleanTempChunk = {
-          ...tempChunk,
-          content: cleanContent,
-          title: aiEnhancedMetadata.title,
-          summary: aiEnhancedMetadata.summary
+        // Create embedding for the chunk
+        chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i+1}/${totalChunks}`, i+1);
+        const embedding = await createEmbedding(content);
+        
+        // Create clean content for AI processing
+        const cleanContent = content.replace(/\[\d{1,2}:\d{1,2}(:\d{1,2})?\]/g, '')
+          .replace(/\s{2,}/g, ' ')
+          .trim();
+        
+        // Create base document chunk with id format for duplicate checking
+        const tempChunk: DocumentChunk = {
+          id: `${idPrefix}_chunk_${i}`, // Use consistent id format with videoId for duplicate checking
+          documentName: documentName, // Include video title in documentName for readability
+          content: content, // Keep original content with timestamps
+          embedding: embedding,
+          title: `Part ${i+1} of ${videoDetails.title}`, // Default title in case AI generation fails
+          summary: `Part ${i+1} of transcript for video: ${videoDetails.title}`, // Default summary
+          sourceFile: `https://www.youtube.com/watch?v=${videoId}`,
+          domains: domains || ['youtube']
         };
         
-        // Now enhance the content itself
-        const enhancedChunk = await enhanceContent(cleanTempChunk, {
-          types: [EnhancementType.FORMATTING, EnhancementType.READABILITY]
-        });
-        
-        // Keep the original content with timestamps, but use the enhanced content without timestamps
-        // and the AI-generated title and summary
-        documentChunks.push({
-          ...enhancedChunk,
-          content: tempChunk.content, // Keep original content with timestamps
-          title: aiEnhancedMetadata.title,
-          summary: aiEnhancedMetadata.summary
-        });
-      } catch (error) {
-        console.error(`Error enhancing chunk ${i+1}:`, error);
-        // If enhancement fails, use the original chunk
-        documentChunks.push(tempChunk);
+        // Enhance the chunk and generate AI title and summary
+        try {
+          // First generate AI title and summary for this chunk in the original language
+          const aiEnhancedMetadata = await generateTitleAndSummary(cleanContent, videoDetails.title, i+1, totalChunks, detectedLanguage);
+          
+          // Create a clean temp chunk with AI-generated metadata for enhancement
+          const cleanTempChunk = {
+            ...tempChunk,
+            content: cleanContent,
+            title: aiEnhancedMetadata.title,
+            summary: aiEnhancedMetadata.summary
+          };
+          
+          // Now enhance the content itself
+          const enhancedChunk = await enhanceContent(cleanTempChunk, {
+            types: [EnhancementType.FORMATTING, EnhancementType.READABILITY]
+          });
+          
+          // Keep the original content with timestamps, but use the enhanced content without timestamps
+          // and the AI-generated title and summary
+          documentChunks.push({
+            ...enhancedChunk,
+            content: tempChunk.content, // Keep original content with timestamps
+            title: aiEnhancedMetadata.title,
+            summary: aiEnhancedMetadata.summary
+          });
+        } catch (error) {
+          console.error(`Error enhancing chunk ${i+1}:`, error);
+          // If enhancement fails, use the original chunk
+          documentChunks.push(tempChunk);
+        }
       }
+      
+      return documentChunks;
+    } else {
+      // Proceed with original chunks if no resizing is needed
+      
+      // Immediately send the actual total chunks count to update progress tracking
+      if (progressCallback) {
+        progressCallback('transcript_process', `Total chunks: ${chunks.length}`, chunks.length);
+      }
+      
+      // Process each chunk
+      const documentChunks: DocumentChunk[] = [];
+      
+      // Try to detect the language of the transcript for AI generation
+      const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(transcript);
+      const detectedLanguage = hasVietnameseChars ? 'Vietnamese' : 'English';
+      
+      // Now that we know the actual number of chunks, update the progress functions to use this information
+      const totalChunks = chunks.length;
+      const chunkProgressUpdate = (stage: 'chunk_creation' | 'embedding_generation', message: string, index: number) => {
+        if (progressCallback) {
+          progressCallback(stage, message, index);
+        }
+      };
+      
+      for (let i = 0; i < chunks.length; i++) {
+        const content = chunks[i];
+        console.log(`Processing chunk ${i+1}/${totalChunks}, length: ${content.length} characters`);
+        chunkProgressUpdate('chunk_creation', `Processing chunk ${i+1}/${totalChunks}`, i+1);
+        
+        // Create embedding for the chunk
+        chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i+1}/${totalChunks}`, i+1);
+        const embedding = await createEmbedding(content);
+        
+        // Create clean content for AI processing
+        const cleanContent = content.replace(/\[\d{1,2}:\d{1,2}(:\d{1,2})?\]/g, '')
+          .replace(/\s{2,}/g, ' ')
+          .trim();
+        
+        // Create base document chunk with id format for duplicate checking
+        const tempChunk: DocumentChunk = {
+          id: `${idPrefix}_chunk_${i}`, // Use consistent id format with videoId for duplicate checking
+          documentName: documentName, // Include video title in documentName for readability
+          content: content, // Keep original content with timestamps
+          embedding: embedding,
+          title: `Part ${i+1} of ${videoDetails.title}`, // Default title in case AI generation fails
+          summary: `Part ${i+1} of transcript for video: ${videoDetails.title}`, // Default summary
+          sourceFile: `https://www.youtube.com/watch?v=${videoId}`,
+          domains: domains || ['youtube']
+        };
+        
+        // Enhance the chunk and generate AI title and summary
+        try {
+          // First generate AI title and summary for this chunk in the original language
+          const aiEnhancedMetadata = await generateTitleAndSummary(cleanContent, videoDetails.title, i+1, totalChunks, detectedLanguage);
+          
+          // Create a clean temp chunk with AI-generated metadata for enhancement
+          const cleanTempChunk = {
+            ...tempChunk,
+            content: cleanContent,
+            title: aiEnhancedMetadata.title,
+            summary: aiEnhancedMetadata.summary
+          };
+          
+          // Now enhance the content itself
+          const enhancedChunk = await enhanceContent(cleanTempChunk, {
+            types: [EnhancementType.FORMATTING, EnhancementType.READABILITY]
+          });
+          
+          // Keep the original content with timestamps, but use the enhanced content without timestamps
+          // and the AI-generated title and summary
+          documentChunks.push({
+            ...enhancedChunk,
+            content: tempChunk.content, // Keep original content with timestamps
+            title: aiEnhancedMetadata.title,
+            summary: aiEnhancedMetadata.summary
+          });
+        } catch (error) {
+          console.error(`Error enhancing chunk ${i+1}:`, error);
+          // If enhancement fails, use the original chunk
+          documentChunks.push(tempChunk);
+        }
+      }
+      
+      return documentChunks;
     }
-    
-    return documentChunks;
   } catch (error) {
     console.error('Error processing YouTube transcript:', error);
     throw error;
@@ -602,8 +713,12 @@ const splitTextIntoChunks = (
   chunkSize: number,
   chunkOverlap: number
 ): string[] => {
+  // Maximum size for a single chunk to prevent embedding service from needing to re-chunk
+  const EMBEDDING_MAX_SIZE = 9000; // Conservative limit below the 10000 limit in embedding.ts
+  const effectiveChunkSize = Math.min(chunkSize, EMBEDDING_MAX_SIZE);
+  
   // If text is short enough, just return it as a single chunk
-  if (text.length <= chunkSize) {
+  if (text.length <= effectiveChunkSize) {
     console.log('Text is short enough to be a single chunk');
     return [text];
   }
@@ -615,7 +730,7 @@ const splitTextIntoChunks = (
   // If no timestamps found, use simple text chunking
   if (!timestamps || timestamps.length <= 1) {
     console.log('No timestamps found, using simple text chunking');
-    return simpleTextChunking(text, chunkSize, chunkOverlap);
+    return simpleTextChunking(text, effectiveChunkSize, chunkOverlap);
   }
   
   // Otherwise use timestamp-aware chunking
@@ -635,7 +750,7 @@ const splitTextIntoChunks = (
   
   for (const line of lines) {
     // If this line would exceed chunk size and we already have substantial content
-    if ((currentChunk + '\n' + line).length > chunkSize && timestampCount >= 5) {
+    if ((currentChunk + '\n' + line).length > effectiveChunkSize && timestampCount >= 5) {
       // Only break if we have at least a few timestamps worth of content
       chunks.push(currentChunk);
       
@@ -680,6 +795,58 @@ const splitTextIntoChunks = (
     if (line.match(timestampPattern)) {
       timestampCount++;
     }
+    
+    // Extra check for oversized chunks - if we're getting too big even without hitting
+    // a logical break point, force a chunk break
+    if (currentChunk.length > effectiveChunkSize * 0.9 && timestampCount >= 3) {
+      chunks.push(currentChunk);
+      currentChunk = '';
+      timestampCount = 0;
+    }
+  }
+  
+  // Add the last chunk if it's not empty
+  if (currentChunk) {
+    // Check if the last chunk is too large
+    if (currentChunk.length > effectiveChunkSize) {
+      console.log(`Last chunk is too large (${currentChunk.length} chars), splitting further`);
+      // Split the oversized last chunk
+      const additionalChunks = splitLargeChunk(currentChunk, effectiveChunkSize, chunkOverlap, timestampPattern);
+      chunks.push(...additionalChunks);
+    } else {
+      chunks.push(currentChunk);
+    }
+  }
+  
+  console.log(`Created ${chunks.length} chunks with timestamp-aware chunking`);
+  return chunks.length > 0 ? chunks : [text]; // Fallback to original text if no chunks created
+};
+
+// Function to split an oversized chunk into smaller pieces
+const splitLargeChunk = (
+  text: string,
+  chunkSize: number,
+  chunkOverlap: number,
+  timestampPattern: RegExp
+): string[] => {
+  // Split by lines to maintain structure
+  const lines = text.split('\n');
+  const chunks: string[] = [];
+  let currentChunk = '';
+  
+  for (const line of lines) {
+    if ((currentChunk + (currentChunk ? '\n' : '') + line).length <= chunkSize) {
+      currentChunk += (currentChunk ? '\n' : '') + line;
+    } else {
+      // If we have content, add it as a chunk
+      if (currentChunk) {
+        chunks.push(currentChunk);
+      }
+      
+      // Start a new chunk with this line
+      // If the line itself is too long (unlikely), we'll add it as a chunk by itself
+      currentChunk = line;
+    }
   }
   
   // Add the last chunk if it's not empty
@@ -687,7 +854,7 @@ const splitTextIntoChunks = (
     chunks.push(currentChunk);
   }
   
-  return chunks.length > 0 ? chunks : [text]; // Fallback to original text if no chunks created
+  return chunks;
 };
 
 // Simple text chunking without timestamp awareness
@@ -744,6 +911,35 @@ const simpleTextChunking = (
     } else {
       currentChunk = sentence;
     }
+    
+    // Extra check for oversized chunks - some sentences might be very long
+    if (currentChunk.length > chunkSize) {
+      // If a single sentence is too long, we need to split it by words
+      if (currentChunk === sentence) {
+        const words = sentence.split(/\s+/);
+        let wordChunk = '';
+        
+        for (const word of words) {
+          if ((wordChunk + ' ' + word).length <= chunkSize) {
+            wordChunk += (wordChunk ? ' ' : '') + word;
+          } else {
+            if (wordChunk) {
+              chunks.push(wordChunk);
+            }
+            wordChunk = word;
+          }
+        }
+        
+        if (wordChunk) {
+          currentChunk = wordChunk;
+        } else {
+          currentChunk = '';
+        }
+      } else {
+        chunks.push(currentChunk);
+        currentChunk = '';
+      }
+    }
   }
   
   // Add the last chunk if it exists
@@ -751,6 +947,7 @@ const simpleTextChunking = (
     chunks.push(currentChunk);
   }
   
+  console.log(`Created ${chunks.length} chunks with simple text chunking`);
   return chunks.length > 0 ? chunks : [text]; // Fallback to original text if no chunks created
 };
 
@@ -1003,5 +1200,41 @@ SUMMARY: [your generated summary in ${language}]`;
       title: `Part ${chunkNumber} of ${videoTitle}`,
       summary: `Part ${chunkNumber} of transcript for video: ${videoTitle}`
     };
+  }
+}
+
+// Function to resize a chunk that exceeds embedding limits
+function resizeChunk(chunk: string, maxSize: number, overlap: number): string[] {
+  // Try to split by timestamps
+  const timestampPattern = /\[\d{2}:\d{2}\]/g;
+  const hasTimestamps = timestampPattern.test(chunk);
+  
+  if (hasTimestamps) {
+    // Use timestamp-aware splitting
+    return splitLargeChunk(chunk, maxSize, overlap, timestampPattern);
+  } else {
+    // Fall back to simple text chunking
+    // Split by sentences or paragraphs
+    const sentences = chunk.split(/(?<=[.!?])\s+|\n/).filter(s => s.trim().length > 0);
+    
+    const smallerChunks: string[] = [];
+    let currentChunk = '';
+    
+    for (const sentence of sentences) {
+      if ((currentChunk + ' ' + sentence).length <= maxSize) {
+        currentChunk += (currentChunk ? ' ' : '') + sentence;
+      } else {
+        if (currentChunk) {
+          smallerChunks.push(currentChunk);
+        }
+        currentChunk = sentence;
+      }
+    }
+    
+    if (currentChunk) {
+      smallerChunks.push(currentChunk);
+    }
+    
+    return smallerChunks.length > 0 ? smallerChunks : [chunk.substring(0, maxSize)]; // Last resort
   }
 } 

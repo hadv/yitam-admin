@@ -61,8 +61,8 @@ async function generateGeminiEmbedding(
   }
 
   // Gemini has a payload size limit of ~32KB
-  // Chunk the text if it's too large (approximately 10K characters to be safe)
-  const MAX_CHUNK_SIZE = 10000;
+  // Chunk the text if it's too large (approximately 8K characters to be conservative)
+  const MAX_CHUNK_SIZE = 8000;
   
   if (text.length <= MAX_CHUNK_SIZE) {
     // Text is small enough to process as a single chunk
@@ -144,9 +144,11 @@ export function chunkText(text: string, maxChunkSize: number): string[] {
         // Skip empty sentences
         if (!sentence || sentence.trim() === '') continue;
         
-        if (sentence.length > maxChunkSize) {
+        const trimmedSentence = sentence.trim() + '.'; // Add period back since we split on it
+        
+        if (trimmedSentence.length > maxChunkSize) {
           // If even a sentence is too long, split by word boundaries
-          const words = sentence.split(/\s+/).filter(word => word.trim() !== '');
+          const words = trimmedSentence.split(/\s+/).filter(word => word.trim() !== '');
           let sentenceChunk = '';
           
           for (const word of words) {
@@ -161,11 +163,11 @@ export function chunkText(text: string, maxChunkSize: number): string[] {
           if (sentenceChunk) chunks.push(sentenceChunk);
         } else {
           // Sentence fits in a chunk
-          if ((currentChunk + '. ' + sentence).length <= maxChunkSize) {
-            currentChunk += (currentChunk ? '. ' : '') + sentence;
+          if ((currentChunk + '. ' + trimmedSentence).length <= maxChunkSize) {
+            currentChunk += (currentChunk ? '. ' : '') + trimmedSentence;
           } else {
             if (currentChunk) chunks.push(currentChunk);
-            currentChunk = sentence;
+            currentChunk = trimmedSentence;
           }
         }
       }
@@ -177,6 +179,12 @@ export function chunkText(text: string, maxChunkSize: number): string[] {
         if (currentChunk) chunks.push(currentChunk);
         currentChunk = paragraph;
       }
+    }
+    
+    // Extra check - if current chunk is getting large, finalize it
+    if (currentChunk.length > maxChunkSize * 0.9) {
+      chunks.push(currentChunk);
+      currentChunk = '';
     }
   }
   
