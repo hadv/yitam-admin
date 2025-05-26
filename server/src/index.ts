@@ -14,11 +14,14 @@ import { DatabaseService } from './core/database-service';
 // Load environment variables
 dotenv.config();
 
+// Environment variables
+const PORT = process.env.PORT || 3001;
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:3000';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'keyboard_cat';
+const SESSION_NAME = process.env.SESSION_NAME || 'yitam_session';
+
 // Initialize Express
 const app = express();
-const PORT = process.env.PORT || 3001;
-
-// Create HTTP server
 const httpServer = createServer(app);
 
 // Initialize socket.io

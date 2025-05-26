@@ -166,6 +166,45 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     };
   }, [videoId, onUploadSuccess]);
 
+  // Add function to check job status
+  const checkJobStatus = async (jobId: string) => {
+    try {
+      const response = await axios.get(`/api/youtube/job/${jobId}`);
+      console.log('Job status:', response.data);
+      
+      // Update UI based on job status
+      if (response.data.status === 'completed') {
+        // Job completed successfully
+        setProcessingMessage('Processing completed successfully!');
+        setTimeout(() => {
+          setIsProcessing(false);
+          setProcessingMessage(null);
+          
+          // If we have a videoId, trigger onUploadSuccess
+          if (response.data.videoId) {
+            onUploadSuccess();
+          }
+        }, 3000);
+      } else if (response.data.status === 'failed') {
+        // Job failed
+        setError('Video processing failed. Please try again or try with a different video.');
+        setIsProcessing(false);
+        setProcessingMessage(null);
+      } else {
+        // Job is still in progress, update progress message
+        setProcessingMessage(`Processing in queue (status: ${response.data.status})...`);
+        
+        // Check again in 5 seconds
+        setTimeout(() => {
+          checkJobStatus(jobId);
+        }, 5000);
+      }
+    } catch (error) {
+      console.error('Error checking job status:', error);
+      // Don't update UI on error, let the socket handle updates
+    }
+  };
+
   // Initialize Google Identity Services 
   useEffect(() => {
     const CLIENT_ID = '1027650180838-6ora2sdrjre213ujv9hjah4m8mu3v8ju.apps.googleusercontent.com';
@@ -337,16 +376,6 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     // Set the video ID which will trigger the useEffect for socket listeners
     setVideoId(extractedVideoId);
     
-    // Track if we've received any WebSocket updates
-    let receivedSocketUpdates = false;
-    
-    // Register a temporary listener to detect if we're receiving socket updates
-    const socketCallback = () => {
-      receivedSocketUpdates = true;
-    };
-    
-    socketService.registerProgressListener(extractedVideoId, socketCallback);
-    
     try {
       // Add token to the request if authenticated
       const headers = accessToken ? { 
@@ -357,14 +386,12 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       const socketId = socketService.getSocketId();
       console.log('Using socket ID for tracking:', socketId);
       
+      // Start the job to process the video
       const response = await axios.post('/api/youtube/process', {
         youtubeUrl,
         domains: selectedDomains,
         socketId
       }, { headers });
-      
-      // Unregister the temporary callback
-      socketService.unregisterProgressListener(extractedVideoId);
       
       // If this video was already processed, update the UI
       if (response.data.alreadyProcessed) {
@@ -380,54 +407,50 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         });
         
         onUploadSuccess();
+      } else {
+        // Job has been queued, the video ID is in the response
+        console.log('Processing job queued:', response.data);
+        setProcessingMessage(`Processing job queued (Job ID: ${response.data.jobId})`);
+        
+        // Start checking job status
+        if (response.data.jobId) {
+          setTimeout(() => {
+            checkJobStatus(response.data.jobId);
+          }, 2000);
+        }
       }
       
       setYoutubeUrl('');
       setSelectedDomains([]);
     } catch (err) {
-      // Unregister the temporary callback
-      socketService.unregisterProgressListener(extractedVideoId);
+      setIsProcessing(false);
+      setProcessingMessage(null);
       
-      // If we're receiving socket updates, don't show timeout errors as the process is working via WebSockets
-      if (receivedSocketUpdates && axios.isAxiosError(err) && err.code === 'ECONNABORTED') {
-        console.log('Ignoring timeout error as WebSocket connection is active');
-        return; // Don't update UI state negatively, WebSockets will handle progress
-      }
-      
-      // If we're not receiving socket updates, show the error
-      if (!receivedSocketUpdates) {
-        setIsProcessing(false);
-        setProcessingMessage(null);
-        
-        if (axios.isAxiosError(err) && err.response) {
-          // Check if the error is due to authentication
-          if (err.response.status === 401) {
-            setError('Authentication required to access YouTube transcripts. Please sign in with Google.');
-            setIsAuthenticated(false);
-            localStorage.removeItem('youtube_access_token');
-            localStorage.removeItem('youtube_token_expiry');
-          } else {
-            // More detailed error message including the server response
-            const serverErrorMsg = err.response.data.error || err.response.data.message || 'Unknown server error';
-            setError(`Failed to process YouTube transcript: ${serverErrorMsg}`);
-          }
-          console.error('Response error:', err.response.data);
-        } else if (axios.isAxiosError(err) && err.request) {
-          // Network error handling
-          const networkErr = err as CustomAxiosError;
-          // Only show timeout errors if we're not receiving WebSocket updates
-          if (networkErr.isTimeout) {
-            setError(networkErr.customMessage || 'The request timed out. Please try again with a different video or try authenticating with Google.');
-          } else if (networkErr.isNetworkError) {
-            setError(networkErr.customMessage || 'Network connection error. Please check your internet connection and try again.');
-          } else {
-            setError('Server not responding. Please check your connection or try again later.');
-          }
-          console.error('Request error:', err.request);
+      if (axios.isAxiosError(err) && err.response) {
+        // Check if the error is due to authentication
+        if (err.response.status === 401) {
+          setError('Authentication required to access YouTube transcripts. Please sign in with Google.');
+          setIsAuthenticated(false);
+          localStorage.removeItem('youtube_access_token');
+          localStorage.removeItem('youtube_token_expiry');
         } else {
-          setError('An unexpected error occurred while processing the video');
-          console.error('Error:', err);
+          // More detailed error message including the server response
+          const serverErrorMsg = err.response.data.error || err.response.data.message || 'Unknown server error';
+          setError(`Failed to queue YouTube processing: ${serverErrorMsg}`);
         }
+        console.error('Response error:', err.response.data);
+      } else if (axios.isAxiosError(err) && err.request) {
+        // Network error handling
+        const networkErr = err as CustomAxiosError;
+        if (networkErr.isNetworkError) {
+          setError(networkErr.customMessage || 'Network connection error. Please check your internet connection and try again.');
+        } else {
+          setError('Server not responding. Please check your connection or try again later.');
+        }
+        console.error('Request error:', err.request);
+      } else {
+        setError('An unexpected error occurred while queueing the video processing');
+        console.error('Error:', err);
       }
     }
   };
