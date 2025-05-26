@@ -56,14 +56,14 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
     setCheckedVideoId(null);
     
     try {
-      // First check if the transcript exists
-      const checkResponse = await axios.get(`/api/youtube/check-transcript/${videoId}`);
+      // Check if the transcript exists
+      const checkResponse = await axios.get(`/api/youtube/exists/${videoId}`);
       const exists = checkResponse.data.exists;
       
       if (exists) {
         try {
-          // Get the count of chunks using the dedicated endpoint
-          const countResponse = await axios.get(`/api/youtube/count-chunks/${videoId}`);
+          // Get the count of chunks
+          const countResponse = await axios.get(`/api/youtube/count/${videoId}`);
           setChunksCount(countResponse.data.count);
         } catch (countErr) {
           console.error('Count error:', countErr);
@@ -131,9 +131,9 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
     
     try {
       console.log(`Sending delete request for video ID: ${videoId}`);
-      const response = await axios.delete(`/api/youtube/delete-transcript/${videoId}`);
+      const response = await axios.delete(`/api/youtube/${videoId}`);
       
-      console.log('Deletion response:', response.data);
+      console.log('Delete response:', response.data);
       
       // Store the deletion result
       setDeleteResult({
