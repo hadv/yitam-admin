@@ -22,6 +22,7 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
   const [deleteResult, setDeleteResult] = useState<DeleteResult | null>(null);
   const [hasChunks, setHasChunks] = useState<boolean | null>(null);
   const [chunksCount, setChunksCount] = useState<number | null>(null);
+  const [domains, setDomains] = useState<string[]>([]);
   const [checkedVideoId, setCheckedVideoId] = useState<string | null>(null);
 
   const extractYouTubeId = (input: string): string | null => {
@@ -53,6 +54,7 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
     setError(null);
     setHasChunks(null);
     setChunksCount(null);
+    setDomains([]);
     setCheckedVideoId(null);
     
     try {
@@ -65,6 +67,11 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
           // Get the count of chunks
           const countResponse = await axios.get(`/api/youtube/count/${videoId}`);
           setChunksCount(countResponse.data.count);
+          
+          // Set domains if available
+          if (countResponse.data.domains) {
+            setDomains(countResponse.data.domains);
+          }
         } catch (countErr) {
           console.error('Count error:', countErr);
           // If count fails, we still know chunks exist, just can't show the count
@@ -144,6 +151,7 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
       // Reset check status
       setHasChunks(null);
       setChunksCount(null);
+      setDomains([]);
       setCheckedVideoId(null);
       
       if (onDeleteSuccess) {
@@ -207,7 +215,12 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
               <strong>Found transcript chunks</strong> for video ID: {checkedVideoId}
               {chunksCount !== null && <> ({chunksCount} chunks)</>}
             </p>
-            <p className="text-sm">You can proceed with deletion.</p>
+            {domains.length > 0 && (
+              <p className="text-sm mt-1">
+                <strong>Domains:</strong> {domains.join(', ')}
+              </p>
+            )}
+            <p className="text-sm mt-1">You can proceed with deletion.</p>
             <a 
               href={`https://www.youtube.com/watch?v=${checkedVideoId}`} 
               target="_blank" 
@@ -255,6 +268,7 @@ const YoutubeDelete = ({ onDeleteSuccess }: YoutubeDeleteProps) => {
                     // Reset check status when input changes
                     setHasChunks(null);
                     setChunksCount(null);
+                    setDomains([]);
                     setCheckedVideoId(null);
                   }}
                   disabled={isProcessing || isChecking}
