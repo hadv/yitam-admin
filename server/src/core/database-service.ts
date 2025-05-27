@@ -455,6 +455,98 @@ export class DatabaseService {
     );
   }
 
+  // Get domains for a YouTube video
+  public async getYoutubeVideoDomains(videoId: string): Promise<string[]> {
+    const idPattern = `youtube_${videoId}`;
+    
+    return this.fallbackService.withFallback(
+      'getYoutubeVideoDomains',
+      // Fallback function
+      () => {
+        const domains = new Set<string>();
+        // Find domains from documents of the specified YouTube video
+        Array.from(inMemoryDocuments.values()).forEach(item => {
+          const doc = item.document;
+          if (doc && doc.id.startsWith(idPattern) && doc.domains) {
+            doc.domains.forEach(domain => domains.add(domain));
+          }
+        });
+        return Array.from(domains);
+      },
+      // Qdrant function
+      async () => {
+        try {
+          const filter = {
+            must: [
+              {
+                key: 'id',
+                match: {
+                  text: idPattern,
+                  exact: false // Using non-exact match to find IDs that start with this pattern
+                }
+              }
+            ]
+          };
+          
+          // Get the first chunk to extract domains
+          const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+            filter,
+            with_payload: { include: ['domains'] },
+            limit: 1
+          });
+          
+          if (response.points.length > 0) {
+            const payload = response.points[0].payload as any;
+            return payload.domains || ['default'];
+          }
+          
+          return ['default'];
+        } catch (error) {
+          console.error(`Error getting YouTube video domains: ${error}`);
+          
+          // Fallback to client-side filtering if text matching doesn't work
+          try {
+            const domains = new Set<string>();
+            let found = false;
+            let nextPageOffset: string | undefined;
+            const limit = 100;
+            
+            do {
+              const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+                with_payload: { include: ['id', 'domains'] },
+                limit,
+                offset: nextPageOffset,
+              });
+              
+              for (const point of response.points) {
+                const payload = point.payload as any;
+                if (payload.id && payload.id.startsWith(idPattern)) {
+                  if (payload.domains) {
+                    payload.domains.forEach((domain: string) => domains.add(domain));
+                  }
+                  found = true;
+                }
+              }
+              
+              // If we found at least one matching chunk, we can stop early
+              if (found && domains.size > 0) {
+                break;
+              }
+              
+              nextPageOffset = response.next_page_offset as string | undefined;
+            } while (nextPageOffset);
+            
+            return Array.from(domains);
+          } catch (scrollError) {
+            console.error('Error with fallback scroll for domains:', scrollError);
+            return ['default'];
+          }
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+
   // Get all unique document names in the database
   public async getUniqueDocumentNames(): Promise<string[]> {
     return this.fallbackService.withFallback(

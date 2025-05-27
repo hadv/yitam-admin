@@ -49,6 +49,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
+  const [processingDomains, setProcessingDomains] = useState<string[]>([]);
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [checkingAuth, setCheckingAuth] = useState<boolean>(true);
@@ -357,6 +358,9 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       return;
     }
     
+    // Save the selected domains before processing
+    setProcessingDomains([...selectedDomains]);
+    
     setIsProcessing(true);
     setError(null);
     setProcessingResult(null);
@@ -503,6 +507,13 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
               {progressData ? `${progress}% Complete` : 'Initializing...'}
               {currentItem > 0 && totalItems > 0 && ` (${currentItem}/${totalItems})`}
             </p>
+            
+            {/* Display selected domains */}
+            {processingDomains.length > 0 && (
+              <div className="mt-2 text-sm text-gray-600">
+                <p>Selected domains: {processingDomains.join(', ')}</p>
+              </div>
+            )}
             
             {/* Socket connection status with refresh button */}
             <div className="flex items-center justify-center mt-2 text-xs text-gray-400">

@@ -196,12 +196,16 @@ export const countYoutubeVideoChunks = async (req: Request, res: Response) => {
       console.log(`Transcript found for ${videoId}. Counting chunks...`);
       const count = await dbService.countYoutubeTranscriptChunks(videoId);
       
-      console.log(`Found ${count} chunks for YouTube video: ${videoId}`);
+      // Get domains for the video
+      const domains = await dbService.getYoutubeVideoDomains(videoId);
+      
+      console.log(`Found ${count} chunks for YouTube video: ${videoId} with domains: ${domains.join(', ')}`);
       
       return res.status(200).json({
         message: `Found ${count} chunks for the video`,
         videoId,
-        count
+        count,
+        domains
       });
     } catch (countError: any) {
       console.error(`Error in Qdrant during countYoutubeTranscriptChunks:`, countError);
