@@ -1,0 +1,27 @@
+# Include production requirements
+-r requirements.txt
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+httpx==0.25.2
+
+# Code formatting and linting
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+
+# Pre-commit hooks
+pre-commit==3.6.0
+
+# Development server with hot reload
+watchfiles==0.21.0
+
+# Documentation
+mkdocs==1.5.3
+mkdocs-material==9.4.8
+
+# Debugging
+ipdb==0.13.13

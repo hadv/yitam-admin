@@ -18,6 +18,7 @@ This project is ready for deployment with Docker Compose. All necessary componen
 
 - **Frontend**: React, TypeScript, Tailwind CSS, Vite
 - **Backend**: Node.js, Express, TypeScript
+- **MemVid Service**: Python, FastAPI (video memory processing)
 - **Vector Database**: Qdrant with FastEmbed API
 - **Embeddings**: Server-side embedding generation with Qdrant's FastEmbed
 - **Deployment**: Docker, Docker Compose
@@ -37,6 +38,13 @@ document-vector-storage/
 │       ├── models/       # Data models
 │       ├── routes/       # API routes
 │       └── services/     # Business logic
+├── memvid-service/       # Python FastAPI microservice
+│   ├── app/              # FastAPI application code
+│   │   ├── api/          # API route handlers
+│   │   ├── core/         # Core configuration
+│   │   └── models/       # Pydantic models
+│   ├── tests/            # Test files
+│   └── docs/             # Documentation
 ├── uploads/              # Directory for uploaded files
 └── qdrant_storage/       # Qdrant database persistence
 ```
@@ -79,6 +87,7 @@ document-vector-storage/
 2. The application will be available at:
    - Frontend: http://localhost
    - Backend API: http://localhost:3001
+   - MemVid Service API: http://localhost:8000
    - Qdrant API: http://localhost:6333
 
 ## Usage

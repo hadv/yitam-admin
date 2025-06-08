@@ -30,6 +30,32 @@ services:
       - ./uploads:/app/uploads
     restart: always
 
+  memvid-service:
+    build:
+      context: ./memvid-service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=MemVid Service
+      - APP_VERSION=1.0.0
+      - DEBUG=true
+      - ENVIRONMENT=development
+      - HOST=0.0.0.0
+      - PORT=8000
+      - ALLOWED_ORIGINS=["http://localhost", "http://localhost:3000", "http://localhost:5173"]
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./memvid-service/uploads:/app/uploads
+      - ./memvid-service:/app
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
   client:
     build:
       context: ./client
@@ -38,4 +64,5 @@ services:
       - "80:80"
     depends_on:
       - server
-    restart: always 
+      - memvid-service
+    restart: always

@@ -5,9 +5,11 @@
   "main": "index.js",
   "scripts": {
     "install:all": "cd server && npm install && cd ../client && npm install",
-    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm run dev\"",
+    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm run dev\" \"cd memvid-service && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000\"",
+    "dev:memvid": "cd memvid-service && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
     "build": "cd client && npm run build && cd ../server && npm run build",
-    "start": "cd server && npm start"
+    "start": "cd server && npm start",
+    "setup:memvid": "cd memvid-service && python -m venv venv && source venv/bin/activate && pip install -r requirements.txt && pip install -r requirements-dev.txt"
   },
   "keywords": [
     "react",
