@@ -8,6 +8,101 @@ import { DocumentChunk } from './chunking';
 import { google } from 'googleapis';
 import { getAuthenticatedClient } from './youtube-auth';
 
+// Configuration for scraping behavior
+const SCRAPING_CONFIG = {
+  maxRetries: parseInt(process.env.YOUTUBE_SCRAPING_MAX_RETRIES || '5'),
+  baseRetryDelay: parseInt(process.env.YOUTUBE_SCRAPING_RETRY_DELAY || '2000'),
+  enableWarmup: process.env.YOUTUBE_SCRAPING_ENABLE_WARMUP !== 'false',
+  requestTimeout: parseInt(process.env.YOUTUBE_SCRAPING_TIMEOUT || '30000')
+};
+
+// Simple metrics tracking with circuit breaker
+const scrapingMetrics = {
+  totalAttempts: 0,
+  successfulAttempts: 0,
+  failedAttempts: 0,
+  retryAttempts: 0,
+  antiBotDetections: 0,
+  lastResetTime: Date.now(),
+  lastAntiBotTime: 0,
+  circuitBreakerOpen: false,
+
+  recordAttempt() {
+    this.totalAttempts++;
+  },
+
+  recordSuccess() {
+    this.successfulAttempts++;
+    // Reset circuit breaker on success
+    this.circuitBreakerOpen = false;
+  },
+
+  recordFailure() {
+    this.failedAttempts++;
+  },
+
+  recordRetry() {
+    this.retryAttempts++;
+  },
+
+  recordAntiBotDetection() {
+    this.antiBotDetections++;
+    this.lastAntiBotTime = Date.now();
+
+    // Open circuit breaker only if we've had many confirmed anti-bot detections recently
+    // Made this more conservative to avoid false positives
+    if (this.antiBotDetections >= 5) { // Increased threshold from 3 to 5
+      // Check if we've had multiple detections in the last 2 minutes (increased from 1 minute)
+      const twoMinutesAgo = Date.now() - 120000;
+      if (this.lastAntiBotTime > twoMinutesAgo) {
+        this.circuitBreakerOpen = true;
+        console.log('🚨 Circuit breaker opened due to repeated confirmed anti-bot detections');
+      }
+    }
+  },
+
+  isCircuitBreakerOpen() {
+    // Auto-reset circuit breaker after 5 minutes
+    if (this.circuitBreakerOpen && (Date.now() - this.lastAntiBotTime) > 300000) {
+      this.circuitBreakerOpen = false;
+      console.log('🔄 Circuit breaker reset after cooldown period');
+    }
+    return this.circuitBreakerOpen;
+  },
+
+  getStats() {
+    const now = Date.now();
+    const timeSinceReset = now - this.lastResetTime;
+    const hours = timeSinceReset / (1000 * 60 * 60);
+
+    return {
+      totalAttempts: this.totalAttempts,
+      successfulAttempts: this.successfulAttempts,
+      failedAttempts: this.failedAttempts,
+      retryAttempts: this.retryAttempts,
+      antiBotDetections: this.antiBotDetections,
+      circuitBreakerOpen: this.circuitBreakerOpen,
+      successRate: this.totalAttempts > 0 ? (this.successfulAttempts / this.totalAttempts * 100).toFixed(2) + '%' : '0%',
+      timePeriodHours: hours.toFixed(2)
+    };
+  },
+
+  reset() {
+    this.totalAttempts = 0;
+    this.successfulAttempts = 0;
+    this.failedAttempts = 0;
+    this.retryAttempts = 0;
+    this.antiBotDetections = 0;
+    this.lastResetTime = Date.now();
+    this.lastAntiBotTime = 0;
+    this.circuitBreakerOpen = false;
+  }
+};
+
+// Export function to get scraping metrics
+export const getScrapingMetrics = () => scrapingMetrics.getStats();
+export const resetScrapingMetrics = () => scrapingMetrics.reset();
+
 // Import the TranscriptItem interface from our declaration file
 interface TranscriptItem {
   text: string;
@@ -405,6 +500,10 @@ export const processYoutubeTranscript = async (
     try {
       console.log('Attempting to get transcript using web scraping (primary method)');
       updateProgress('transcript_fetch', 'Attempting to get transcript using web scraping', 55);
+
+      // Add a small delay before scraping to avoid immediate rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
       transcript = await scrapeTranscriptFromYouTube(videoId);
       console.log(`Successfully retrieved transcript via web scraping with length: ${transcript.length} characters`);
       updateProgress('transcript_fetch', 'Successfully retrieved transcript via web scraping', 60);
@@ -478,12 +577,14 @@ export const processYoutubeTranscript = async (
           console.log(errorMsg);
           errors.push(errorMsg);
           updateProgress('transcript_fetch', 'YouTube transcript API failed', 60);
-          
-          // If all methods have failed, throw a detailed error
-          if (!transcript) {
-            throw new Error(`All transcript retrieval methods failed for video ${videoId}. Errors: ${errors.join(' | ')}`);
-          }
         }
+      }
+
+      // If all methods have failed, provide detailed error information
+      if (!transcript) {
+        const detailedError = `All transcript retrieval methods failed for video ${videoId}.\n\nAttempted methods and their errors:\n${errors.map((err, i) => `${i + 1}. ${err}`).join('\n')}\n\nThis could be due to:\n- Video has no captions/transcripts available\n- YouTube anti-bot detection\n- Network connectivity issues\n- Rate limiting\n\nPlease try again later or verify the video has captions enabled.`;
+        console.error(detailedError);
+        throw new Error(detailedError);
       }
     }
     
@@ -1014,31 +1115,167 @@ export const getTranscriptFromPublicApi = async (videoId: string): Promise<strin
 };
 
 /**
+ * Perform a warm-up request to YouTube to establish session and avoid anti-bot detection
+ */
+const performWarmupRequest = async (userAgent: string): Promise<void> => {
+  try {
+    console.log('Performing warm-up request to YouTube...');
+    await axios.get('https://www.youtube.com/', {
+      headers: {
+        'User-Agent': userAgent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1'
+      },
+      timeout: 10000
+    });
+    console.log('Warm-up request completed successfully');
+    // Small delay after warm-up
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } catch (error) {
+    console.log('Warm-up request failed, but continuing with scraping:', error instanceof Error ? error.message : 'Unknown error');
+  }
+};
+
+/**
  * Scrape transcript directly from YouTube's webpage
  * This works around API limitations since YouTube displays transcripts on the web
  */
-export const scrapeTranscriptFromYouTube = async (videoId: string, maxRetries = 3, retryDelay = 1000): Promise<string> => {
+export const scrapeTranscriptFromYouTube = async (
+  videoId: string,
+  maxRetries = SCRAPING_CONFIG.maxRetries,
+  retryDelay = SCRAPING_CONFIG.baseRetryDelay
+): Promise<string> => {
   let retryCount = 0;
-  
+
+  // Array of different user agents to rotate through
+  const userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+  ];
+
   const performScrape = async (): Promise<string> => {
     try {
+      // Check circuit breaker before attempting
+      if (scrapingMetrics.isCircuitBreakerOpen()) {
+        throw new Error('Circuit breaker is open due to repeated anti-bot detections. Please wait 5 minutes before trying again.');
+      }
+
+      // Record attempt in metrics
+      scrapingMetrics.recordAttempt();
+
+      // Rotate user agent on retries
+      const userAgent = userAgents[retryCount % userAgents.length];
+
+      // Perform warm-up request on first attempt or after multiple failures (if enabled)
+      if (SCRAPING_CONFIG.enableWarmup && (retryCount === 0 || retryCount === 2)) {
+        await performWarmupRequest(userAgent);
+      }
+
+      // Add random delay to avoid detection patterns
+      if (retryCount > 0) {
+        scrapingMetrics.recordRetry();
+        const randomDelay = Math.random() * 1000 + 500; // 500-1500ms random delay
+        console.log(`Adding random delay of ${Math.round(randomDelay)}ms before retry ${retryCount}`);
+        await new Promise(resolve => setTimeout(resolve, randomDelay));
+      }
+
       // First get the timedtext URL from the video page
       const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      console.log(`Attempting to scrape YouTube page for video ${videoId} (attempt ${retryCount + 1}/${maxRetries + 1})`);
+
       const response = await axios.get(videoUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.9',
+          'User-Agent': userAgent,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'DNT': '1',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
           'Cache-Control': 'no-cache',
           'Pragma': 'no-cache'
-        }
+        },
+        timeout: SCRAPING_CONFIG.requestTimeout,
+        maxRedirects: 5
       });
-      
+
+      // Check if we got a valid response
+      if (!response.data || response.data.length < 1000) {
+        throw new Error('Received incomplete or empty response from YouTube');
+      }
+
       const html = response.data;
-      
+
+      // Check for anti-bot detection with more specific and precise patterns
+      // Only trigger on very specific anti-bot messages, not generic terms
+      const antiBotPatterns = [
+        'Our systems have detected unusual traffic from your computer network',
+        'Please complete the security check to access',
+        'verify you are human',
+        'automated requests from your computer network',
+        'unusual traffic from your computer network',
+        'This page appears when Google automatically detects',
+        'Before we continue, we need to verify that you\'re human'
+      ];
+
+      // More precise detection - look for specific anti-bot page indicators
+      const isAntiBotPage = antiBotPatterns.some(pattern =>
+        html.toLowerCase().includes(pattern.toLowerCase())
+      ) || (
+        // Check for combination of indicators that suggest anti-bot page
+        html.includes('captcha') &&
+        (html.includes('verify') || html.includes('security')) &&
+        html.length < 50000 // Anti-bot pages are typically much smaller
+      );
+
+      if (isAntiBotPage) {
+        const foundPattern = antiBotPatterns.find(pattern =>
+          html.toLowerCase().includes(pattern.toLowerCase())
+        ) || 'captcha verification page';
+
+        // Record anti-bot detection
+        scrapingMetrics.recordAntiBotDetection();
+
+        console.log(`🚨 Confirmed anti-bot detection: ${foundPattern}`);
+
+        // For anti-bot detection, we should wait longer before retrying
+        if (retryCount < maxRetries) {
+          throw new Error(`YouTube anti-bot detection triggered (pattern: "${foundPattern}"). Will retry with longer delay.`);
+        } else {
+          throw new Error(`YouTube anti-bot detection triggered after ${maxRetries} attempts. This may indicate IP-based rate limiting. Please try again later or from a different network.`);
+        }
+      }
+
+      // Validate that we got a proper YouTube page
+      if (!html.includes('ytInitialData') && !html.includes('captionTracks')) {
+        console.log(`⚠️  Page validation failed - missing ytInitialData and captionTracks. Page length: ${html.length}`);
+        throw new Error('Invalid YouTube page response - may be blocked or rate limited');
+      }
+
+      console.log(`✅ Valid YouTube page received (${html.length} characters)`);
+      console.log(`🔍 Searching for caption data...`);
+
       // Try different regex patterns to locate caption data
       let captionData;
       let captionUrl;
-      
+
+      console.log('Searching for caption data in YouTube page...');
+
       // Pattern 1: Try to find the newer format of caption data
       const newPatternMatch = html.match(/\{"captionTracks":(\[.*?\])/);
       if (newPatternMatch && newPatternMatch[1]) {
@@ -1046,12 +1283,13 @@ export const scrapeTranscriptFromYouTube = async (videoId: string, maxRetries = 
           const captionTracksJson = JSON.parse(newPatternMatch[1]);
           if (captionTracksJson && captionTracksJson.length > 0) {
             captionUrl = captionTracksJson[0].baseUrl;
+            console.log('Found caption URL using new pattern format');
           }
         } catch (e) {
           console.log('Failed to parse new caption format:', e);
         }
       }
-      
+
       // Pattern 2: Try the older format
       if (!captionUrl) {
         const oldPatternMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
@@ -1060,49 +1298,101 @@ export const scrapeTranscriptFromYouTube = async (videoId: string, maxRetries = 
             const captionTracksJson = JSON.parse(oldPatternMatch[1].replace(/\\"/g, '"').replace(/\\u0026/g, '&'));
             if (captionTracksJson && captionTracksJson.length > 0) {
               captionUrl = captionTracksJson[0].baseUrl;
+              console.log('Found caption URL using old pattern format');
             }
           } catch (e) {
             console.log('Failed to parse old caption format:', e);
           }
         }
       }
-      
+
       // Pattern 3: Try direct URL regex (most reliable fallback)
       if (!captionUrl) {
-        const directUrlMatch = html.match(/https:\/\/www.youtube.com\/api\/timedtext[^"]*/) || 
+        const directUrlMatch = html.match(/https:\/\/www.youtube.com\/api\/timedtext[^"]*/) ||
                               html.match(/https:\/\/www.youtube.com\/api\/timedtext[^&]*/) ||
                               html.match(/"(https:\/\/www\.youtube\.com\/api\/timedtext[^"]*)"/);
-        
+
         if (directUrlMatch && directUrlMatch[0]) {
           captionUrl = directUrlMatch[0].replace(/\\u0026/g, '&');
+          console.log('Found caption URL using direct URL pattern');
         }
       }
-      
+
+      // Pattern 4: Try more aggressive search for timedtext URLs
       if (!captionUrl) {
-        throw new Error('Could not find caption URL in video page. The video may not have captions enabled.');
-      }
-      
-      console.log(`Found caption URL: ${captionUrl}`);
-      
-      // Fetch the caption content (XML format)
-      const captionResponse = await axios.get(captionUrl);
-      const captionXml = captionResponse.data;
-      
-      if (!captionXml || captionXml.length < 10) {
-        if (retryCount < maxRetries) {
-          throw new Error('Received empty caption data from YouTube');
-        } else {
-          throw new Error(`Received empty caption data from YouTube after ${maxRetries} retries`);
+        const aggressiveMatch = html.match(/timedtext[^"]*lang[^"]*/) ||
+                               html.match(/api\/timedtext[^"]*/) ||
+                               html.match(/subtitle[^"]*timedtext[^"]*/);
+
+        if (aggressiveMatch && aggressiveMatch[0]) {
+          // Reconstruct the full URL if we found a partial match
+          if (!aggressiveMatch[0].startsWith('http')) {
+            captionUrl = `https://www.youtube.com/api/${aggressiveMatch[0]}`;
+          } else {
+            captionUrl = aggressiveMatch[0];
+          }
+          captionUrl = captionUrl.replace(/\\u0026/g, '&');
+          console.log('Found caption URL using aggressive pattern search');
         }
       }
-      
+
+      if (!captionUrl) {
+        console.log(`❌ No caption URL found. This could mean:`);
+        console.log(`   - Video has no captions/transcripts available`);
+        console.log(`   - YouTube changed their page structure`);
+        console.log(`   - Video is private or restricted`);
+        throw new Error('Could not find caption URL in video page. The video may not have captions enabled or the page structure has changed.');
+      }
+
+      console.log(`Found caption URL: ${captionUrl}`);
+
+      // Add a small delay before fetching caption content to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Fetch the caption content (XML format) with retry logic
+      let captionResponse;
+      let captionXml;
+
+      try {
+        console.log(`🔗 Fetching caption content from: ${captionUrl.substring(0, 100)}...`);
+        captionResponse = await axios.get(captionUrl, {
+          headers: {
+            'User-Agent': userAgent,
+            'Accept': 'application/xml, text/xml, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': videoUrl,
+            'Origin': 'https://www.youtube.com'
+          },
+          timeout: 15000 // 15 second timeout for caption fetch
+        });
+        captionXml = captionResponse.data;
+        console.log(`📥 Caption response status: ${captionResponse.status}, length: ${captionXml ? captionXml.length : 0}`);
+      } catch (captionError) {
+        console.error('❌ Error fetching caption content:', captionError instanceof Error ? captionError.message : captionError);
+        throw new Error(`Failed to fetch caption content: ${captionError instanceof Error ? captionError.message : 'Unknown error'}`);
+      }
+
+      if (!captionXml || captionXml.length < 10) {
+        console.log(`⚠️  Received empty caption data (length: ${captionXml ? captionXml.length : 0})`);
+        throw new Error('Received empty caption data from YouTube');
+      }
+
+      // Validate that we got XML content
+      if (!captionXml.includes('<text') && !captionXml.includes('<?xml')) {
+        console.log(`⚠️  Caption response is not valid XML. Content preview: ${captionXml.substring(0, 200)}`);
+        throw new Error('Caption response does not contain valid XML data');
+      }
+
+      console.log(`✅ Valid caption XML received (${captionXml.length} characters)`);
+
       // Parse XML to extract text with timestamps
+      console.log('Parsing caption XML data...');
       const $ = cheerio.load(captionXml, { xmlMode: true });
       const transcriptLines: string[] = [];
-      
+
       $('text').each((i, elem) => {
         const start = parseFloat($(elem).attr('start') || '0');
-        
+
         // Format the timestamp with hours if needed
         let timeCode: string;
         if (start >= 3600) {
@@ -1117,36 +1407,84 @@ export const scrapeTranscriptFromYouTube = async (videoId: string, maxRetries = 
           const seconds = Math.floor(start % 60);
           timeCode = `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
         }
-        
+
         const text = $(elem).text().trim();
         if (text) {
           transcriptLines.push(`${timeCode} ${text}`);
         }
       });
-      
+
       if (transcriptLines.length === 0) {
-        throw new Error('No transcript lines found after parsing caption data');
+        throw new Error('No transcript lines found after parsing caption data - XML may be malformed or empty');
       }
-      
+
+      console.log(`Successfully parsed ${transcriptLines.length} transcript lines`);
+
+      // Record successful attempt
+      scrapingMetrics.recordSuccess();
+
       return transcriptLines.join('\n');
     } catch (error) {
-      // If we received an empty caption data error and haven't exceeded max retries
-      if (error instanceof Error && 
-          error.message.includes('Received empty caption data from YouTube') && 
-          retryCount < maxRetries) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`Scraping attempt ${retryCount + 1} failed:`, errorMessage);
+
+      // Determine if we should retry based on the error type
+      const shouldRetry = retryCount < maxRetries && (
+        errorMessage.includes('empty caption data') ||
+        errorMessage.includes('incomplete or empty response') ||
+        errorMessage.includes('anti-bot detection triggered') || // More specific pattern
+        errorMessage.includes('rate limited') ||
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('ECONNRESET') ||
+        errorMessage.includes('ETIMEDOUT') ||
+        errorMessage.includes('network') ||
+        errorMessage.includes('Failed to fetch caption content') ||
+        errorMessage.includes('Invalid YouTube page response') ||
+        errorMessage.includes('Could not find caption URL') ||
+        errorMessage.includes('Caption response does not contain valid XML')
+      );
+
+      // Special handling for confirmed anti-bot detection - use longer delays
+      const isConfirmedAntiBotError = errorMessage.includes('anti-bot detection triggered');
+      const baseDelay = isConfirmedAntiBotError ? retryDelay * 2 : retryDelay; // 2x longer for confirmed anti-bot (reduced from 3x)
+
+      if (shouldRetry) {
         retryCount++;
-        console.log(`Retry ${retryCount}/${maxRetries}: Received empty caption data. Retrying after ${retryDelay}ms...`);
+        // Exponential backoff with jitter
+        const backoffDelay = baseDelay * Math.pow(2, retryCount - 1);
+        const jitter = Math.random() * 1000; // Add up to 1 second of random jitter
+        const totalDelay = backoffDelay + jitter;
+
+        console.log(`Retry ${retryCount}/${maxRetries}: ${errorMessage}. Retrying after ${Math.round(totalDelay)}ms...`);
+
+        // For confirmed anti-bot errors, add additional random delay to break patterns
+        if (isConfirmedAntiBotError) {
+          const extraDelay = Math.random() * 3000 + 1000; // 1-4 seconds extra (reduced from 2-7)
+          console.log(`🤖 Confirmed anti-bot detected, adding extra ${Math.round(extraDelay)}ms delay...`);
+          await new Promise(resolve => setTimeout(resolve, extraDelay));
+        }
+
         // Wait for the retry delay
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        await new Promise(resolve => setTimeout(resolve, totalDelay));
+
         // Retry with exponential backoff
         return performScrape();
       }
-      
-      console.error('Error scraping transcript from YouTube:', error);
-      throw new Error(`Failed to scrape transcript: ${error instanceof Error ? error.message : 'Unknown error'}`);
+
+      // If we've exhausted retries or hit a non-retryable error
+      console.error('All scraping attempts failed or non-retryable error encountered:', error);
+
+      // Record failure in metrics
+      scrapingMetrics.recordFailure();
+
+      // Log current metrics for debugging
+      const stats = scrapingMetrics.getStats();
+      console.log(`Scraping metrics - Success rate: ${stats.successRate}, Total attempts: ${stats.totalAttempts}, Retries: ${stats.retryAttempts}`);
+
+      throw new Error(`Failed to scrape transcript after ${retryCount + 1} attempts: ${errorMessage}`);
     }
   };
-  
+
   return performScrape();
 };
 
