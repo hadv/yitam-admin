@@ -49,13 +49,15 @@ const scrapingMetrics = {
     this.antiBotDetections++;
     this.lastAntiBotTime = Date.now();
 
-    // Open circuit breaker if we've had multiple anti-bot detections recently
-    const recentDetections = this.antiBotDetections;
-    const timeSinceLastDetection = Date.now() - this.lastAntiBotTime;
-
-    if (recentDetections >= 3 && timeSinceLastDetection < 60000) { // 3 detections in 1 minute
-      this.circuitBreakerOpen = true;
-      console.log('🚨 Circuit breaker opened due to repeated anti-bot detections');
+    // Open circuit breaker only if we've had many confirmed anti-bot detections recently
+    // Made this more conservative to avoid false positives
+    if (this.antiBotDetections >= 5) { // Increased threshold from 3 to 5
+      // Check if we've had multiple detections in the last 2 minutes (increased from 1 minute)
+      const twoMinutesAgo = Date.now() - 120000;
+      if (this.lastAntiBotTime > twoMinutesAgo) {
+        this.circuitBreakerOpen = true;
+        console.log('🚨 Circuit breaker opened due to repeated confirmed anti-bot detections');
+      }
     }
   },
 
@@ -1219,31 +1221,41 @@ export const scrapeTranscriptFromYouTube = async (
 
       const html = response.data;
 
-      // Check for anti-bot detection with more specific patterns
+      // Check for anti-bot detection with more specific and precise patterns
+      // Only trigger on very specific anti-bot messages, not generic terms
       const antiBotPatterns = [
-        'Our systems have detected unusual traffic',
-        'blocked',
-        'captcha',
-        'robot',
+        'Our systems have detected unusual traffic from your computer network',
+        'Please complete the security check to access',
         'verify you are human',
+        'automated requests from your computer network',
         'unusual traffic from your computer network',
-        'automated requests',
-        'Please complete the security check',
-        'Access denied',
-        'Request blocked'
+        'This page appears when Google automatically detects',
+        'Before we continue, we need to verify that you\'re human'
       ];
 
-      const foundAntiBotPattern = antiBotPatterns.find(pattern =>
+      // More precise detection - look for specific anti-bot page indicators
+      const isAntiBotPage = antiBotPatterns.some(pattern =>
         html.toLowerCase().includes(pattern.toLowerCase())
+      ) || (
+        // Check for combination of indicators that suggest anti-bot page
+        html.includes('captcha') &&
+        (html.includes('verify') || html.includes('security')) &&
+        html.length < 50000 // Anti-bot pages are typically much smaller
       );
 
-      if (foundAntiBotPattern) {
+      if (isAntiBotPage) {
+        const foundPattern = antiBotPatterns.find(pattern =>
+          html.toLowerCase().includes(pattern.toLowerCase())
+        ) || 'captcha verification page';
+
         // Record anti-bot detection
         scrapingMetrics.recordAntiBotDetection();
 
+        console.log(`🚨 Confirmed anti-bot detection: ${foundPattern}`);
+
         // For anti-bot detection, we should wait longer before retrying
         if (retryCount < maxRetries) {
-          throw new Error(`YouTube anti-bot detection triggered (pattern: "${foundAntiBotPattern}"). Will retry with longer delay.`);
+          throw new Error(`YouTube anti-bot detection triggered (pattern: "${foundPattern}"). Will retry with longer delay.`);
         } else {
           throw new Error(`YouTube anti-bot detection triggered after ${maxRetries} attempts. This may indicate IP-based rate limiting. Please try again later or from a different network.`);
         }
@@ -1251,8 +1263,12 @@ export const scrapeTranscriptFromYouTube = async (
 
       // Validate that we got a proper YouTube page
       if (!html.includes('ytInitialData') && !html.includes('captionTracks')) {
+        console.log(`⚠️  Page validation failed - missing ytInitialData and captionTracks. Page length: ${html.length}`);
         throw new Error('Invalid YouTube page response - may be blocked or rate limited');
       }
+
+      console.log(`✅ Valid YouTube page received (${html.length} characters)`);
+      console.log(`🔍 Searching for caption data...`);
 
       // Try different regex patterns to locate caption data
       let captionData;
@@ -1321,6 +1337,10 @@ export const scrapeTranscriptFromYouTube = async (
       }
 
       if (!captionUrl) {
+        console.log(`❌ No caption URL found. This could mean:`);
+        console.log(`   - Video has no captions/transcripts available`);
+        console.log(`   - YouTube changed their page structure`);
+        console.log(`   - Video is private or restricted`);
         throw new Error('Could not find caption URL in video page. The video may not have captions enabled or the page structure has changed.');
       }
 
@@ -1334,6 +1354,7 @@ export const scrapeTranscriptFromYouTube = async (
       let captionXml;
 
       try {
+        console.log(`🔗 Fetching caption content from: ${captionUrl.substring(0, 100)}...`);
         captionResponse = await axios.get(captionUrl, {
           headers: {
             'User-Agent': userAgent,
@@ -1345,19 +1366,24 @@ export const scrapeTranscriptFromYouTube = async (
           timeout: 15000 // 15 second timeout for caption fetch
         });
         captionXml = captionResponse.data;
+        console.log(`📥 Caption response status: ${captionResponse.status}, length: ${captionXml ? captionXml.length : 0}`);
       } catch (captionError) {
-        console.error('Error fetching caption content:', captionError);
+        console.error('❌ Error fetching caption content:', captionError instanceof Error ? captionError.message : captionError);
         throw new Error(`Failed to fetch caption content: ${captionError instanceof Error ? captionError.message : 'Unknown error'}`);
       }
 
       if (!captionXml || captionXml.length < 10) {
-        throw new Error('Received empty or invalid caption data from YouTube');
+        console.log(`⚠️  Received empty caption data (length: ${captionXml ? captionXml.length : 0})`);
+        throw new Error('Received empty caption data from YouTube');
       }
 
       // Validate that we got XML content
       if (!captionXml.includes('<text') && !captionXml.includes('<?xml')) {
+        console.log(`⚠️  Caption response is not valid XML. Content preview: ${captionXml.substring(0, 200)}`);
         throw new Error('Caption response does not contain valid XML data');
       }
+
+      console.log(`✅ Valid caption XML received (${captionXml.length} characters)`);
 
       // Parse XML to extract text with timestamps
       console.log('Parsing caption XML data...');
@@ -1406,19 +1432,21 @@ export const scrapeTranscriptFromYouTube = async (
       const shouldRetry = retryCount < maxRetries && (
         errorMessage.includes('empty caption data') ||
         errorMessage.includes('incomplete or empty response') ||
-        errorMessage.includes('anti-bot detection') ||
+        errorMessage.includes('anti-bot detection triggered') || // More specific pattern
         errorMessage.includes('rate limited') ||
         errorMessage.includes('timeout') ||
         errorMessage.includes('ECONNRESET') ||
         errorMessage.includes('ETIMEDOUT') ||
         errorMessage.includes('network') ||
         errorMessage.includes('Failed to fetch caption content') ||
-        errorMessage.includes('Invalid YouTube page response')
+        errorMessage.includes('Invalid YouTube page response') ||
+        errorMessage.includes('Could not find caption URL') ||
+        errorMessage.includes('Caption response does not contain valid XML')
       );
 
-      // Special handling for anti-bot detection - use much longer delays
-      const isAntiBotError = errorMessage.includes('anti-bot detection');
-      const baseDelay = isAntiBotError ? retryDelay * 3 : retryDelay; // 3x longer for anti-bot
+      // Special handling for confirmed anti-bot detection - use longer delays
+      const isConfirmedAntiBotError = errorMessage.includes('anti-bot detection triggered');
+      const baseDelay = isConfirmedAntiBotError ? retryDelay * 2 : retryDelay; // 2x longer for confirmed anti-bot (reduced from 3x)
 
       if (shouldRetry) {
         retryCount++;
@@ -1429,10 +1457,10 @@ export const scrapeTranscriptFromYouTube = async (
 
         console.log(`Retry ${retryCount}/${maxRetries}: ${errorMessage}. Retrying after ${Math.round(totalDelay)}ms...`);
 
-        // For anti-bot errors, add additional random delay to break patterns
-        if (isAntiBotError) {
-          const extraDelay = Math.random() * 5000 + 2000; // 2-7 seconds extra
-          console.log(`Anti-bot detected, adding extra ${Math.round(extraDelay)}ms delay...`);
+        // For confirmed anti-bot errors, add additional random delay to break patterns
+        if (isConfirmedAntiBotError) {
+          const extraDelay = Math.random() * 3000 + 1000; // 1-4 seconds extra (reduced from 2-7)
+          console.log(`🤖 Confirmed anti-bot detected, adding extra ${Math.round(extraDelay)}ms delay...`);
           await new Promise(resolve => setTimeout(resolve, extraDelay));
         }
 

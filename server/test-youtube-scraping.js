@@ -6,10 +6,9 @@
 const { scrapeTranscriptFromYouTube, getScrapingMetrics } = require('./dist/services/youtube-transcript');
 
 // Test video IDs (use videos that are known to have captions)
+// Using fewer videos and adding delays to avoid triggering rate limits
 const testVideoIds = [
-  'dQw4w9WgXcQ', // Rick Astley - Never Gonna Give You Up
-  'jNQXAC9IVRw', // Me at the zoo (first YouTube video)
-  'kJQP7kiw5Fk'  // Luis Fonsi - Despacito
+  'dQw4w9WgXcQ' // Rick Astley - Never Gonna Give You Up (well-known video with captions)
 ];
 
 async function testScrapingWithRetries() {
@@ -18,27 +17,33 @@ async function testScrapingWithRetries() {
   for (const videoId of testVideoIds) {
     console.log(`\n📹 Testing video: ${videoId}`);
     console.log('=' .repeat(50));
-    
+
     try {
       const startTime = Date.now();
-      
+
       // Test the scraping function
       const transcript = await scrapeTranscriptFromYouTube(videoId);
-      
+
       const endTime = Date.now();
       const duration = endTime - startTime;
-      
+
       console.log(`✅ Success! Retrieved transcript in ${duration}ms`);
       console.log(`📝 Transcript length: ${transcript.length} characters`);
       console.log(`📄 First 200 characters: ${transcript.substring(0, 200)}...`);
-      
+
     } catch (error) {
       console.log(`❌ Failed to scrape transcript: ${error.message}`);
     }
-    
+
     // Show current metrics
     const metrics = getScrapingMetrics();
     console.log(`📊 Current metrics: Success rate: ${metrics.successRate}, Total attempts: ${metrics.totalAttempts}`);
+
+    // Add delay between tests to avoid rate limiting
+    if (testVideoIds.indexOf(videoId) < testVideoIds.length - 1) {
+      console.log('⏳ Waiting 5 seconds before next test...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
   }
   
   console.log('\n' + '='.repeat(60));
