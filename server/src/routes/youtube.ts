@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { processYoutubeVideo, checkTranscriptAccess, checkTranscriptExists, countYoutubeVideoChunks, deleteYoutubeVideoChunks } from '../controllers/youtube';
 import { getJobStatus } from '../services/job-queue';
+import { getScrapingMetrics, resetScrapingMetrics } from '../services/youtube-transcript';
 
 const router = Router();
 
@@ -24,11 +25,11 @@ router.get('/job/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     const status = await getJobStatus(jobId);
-    
+
     if (!status.exists) {
       return res.status(404).json({ message: 'Job not found' });
     }
-    
+
     res.status(200).json({
       jobId,
       status: status.state,
@@ -37,11 +38,46 @@ router.get('/job/:jobId', async (req, res) => {
     });
   } catch (error) {
     console.error('Error checking job status:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Failed to check job status',
       error: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });
 
-export default router; 
+// Get scraping metrics for monitoring
+router.get('/metrics', (req, res) => {
+  try {
+    const metrics = getScrapingMetrics();
+    res.status(200).json({
+      message: 'YouTube scraping metrics',
+      metrics,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error getting scraping metrics:', error);
+    res.status(500).json({
+      message: 'Failed to get scraping metrics',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Reset scraping metrics (admin endpoint)
+router.post('/metrics/reset', (req, res) => {
+  try {
+    resetScrapingMetrics();
+    res.status(200).json({
+      message: 'Scraping metrics reset successfully',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error resetting scraping metrics:', error);
+    res.status(500).json({
+      message: 'Failed to reset scraping metrics',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+export default router;
