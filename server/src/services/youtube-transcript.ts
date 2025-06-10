@@ -1094,18 +1094,73 @@ export const getTranscriptFromPublicApi = async (videoId: string): Promise<strin
         throw new Error('Transcript contains only error message');
       } catch (apiError) {
         console.error('Error with YouTube transcript API:', apiError);
-        
-        // Last resort: try with Cheerio web scraping to get metadata
-        // Get the YouTube page and extract any transcript data available in the page
-        const response = await axios.get(`https://www.youtube.com/watch?v=${videoId}`);
-        const $ = cheerio.load(response.data);
-        
-        // Extract title and description
-        const title = $('meta[property="og:title"]').attr('content') || '';
-        const description = $('meta[property="og:description"]').attr('content') || '';
-        
-        // Simple metadata-based transcript
-        return `Title: ${title}\n\nDescription: ${description}\n\n(No transcript available from YouTube API. Using video metadata only.)`;
+
+        // Try the new robust library as a fallback
+        try {
+          console.log('Attempting to use youtube-transcript-js-api as fallback...');
+          const { getTranscript, AGGRESSIVE_CONFIG } = require('youtube-transcript-js-api');
+          const transcript = await getTranscript(videoId, {
+            lang: 'vi',
+            config: AGGRESSIVE_CONFIG
+          });
+
+          if (transcript && transcript.length > 0) {
+            // Format transcript with timestamps
+            const formattedTranscript = transcript.map((item: any) => {
+              const timeInSeconds = item.offset / 1000;
+              const minutes = Math.floor(timeInSeconds / 60);
+              const seconds = Math.floor(timeInSeconds % 60);
+              const formattedTime = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+              return `[${formattedTime}] ${item.text}`;
+            }).join('\n');
+
+            console.log(`Successfully extracted transcript using youtube-transcript-js-api, length: ${formattedTranscript.length} characters`);
+            return formattedTranscript;
+          }
+          throw new Error('youtube-transcript-js-api returned empty transcript');
+        } catch (robustLibError) {
+          console.error('Error with youtube-transcript-js-api:', robustLibError);
+
+          // Last resort: try with Cheerio web scraping to get metadata and provide helpful message
+          try {
+            const response = await axios.get(`https://www.youtube.com/watch?v=${videoId}`);
+            const $ = cheerio.load(response.data);
+
+            // Extract title and description
+            const title = $('meta[property="og:title"]').attr('content') || '';
+            const description = $('meta[property="og:description"]').attr('content') || '';
+
+            // Check if video has captions available by looking for caption indicators
+            const hasCaptions = response.data.includes('captionTracks') ||
+                               response.data.includes('"captions"') ||
+                               response.data.includes('subtitle');
+
+            let message = `Title: ${title}\n\nDescription: ${description}\n\n`;
+
+            if (hasCaptions) {
+              message += `⚠️  TRANSCRIPT EXTRACTION BLOCKED\n\n`;
+              message += `This video appears to have captions/transcripts available, but YouTube is currently blocking automated transcript extraction.\n\n`;
+              message += `POSSIBLE SOLUTIONS:\n`;
+              message += `1. Try again later - YouTube's blocking may be temporary\n`;
+              message += `2. Use YouTube's official API with proper authentication\n`;
+              message += `3. Manually copy the transcript from YouTube's web interface\n`;
+              message += `4. Use YouTube's "Show transcript" feature and copy the text\n\n`;
+              message += `This is a known issue affecting all automated transcript extraction tools due to YouTube's enhanced anti-scraping measures.`;
+            } else {
+              message += `❌ NO TRANSCRIPT AVAILABLE\n\n`;
+              message += `This video does not appear to have captions or transcripts enabled.\n\n`;
+              message += `The video creator may need to:\n`;
+              message += `1. Enable auto-generated captions in YouTube Studio\n`;
+              message += `2. Upload manual captions/subtitles\n`;
+              message += `3. Enable community contributions for captions`;
+            }
+
+            return message;
+          } catch (metadataError) {
+            console.error('Error fetching video metadata:', metadataError);
+            return `❌ TRANSCRIPT EXTRACTION FAILED\n\nVideo ID: ${videoId}\n\nYouTube is currently blocking all automated transcript extraction methods. This affects all tools and libraries that attempt to extract transcripts programmatically.\n\nPlease try:\n1. Using YouTube's official API with proper authentication\n2. Manually copying the transcript from YouTube's web interface\n3. Trying again later as the blocking may be temporary\n\nThis is a widespread issue affecting the entire ecosystem of YouTube transcript extraction tools.`;
+          }
+        }
       }
     }
   } catch (error: any) {
@@ -1270,160 +1325,61 @@ export const scrapeTranscriptFromYouTube = async (
       console.log(`✅ Valid YouTube page received (${html.length} characters)`);
       console.log(`🔍 Searching for caption data...`);
 
-      // Try different regex patterns to locate caption data
-      let captionData;
-      let captionUrl;
+      // Try to extract transcript data directly from YouTube's JavaScript data
+      // This avoids the need to make separate API calls to timedtext URLs
+      let transcript = '';
 
-      console.log('Searching for caption data in YouTube page...');
-
-      // Pattern 1: Try to find the newer format of caption data
-      const newPatternMatch = html.match(/\{"captionTracks":(\[.*?\])/);
-      if (newPatternMatch && newPatternMatch[1]) {
+      // Method 1: Try to extract from ytInitialPlayerResponse
+      console.log('Attempting to extract transcript from ytInitialPlayerResponse...');
+      const playerResponseMatch = html.match(/var ytInitialPlayerResponse = ({.+?});/);
+      if (playerResponseMatch && playerResponseMatch[1]) {
         try {
-          const captionTracksJson = JSON.parse(newPatternMatch[1]);
-          if (captionTracksJson && captionTracksJson.length > 0) {
-            captionUrl = captionTracksJson[0].baseUrl;
-            console.log('Found caption URL using new pattern format');
+          const playerResponse = JSON.parse(playerResponseMatch[1]);
+          const extractedTranscript = await extractTranscriptFromPlayerResponse(playerResponse, videoId);
+          if (extractedTranscript) {
+            transcript = extractedTranscript;
+            console.log(`Successfully extracted transcript from ytInitialPlayerResponse (${transcript.length} characters)`);
+            scrapingMetrics.recordSuccess();
+            return transcript;
           }
         } catch (e) {
-          console.log('Failed to parse new caption format:', e);
+          console.log('Failed to extract from ytInitialPlayerResponse:', e);
         }
       }
 
-      // Pattern 2: Try the older format
-      if (!captionUrl) {
-        const oldPatternMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
-        if (oldPatternMatch && oldPatternMatch[1]) {
+      // Method 2: Try to extract from ytInitialData
+      if (!transcript) {
+        console.log('Attempting to extract transcript from ytInitialData...');
+        const initialDataMatch = html.match(/var ytInitialData = ({.+?});/);
+        if (initialDataMatch && initialDataMatch[1]) {
           try {
-            const captionTracksJson = JSON.parse(oldPatternMatch[1].replace(/\\"/g, '"').replace(/\\u0026/g, '&'));
-            if (captionTracksJson && captionTracksJson.length > 0) {
-              captionUrl = captionTracksJson[0].baseUrl;
-              console.log('Found caption URL using old pattern format');
+            const initialData = JSON.parse(initialDataMatch[1]);
+            const extractedTranscript = await extractTranscriptFromInitialData(initialData, videoId);
+            if (extractedTranscript) {
+              transcript = extractedTranscript;
+              console.log(`Successfully extracted transcript from ytInitialData (${transcript.length} characters)`);
+              scrapingMetrics.recordSuccess();
+              return transcript;
             }
           } catch (e) {
-            console.log('Failed to parse old caption format:', e);
+            console.log('Failed to extract from ytInitialData:', e);
           }
         }
       }
 
-      // Pattern 3: Try direct URL regex (most reliable fallback)
-      if (!captionUrl) {
-        const directUrlMatch = html.match(/https:\/\/www.youtube.com\/api\/timedtext[^"]*/) ||
-                              html.match(/https:\/\/www.youtube.com\/api\/timedtext[^&]*/) ||
-                              html.match(/"(https:\/\/www\.youtube\.com\/api\/timedtext[^"]*)"/);
-
-        if (directUrlMatch && directUrlMatch[0]) {
-          captionUrl = directUrlMatch[0].replace(/\\u0026/g, '&');
-          console.log('Found caption URL using direct URL pattern');
+      // Method 3: Fallback to the original timedtext URL method (but with improved headers)
+      if (!transcript) {
+        console.log('Falling back to timedtext URL extraction with improved headers...');
+        const extractedTranscript = await extractTranscriptFromTimedTextUrl(html, videoId, userAgent, videoUrl);
+        if (extractedTranscript) {
+          transcript = extractedTranscript;
+          console.log(`Successfully extracted transcript using timedtext URL (${transcript.length} characters)`);
+          scrapingMetrics.recordSuccess();
+          return transcript;
         }
       }
 
-      // Pattern 4: Try more aggressive search for timedtext URLs
-      if (!captionUrl) {
-        const aggressiveMatch = html.match(/timedtext[^"]*lang[^"]*/) ||
-                               html.match(/api\/timedtext[^"]*/) ||
-                               html.match(/subtitle[^"]*timedtext[^"]*/);
-
-        if (aggressiveMatch && aggressiveMatch[0]) {
-          // Reconstruct the full URL if we found a partial match
-          if (!aggressiveMatch[0].startsWith('http')) {
-            captionUrl = `https://www.youtube.com/api/${aggressiveMatch[0]}`;
-          } else {
-            captionUrl = aggressiveMatch[0];
-          }
-          captionUrl = captionUrl.replace(/\\u0026/g, '&');
-          console.log('Found caption URL using aggressive pattern search');
-        }
-      }
-
-      if (!captionUrl) {
-        console.log(`❌ No caption URL found. This could mean:`);
-        console.log(`   - Video has no captions/transcripts available`);
-        console.log(`   - YouTube changed their page structure`);
-        console.log(`   - Video is private or restricted`);
-        throw new Error('Could not find caption URL in video page. The video may not have captions enabled or the page structure has changed.');
-      }
-
-      console.log(`Found caption URL: ${captionUrl}`);
-
-      // Add a small delay before fetching caption content to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Fetch the caption content (XML format) with retry logic
-      let captionResponse;
-      let captionXml;
-
-      try {
-        console.log(`🔗 Fetching caption content from: ${captionUrl.substring(0, 100)}...`);
-        captionResponse = await axios.get(captionUrl, {
-          headers: {
-            'User-Agent': userAgent,
-            'Accept': 'application/xml, text/xml, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': videoUrl,
-            'Origin': 'https://www.youtube.com'
-          },
-          timeout: 15000 // 15 second timeout for caption fetch
-        });
-        captionXml = captionResponse.data;
-        console.log(`📥 Caption response status: ${captionResponse.status}, length: ${captionXml ? captionXml.length : 0}`);
-      } catch (captionError) {
-        console.error('❌ Error fetching caption content:', captionError instanceof Error ? captionError.message : captionError);
-        throw new Error(`Failed to fetch caption content: ${captionError instanceof Error ? captionError.message : 'Unknown error'}`);
-      }
-
-      if (!captionXml || captionXml.length < 10) {
-        console.log(`⚠️  Received empty caption data (length: ${captionXml ? captionXml.length : 0})`);
-        throw new Error('Received empty caption data from YouTube');
-      }
-
-      // Validate that we got XML content
-      if (!captionXml.includes('<text') && !captionXml.includes('<?xml')) {
-        console.log(`⚠️  Caption response is not valid XML. Content preview: ${captionXml.substring(0, 200)}`);
-        throw new Error('Caption response does not contain valid XML data');
-      }
-
-      console.log(`✅ Valid caption XML received (${captionXml.length} characters)`);
-
-      // Parse XML to extract text with timestamps
-      console.log('Parsing caption XML data...');
-      const $ = cheerio.load(captionXml, { xmlMode: true });
-      const transcriptLines: string[] = [];
-
-      $('text').each((i, elem) => {
-        const start = parseFloat($(elem).attr('start') || '0');
-
-        // Format the timestamp with hours if needed
-        let timeCode: string;
-        if (start >= 3600) {
-          // Format as [HH:MM:SS] for videos longer than 1 hour
-          const hours = Math.floor(start / 3600);
-          const minutes = Math.floor((start % 3600) / 60);
-          const seconds = Math.floor(start % 60);
-          timeCode = `[${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
-        } else {
-          // Format as [MM:SS] for shorter videos
-          const minutes = Math.floor(start / 60);
-          const seconds = Math.floor(start % 60);
-          timeCode = `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
-        }
-
-        const text = $(elem).text().trim();
-        if (text) {
-          transcriptLines.push(`${timeCode} ${text}`);
-        }
-      });
-
-      if (transcriptLines.length === 0) {
-        throw new Error('No transcript lines found after parsing caption data - XML may be malformed or empty');
-      }
-
-      console.log(`Successfully parsed ${transcriptLines.length} transcript lines`);
-
-      // Record successful attempt
-      scrapingMetrics.recordSuccess();
-
-      return transcriptLines.join('\n');
+      throw new Error('Failed to extract transcript using any method');
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`Scraping attempt ${retryCount + 1} failed:`, errorMessage);
@@ -1486,6 +1442,292 @@ export const scrapeTranscriptFromYouTube = async (
   };
 
   return performScrape();
+};
+
+/**
+ * Extract transcript from YouTube's ytInitialPlayerResponse object
+ */
+const extractTranscriptFromPlayerResponse = async (playerResponse: any, videoId: string): Promise<string | null> => {
+  try {
+    // Look for captions in the player response
+    const captions = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!captions || !Array.isArray(captions) || captions.length === 0) {
+      console.log('No caption tracks found in playerResponse');
+      return null;
+    }
+
+    // Find Vietnamese captions or auto-generated captions
+    let selectedCaption = captions.find((caption: any) =>
+      caption.languageCode === 'vi' || caption.languageCode?.startsWith('vi')
+    );
+
+    if (!selectedCaption) {
+      // Fall back to auto-generated captions
+      selectedCaption = captions.find((caption: any) => caption.kind === 'asr');
+    }
+
+    if (!selectedCaption) {
+      // Use the first available caption
+      selectedCaption = captions[0];
+    }
+
+    if (!selectedCaption?.baseUrl) {
+      console.log('No valid caption URL found in playerResponse');
+      return null;
+    }
+
+    console.log(`Found caption URL in playerResponse: ${selectedCaption.baseUrl.substring(0, 100)}...`);
+
+    // Fetch the caption content with improved headers
+    const captionResponse = await axios.get(selectedCaption.baseUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/xml, text/xml, */*',
+        'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+        'Referer': `https://www.youtube.com/watch?v=${videoId}`,
+        'Origin': 'https://www.youtube.com',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin'
+      },
+      timeout: 15000
+    });
+
+    if (!captionResponse.data || captionResponse.data.length < 10) {
+      console.log('Empty caption response from playerResponse URL');
+      return null;
+    }
+
+    return parseXmlTranscript(captionResponse.data);
+  } catch (error) {
+    console.log('Error extracting from playerResponse:', error);
+    return null;
+  }
+};
+
+/**
+ * Extract transcript from YouTube's ytInitialData object
+ */
+const extractTranscriptFromInitialData = async (initialData: any, videoId: string): Promise<string | null> => {
+  try {
+    // Navigate through the complex ytInitialData structure to find transcript data
+    const contents = initialData?.contents?.twoColumnWatchNextResults?.results?.results?.contents;
+    if (!contents || !Array.isArray(contents)) {
+      console.log('No contents found in ytInitialData');
+      return null;
+    }
+
+    // Look for transcript/caption data in various locations
+    for (const content of contents) {
+      // Check for transcript renderer
+      if (content?.videoSecondaryInfoRenderer?.owner?.videoOwnerRenderer?.transcript) {
+        const transcript = content.videoSecondaryInfoRenderer.owner.videoOwnerRenderer.transcript;
+        if (transcript?.transcriptRenderer?.content) {
+          return parseTranscriptRenderer(transcript.transcriptRenderer.content);
+        }
+      }
+
+      // Check for engagement panels that might contain transcript
+      if (content?.itemSectionRenderer?.contents) {
+        for (const item of content.itemSectionRenderer.contents) {
+          if (item?.continuationItemRenderer?.trigger === 'CONTINUATION_TRIGGER_ON_ITEM_SHOWN') {
+            // This might contain transcript data
+            continue;
+          }
+        }
+      }
+    }
+
+    console.log('No transcript data found in ytInitialData');
+    return null;
+  } catch (error) {
+    console.log('Error extracting from ytInitialData:', error);
+    return null;
+  }
+};
+
+/**
+ * Fallback method using timedtext URLs with improved headers and session handling
+ */
+const extractTranscriptFromTimedTextUrl = async (
+  html: string,
+  videoId: string,
+  userAgent: string,
+  videoUrl: string
+): Promise<string | null> => {
+  try {
+    console.log('Searching for timedtext URLs in page HTML...');
+
+    // Try different regex patterns to locate caption data
+    let captionUrl: string | null = null;
+
+    // Pattern 1: Try to find the newer format of caption data
+    const newPatternMatch = html.match(/\{"captionTracks":(\[.*?\])/);
+    if (newPatternMatch && newPatternMatch[1]) {
+      try {
+        const captionTracksJson = JSON.parse(newPatternMatch[1]);
+        if (captionTracksJson && captionTracksJson.length > 0) {
+          captionUrl = captionTracksJson[0].baseUrl;
+          console.log('Found caption URL using new pattern format');
+        }
+      } catch (e) {
+        console.log('Failed to parse new caption format:', e);
+      }
+    }
+
+    // Pattern 2: Try the older format
+    if (!captionUrl) {
+      const oldPatternMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
+      if (oldPatternMatch && oldPatternMatch[1]) {
+        try {
+          const captionTracksJson = JSON.parse(oldPatternMatch[1].replace(/\\"/g, '"').replace(/\\u0026/g, '&'));
+          if (captionTracksJson && captionTracksJson.length > 0) {
+            captionUrl = captionTracksJson[0].baseUrl;
+            console.log('Found caption URL using old pattern format');
+          }
+        } catch (e) {
+          console.log('Failed to parse old caption format:', e);
+        }
+      }
+    }
+
+    if (!captionUrl) {
+      console.log('No timedtext URL found');
+      return null;
+    }
+
+    console.log(`Attempting to fetch from timedtext URL: ${captionUrl.substring(0, 100)}...`);
+
+    // Try multiple request strategies
+    const strategies = [
+      // Strategy 1: Standard request with session cookies
+      async () => {
+        return await axios.get(captionUrl!, {
+          headers: {
+            'User-Agent': userAgent,
+            'Accept': 'application/xml, text/xml, */*',
+            'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+            'Referer': videoUrl,
+            'Origin': 'https://www.youtube.com',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          timeout: 15000
+        });
+      },
+
+      // Strategy 2: Request without CORS headers
+      async () => {
+        return await axios.get(captionUrl!, {
+          headers: {
+            'User-Agent': userAgent,
+            'Accept': 'application/xml, text/xml, */*',
+            'Referer': videoUrl
+          },
+          timeout: 15000
+        });
+      },
+
+      // Strategy 3: Minimal headers
+      async () => {
+        return await axios.get(captionUrl!, {
+          headers: {
+            'User-Agent': userAgent
+          },
+          timeout: 15000
+        });
+      }
+    ];
+
+    for (let i = 0; i < strategies.length; i++) {
+      try {
+        console.log(`Trying timedtext strategy ${i + 1}...`);
+        const response = await strategies[i]();
+
+        if (response.data && response.data.length > 10) {
+          console.log(`Strategy ${i + 1} successful, got ${response.data.length} characters`);
+          return parseXmlTranscript(response.data);
+        } else {
+          console.log(`Strategy ${i + 1} returned empty data`);
+        }
+      } catch (error) {
+        console.log(`Strategy ${i + 1} failed:`, error instanceof Error ? error.message : 'Unknown error');
+      }
+    }
+
+    console.log('All timedtext strategies failed');
+    return null;
+  } catch (error) {
+    console.log('Error in extractTranscriptFromTimedTextUrl:', error);
+    return null;
+  }
+};
+
+/**
+ * Parse XML transcript content and format with timestamps
+ */
+const parseXmlTranscript = (xmlContent: string): string | null => {
+  try {
+    if (!xmlContent.includes('<text') && !xmlContent.includes('<?xml')) {
+      console.log('Invalid XML content received');
+      return null;
+    }
+
+    const $ = cheerio.load(xmlContent, { xmlMode: true });
+    const transcriptLines: string[] = [];
+
+    $('text').each((i, elem) => {
+      const start = parseFloat($(elem).attr('start') || '0');
+
+      // Format the timestamp with hours if needed
+      let timeCode: string;
+      if (start >= 3600) {
+        // Format as [HH:MM:SS] for videos longer than 1 hour
+        const hours = Math.floor(start / 3600);
+        const minutes = Math.floor((start % 3600) / 60);
+        const seconds = Math.floor(start % 60);
+        timeCode = `[${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
+      } else {
+        // Format as [MM:SS] for shorter videos
+        const minutes = Math.floor(start / 60);
+        const seconds = Math.floor(start % 60);
+        timeCode = `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
+      }
+
+      const text = $(elem).text().trim();
+      if (text) {
+        transcriptLines.push(`${timeCode} ${text}`);
+      }
+    });
+
+    if (transcriptLines.length === 0) {
+      console.log('No transcript lines found in XML');
+      return null;
+    }
+
+    console.log(`Successfully parsed ${transcriptLines.length} transcript lines from XML`);
+    return transcriptLines.join('\n');
+  } catch (error) {
+    console.log('Error parsing XML transcript:', error);
+    return null;
+  }
+};
+
+/**
+ * Parse transcript renderer content (if found in ytInitialData)
+ */
+const parseTranscriptRenderer = (content: any): string | null => {
+  try {
+    // This would need to be implemented based on the actual structure
+    // of transcript renderer content when it's available
+    console.log('parseTranscriptRenderer not yet implemented');
+    return null;
+  } catch (error) {
+    console.log('Error parsing transcript renderer:', error);
+    return null;
+  }
 };
 
 /**
