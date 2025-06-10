@@ -682,7 +682,95 @@ export class DatabaseService {
       this.fallbackService.isFallbackActive()
     );
   }
-  
+
+  // Get all chunks for a specific YouTube video ID
+  public async getYoutubeVideoChunks(videoId: string): Promise<SearchResult[]> {
+    const idPattern = `youtube_${videoId}`;
+
+    return this.fallbackService.withFallback(
+      'getYoutubeVideoChunks',
+      // Fallback function
+      () => {
+        // Get chunks from in-memory storage
+        return Array.from(inMemoryDocuments.values())
+          .filter(item => item.document.id.startsWith(idPattern))
+          .map(item => {
+            const doc = item.document;
+            return {
+              id: doc.id,
+              documentName: doc.documentName,
+              content: doc.content,
+              enhancedContent: doc.enhancedContent,
+              title: doc.title,
+              summary: doc.summary,
+              sourceFile: doc.sourceFile,
+              domains: doc.domains,
+              score: 1.0 // Not relevant for this query but needed for type
+            };
+          })
+          .sort((a, b) => {
+            // Sort by chunk number extracted from ID (youtube_videoId_chunk_N)
+            const aMatch = a.id.match(/_chunk_(\d+)$/);
+            const bMatch = b.id.match(/_chunk_(\d+)$/);
+            const aNum = aMatch ? parseInt(aMatch[1], 10) : 0;
+            const bNum = bMatch ? parseInt(bMatch[1], 10) : 0;
+            return aNum - bNum;
+          });
+      },
+      // Qdrant function
+      async () => {
+        try {
+          const filter = {
+            must: [
+              {
+                key: 'id',
+                match: {
+                  text: idPattern,
+                  exact: false // Using non-exact match to find IDs that start with this pattern
+                }
+              }
+            ]
+          };
+
+          // Get all chunks for the video
+          const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+            filter,
+            with_payload: true,
+            limit: 1000 // Reasonable limit for video chunks
+          });
+
+          const chunks = response.points.map(point => {
+            const payload = point.payload as any;
+            return {
+              id: payload.id,
+              documentName: payload.documentName,
+              content: payload.content,
+              enhancedContent: payload.enhancedContent,
+              title: payload.title,
+              summary: payload.summary,
+              sourceFile: payload.sourceFile,
+              domains: payload.domains || ['default'],
+              score: 1.0 // Not relevant for this query but needed for type
+            };
+          });
+
+          // Sort by chunk number
+          return chunks.sort((a, b) => {
+            const aMatch = a.id.match(/_chunk_(\d+)$/);
+            const bMatch = b.id.match(/_chunk_(\d+)$/);
+            const aNum = aMatch ? parseInt(aMatch[1], 10) : 0;
+            const bNum = bMatch ? parseInt(bMatch[1], 10) : 0;
+            return aNum - bNum;
+          });
+        } catch (error) {
+          console.error(`Error getting chunks for YouTube video ${videoId}:`, error);
+          return [];
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+
   // Delete chunks by their IDs
   public async deleteChunksByIds(chunkIds: string[]): Promise<number> {
     return this.fallbackService.withFallback(

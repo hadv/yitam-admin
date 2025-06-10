@@ -2,11 +2,12 @@ import { useState } from 'react'
 import DocumentUpload from '@components/DocumentUpload'
 import YoutubeUpload from '@components/YoutubeUpload'
 import YoutubeDelete from '@components/YoutubeDelete'
+import YoutubeVideoManager from '@components/YoutubeVideoManager'
 
 function App() {
   const [uploadSuccess, setUploadSuccess] = useState<boolean>(false)
   const [deleteSuccess, setDeleteSuccess] = useState<boolean>(false)
-  const [activeTab, setActiveTab] = useState<'document' | 'youtube'>('document')
+  const [activeTab, setActiveTab] = useState<'document' | 'youtube' | 'youtube-manage'>('document')
 
   const handleUploadSuccess = () => {
     setUploadSuccess(true)
@@ -65,16 +66,26 @@ function App() {
                 >
                   YouTube Transcript
                 </button>
+                <button
+                  onClick={() => setActiveTab('youtube-manage')}
+                  className={`pb-4 px-1 border-b-2 font-medium text-sm ${
+                    activeTab === 'youtube-manage'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
+                >
+                  Manage YouTube Videos
+                </button>
               </nav>
             </div>
             
             {/* Tab content */}
             {activeTab === 'document' ? (
-            <div>
-              <h2 className="text-xl font-semibold mb-4">Upload Document</h2>
-              <DocumentUpload onUploadSuccess={handleUploadSuccess} />
-            </div>
-            ) : (
+              <div>
+                <h2 className="text-xl font-semibold mb-4">Upload Document</h2>
+                <DocumentUpload onUploadSuccess={handleUploadSuccess} />
+              </div>
+            ) : activeTab === 'youtube' ? (
               <div>
                 <h2 className="text-xl font-semibold mb-4">YouTube Transcript Management</h2>
                 <div className="mb-8">
@@ -85,6 +96,11 @@ function App() {
                   <h3 className="text-lg font-semibold mb-4">Delete YouTube Transcript</h3>
                   <YoutubeDelete onDeleteSuccess={handleDeleteSuccess} />
                 </div>
+              </div>
+            ) : (
+              <div>
+                <h2 className="text-xl font-semibold mb-4">Manage YouTube Videos</h2>
+                <YoutubeVideoManager />
               </div>
             )}
           </div>
