@@ -276,4 +276,62 @@ export const deleteYoutubeVideoChunks = async (req: Request, res: Response) => {
       error: error.message || 'Unknown error'
     });
   }
-}; 
+};
+
+// Get all chunks for a specific YouTube video ID
+export const getYoutubeVideoChunks = async (req: Request, res: Response) => {
+  try {
+    const { videoId } = req.params;
+
+    if (!videoId) {
+      return res.status(400).json({ message: 'Video ID is required' });
+    }
+
+    console.log(`Getting chunks for YouTube video: ${videoId}`);
+
+    // Check if the transcript exists before getting chunks
+    const transcriptExists = await dbService.doesTranscriptExist(videoId);
+
+    if (!transcriptExists) {
+      console.log(`No transcript found for video ID: ${videoId}`);
+      return res.status(404).json({
+        message: 'No transcript found for this video ID',
+        videoId,
+        chunks: []
+      });
+    }
+
+    try {
+      console.log(`Transcript found for ${videoId}. Getting chunks...`);
+      const chunks = await dbService.getYoutubeVideoChunks(videoId);
+
+      // Get video details and domains
+      const domains = await dbService.getYoutubeVideoDomains(videoId);
+
+      console.log(`Found ${chunks.length} chunks for YouTube video: ${videoId}`);
+
+      return res.status(200).json({
+        message: `Found ${chunks.length} chunks for the video`,
+        videoId,
+        chunks,
+        totalChunks: chunks.length,
+        domains
+      });
+    } catch (getError: any) {
+      console.error(`Error getting YouTube video chunks:`, getError);
+
+      // Provide a detailed error message
+      return res.status(500).json({
+        message: 'Failed to get YouTube video chunks',
+        error: getError.message || 'Unknown error',
+        videoId
+      });
+    }
+  } catch (error: any) {
+    console.error('Error in getYoutubeVideoChunks controller:', error);
+    return res.status(500).json({
+      message: 'An error occurred while processing your request',
+      error: error.message || 'Unknown error'
+    });
+  }
+};

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { processYoutubeVideo, checkTranscriptAccess, checkTranscriptExists, countYoutubeVideoChunks, deleteYoutubeVideoChunks } from '../controllers/youtube';
+import { processYoutubeVideo, checkTranscriptAccess, checkTranscriptExists, countYoutubeVideoChunks, deleteYoutubeVideoChunks, getYoutubeVideoChunks } from '../controllers/youtube';
 import { getJobStatus } from '../services/job-queue';
 import { getScrapingMetrics, resetScrapingMetrics } from '../services/youtube-transcript';
 
@@ -16,6 +16,9 @@ router.get('/exists/:videoId', checkTranscriptExists);
 
 // Route for getting the count of chunks for a videoId
 router.get('/count/:videoId', countYoutubeVideoChunks);
+
+// Route for getting all chunks for a specific videoId
+router.get('/chunks/:videoId', getYoutubeVideoChunks);
 
 // Route for deleting all chunks for a specific videoId to enable re-extraction
 router.delete('/:videoId', deleteYoutubeVideoChunks);
