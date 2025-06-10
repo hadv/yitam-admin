@@ -7,6 +7,13 @@ import { enhanceContent, EnhancementType } from './content-enhancement';
 import { DocumentChunk } from './chunking';
 import { google } from 'googleapis';
 import { getAuthenticatedClient } from './youtube-auth';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+const execAsync = promisify(exec);
 
 // Configuration for scraping behavior
 const SCRAPING_CONFIG = {
@@ -1094,18 +1101,31 @@ export const getTranscriptFromPublicApi = async (videoId: string): Promise<strin
         throw new Error('Transcript contains only error message');
       } catch (apiError) {
         console.error('Error with YouTube transcript API:', apiError);
-        
-        // Last resort: try with Cheerio web scraping to get metadata
-        // Get the YouTube page and extract any transcript data available in the page
-        const response = await axios.get(`https://www.youtube.com/watch?v=${videoId}`);
-        const $ = cheerio.load(response.data);
-        
-        // Extract title and description
-        const title = $('meta[property="og:title"]').attr('content') || '';
-        const description = $('meta[property="og:description"]').attr('content') || '';
-        
-        // Simple metadata-based transcript
-        return `Title: ${title}\n\nDescription: ${description}\n\n(No transcript available from YouTube API. Using video metadata only.)`;
+
+        // Try yt-dlp as a more robust fallback
+        try {
+          console.log('Attempting to extract transcript using yt-dlp as fallback...');
+          const transcript = await getTranscriptWithYtDlp(videoId, 'vi');
+          if (transcript && transcript.length > 50) {
+            console.log(`Successfully extracted transcript using yt-dlp, length: ${transcript.length} characters`);
+            return transcript;
+          }
+          throw new Error('yt-dlp returned empty or too short transcript');
+        } catch (ytDlpError) {
+          console.error('Error with yt-dlp:', ytDlpError);
+
+          // Last resort: try with Cheerio web scraping to get metadata
+          // Get the YouTube page and extract any transcript data available in the page
+          const response = await axios.get(`https://www.youtube.com/watch?v=${videoId}`);
+          const $ = cheerio.load(response.data);
+
+          // Extract title and description
+          const title = $('meta[property="og:title"]').attr('content') || '';
+          const description = $('meta[property="og:description"]').attr('content') || '';
+
+          // Simple metadata-based transcript
+          return `Title: ${title}\n\nDescription: ${description}\n\n(No transcript available from any method. Using video metadata only.)`;
+        }
       }
     }
   } catch (error: any) {
@@ -1486,6 +1506,180 @@ export const scrapeTranscriptFromYouTube = async (
   };
 
   return performScrape();
+};
+
+/**
+ * Extract YouTube transcript using yt-dlp as a fallback method
+ * This method is more robust against YouTube's anti-scraping measures
+ */
+export const getTranscriptWithYtDlp = async (
+  videoId: string,
+  languageCode: string = 'vi'
+): Promise<string> => {
+  const tempDir = os.tmpdir();
+  const outputTemplate = path.join(tempDir, `youtube_transcript_${videoId}_%(title)s.%(ext)s`);
+
+  try {
+    console.log(`Attempting to extract transcript using yt-dlp for video: ${videoId} in language: ${languageCode}`);
+
+    // Check if yt-dlp is available
+    try {
+      await execAsync('yt-dlp --version');
+    } catch (error) {
+      throw new Error('yt-dlp is not installed or not available in PATH. Please install yt-dlp to use this feature.');
+    }
+
+    // Build yt-dlp command
+    const ytDlpCommand = [
+      'yt-dlp',
+      '--write-auto-subs',
+      `--sub-langs "${languageCode}"`,
+      '--skip-download',
+      '--sub-format srt',
+      `--output "${outputTemplate}"`,
+      `"https://www.youtube.com/watch?v=${videoId}"`
+    ].join(' ');
+
+    console.log(`Executing yt-dlp command: ${ytDlpCommand}`);
+
+    // Execute yt-dlp command
+    const { stdout, stderr } = await execAsync(ytDlpCommand, {
+      timeout: 60000, // 60 second timeout
+      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+    });
+
+    console.log('yt-dlp stdout:', stdout);
+    if (stderr) {
+      console.log('yt-dlp stderr:', stderr);
+    }
+
+    // Find the downloaded subtitle file
+    const files = fs.readdirSync(tempDir);
+    const subtitleFile = files.find(file =>
+      file.includes(`youtube_transcript_${videoId}`) &&
+      file.endsWith(`.${languageCode}.srt`)
+    );
+
+    if (!subtitleFile) {
+      throw new Error(`No subtitle file found for language ${languageCode}. Available files: ${files.filter(f => f.includes(videoId)).join(', ')}`);
+    }
+
+    const subtitlePath = path.join(tempDir, subtitleFile);
+    console.log(`Found subtitle file: ${subtitlePath}`);
+
+    // Read and parse the SRT file
+    const srtContent = fs.readFileSync(subtitlePath, 'utf-8');
+
+    // Clean up the temporary file
+    try {
+      fs.unlinkSync(subtitlePath);
+    } catch (cleanupError) {
+      console.warn('Failed to clean up temporary subtitle file:', cleanupError);
+    }
+
+    // Parse SRT content to extract text with timestamps
+    const transcript = parseSrtToTranscript(srtContent);
+
+    if (!transcript || transcript.length < 50) {
+      throw new Error('Extracted transcript is too short or empty');
+    }
+
+    console.log(`Successfully extracted transcript using yt-dlp. Length: ${transcript.length} characters`);
+    return transcript;
+
+  } catch (error) {
+    console.error('Error extracting transcript with yt-dlp:', error);
+
+    // Clean up any temporary files that might have been created
+    try {
+      const files = fs.readdirSync(tempDir);
+      const tempFiles = files.filter(file => file.includes(`youtube_transcript_${videoId}`));
+      for (const file of tempFiles) {
+        try {
+          fs.unlinkSync(path.join(tempDir, file));
+        } catch (cleanupError) {
+          // Ignore cleanup errors
+        }
+      }
+    } catch (cleanupError) {
+      // Ignore cleanup errors
+    }
+
+    throw error;
+  }
+};
+
+/**
+ * Parse SRT subtitle content to readable transcript format
+ */
+const parseSrtToTranscript = (srtContent: string): string => {
+  const lines = srtContent.split('\n');
+  const transcriptLines: string[] = [];
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trim();
+
+    // Skip empty lines
+    if (!line) {
+      i++;
+      continue;
+    }
+
+    // Check if this is a subtitle number (should be a number)
+    if (/^\d+$/.test(line)) {
+      // Next line should be timestamp
+      i++;
+      if (i < lines.length) {
+        const timestampLine = lines[i].trim();
+        if (timestampLine.includes('-->')) {
+          // Extract start time
+          const startTime = timestampLine.split('-->')[0].trim();
+          const timeCode = convertSrtTimeToSimpleFormat(startTime);
+
+          // Next lines are the subtitle text until we hit an empty line or another number
+          i++;
+          const textLines: string[] = [];
+          while (i < lines.length && lines[i].trim() && !/^\d+$/.test(lines[i].trim())) {
+            textLines.push(lines[i].trim());
+            i++;
+          }
+
+          if (textLines.length > 0) {
+            const text = textLines.join(' ').trim();
+            if (text) {
+              transcriptLines.push(`${timeCode} ${text}`);
+            }
+          }
+        } else {
+          i++;
+        }
+      }
+    } else {
+      i++;
+    }
+  }
+
+  return transcriptLines.join('\n');
+};
+
+/**
+ * Convert SRT timestamp format (00:00:00,000) to simple format [MM:SS] or [HH:MM:SS]
+ */
+const convertSrtTimeToSimpleFormat = (srtTime: string): string => {
+  // SRT format: 00:00:00,000
+  const parts = srtTime.replace(',', '.').split(':');
+  if (parts.length !== 3) return '[00:00]';
+
+  const hours = parseInt(parts[0]);
+  const minutes = parseInt(parts[1]);
+  const seconds = Math.floor(parseFloat(parts[2]));
+
+  if (hours > 0) {
+    return `[${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
+  } else {
+    return `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
+  }
 };
 
 /**
