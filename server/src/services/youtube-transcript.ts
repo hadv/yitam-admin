@@ -1506,40 +1506,35 @@ const extractTranscriptFromPlayerResponse = async (playerResponse: any, videoId:
 };
 
 /**
- * Extract transcript from YouTube's ytInitialData object
+ * Extract transcript from YouTube's ytInitialData object using the continuation API
  */
 const extractTranscriptFromInitialData = async (initialData: any, videoId: string): Promise<string | null> => {
   try {
-    // Navigate through the complex ytInitialData structure to find transcript data
-    const contents = initialData?.contents?.twoColumnWatchNextResults?.results?.results?.contents;
-    if (!contents || !Array.isArray(contents)) {
-      console.log('No contents found in ytInitialData');
+    console.log('Looking for transcript continuation token in ytInitialData...');
+
+    // Find the transcript panel in engagement panels
+    const transcriptPanel = initialData.engagementPanels?.find((panel: any) =>
+      panel.engagementPanelSectionListRenderer?.targetId === 'engagement-panel-searchable-transcript'
+    );
+
+    if (!transcriptPanel) {
+      console.log('No transcript panel found in engagement panels');
       return null;
     }
 
-    // Look for transcript/caption data in various locations
-    for (const content of contents) {
-      // Check for transcript renderer
-      if (content?.videoSecondaryInfoRenderer?.owner?.videoOwnerRenderer?.transcript) {
-        const transcript = content.videoSecondaryInfoRenderer.owner.videoOwnerRenderer.transcript;
-        if (transcript?.transcriptRenderer?.content) {
-          return parseTranscriptRenderer(transcript.transcriptRenderer.content);
-        }
-      }
+    console.log('Found transcript panel');
+    const content = transcriptPanel.engagementPanelSectionListRenderer.content;
 
-      // Check for engagement panels that might contain transcript
-      if (content?.itemSectionRenderer?.contents) {
-        for (const item of content.itemSectionRenderer.contents) {
-          if (item?.continuationItemRenderer?.trigger === 'CONTINUATION_TRIGGER_ON_ITEM_SHOWN') {
-            // This might contain transcript data
-            continue;
-          }
-        }
-      }
+    if (!content?.continuationItemRenderer?.continuationEndpoint?.getTranscriptEndpoint?.params) {
+      console.log('No continuation token found in transcript panel');
+      return null;
     }
 
-    console.log('No transcript data found in ytInitialData');
-    return null;
+    const params = content.continuationItemRenderer.continuationEndpoint.getTranscriptEndpoint.params;
+    console.log('Found continuation token, fetching transcript...');
+
+    // Use YouTube's internal API to get the transcript
+    return await fetchTranscriptWithContinuationToken(params, videoId);
   } catch (error) {
     console.log('Error extracting from ytInitialData:', error);
     return null;
@@ -1711,6 +1706,80 @@ const parseXmlTranscript = (xmlContent: string): string | null => {
     return transcriptLines.join('\n');
   } catch (error) {
     console.log('Error parsing XML transcript:', error);
+    return null;
+  }
+};
+
+/**
+ * Fetch transcript using YouTube's internal continuation API
+ */
+const fetchTranscriptWithContinuationToken = async (params: string, videoId: string): Promise<string | null> => {
+  try {
+    console.log('Fetching transcript using YouTube internal API...');
+
+    const response = await axios.post('https://www.youtube.com/youtubei/v1/get_transcript', {
+      context: {
+        client: {
+          clientName: 'WEB',
+          clientVersion: '2.20241210.01.00'
+        }
+      },
+      params: params
+    }, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Content-Type': 'application/json',
+        'Origin': 'https://www.youtube.com',
+        'Referer': `https://www.youtube.com/watch?v=${videoId}`,
+        'X-YouTube-Client-Name': '1',
+        'X-YouTube-Client-Version': '2.20241210.01.00'
+      },
+      timeout: 15000
+    });
+
+    if (!response.data?.actions?.[0]?.updateEngagementPanelAction?.content?.transcriptRenderer) {
+      console.log('No transcript data found in API response');
+      return null;
+    }
+
+    const transcriptContent = response.data.actions[0].updateEngagementPanelAction.content.transcriptRenderer.content;
+    const segments = transcriptContent?.transcriptSearchPanelRenderer?.body?.transcriptSegmentListRenderer?.initialSegments;
+
+    if (!segments || !Array.isArray(segments)) {
+      console.log('No transcript segments found in response');
+      return null;
+    }
+
+    console.log(`Found ${segments.length} transcript segments`);
+
+    // Extract and format the transcript
+    const transcriptLines: string[] = [];
+    segments.forEach((segment: any) => {
+      if (segment.transcriptSegmentRenderer) {
+        const renderer = segment.transcriptSegmentRenderer;
+        const text = renderer.snippet?.runs?.[0]?.text || '';
+        const startMs = renderer.startMs;
+
+        if (text && typeof startMs !== 'undefined') {
+          const timeInSeconds = parseInt(startMs) / 1000;
+          const minutes = Math.floor(timeInSeconds / 60);
+          const seconds = Math.floor(timeInSeconds % 60);
+          const formattedTime = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+          transcriptLines.push(`[${formattedTime}] ${text}`);
+        }
+      }
+    });
+
+    if (transcriptLines.length === 0) {
+      console.log('No valid transcript lines extracted');
+      return null;
+    }
+
+    const fullTranscript = transcriptLines.join('\n');
+    console.log(`Successfully extracted transcript: ${transcriptLines.length} lines, ${fullTranscript.length} characters`);
+    return fullTranscript;
+  } catch (error) {
+    console.log('Error fetching transcript with continuation token:', error);
     return null;
   }
 };
