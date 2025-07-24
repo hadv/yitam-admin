@@ -1,6 +1,7 @@
 // List of available knowledge domains for document processing
 export const availableDomains = [
   'nội kinh',
+  'khí công',
   'đông y',
   'y học cổ truyền',
   'y tông tâm lĩnh',
@@ -15,6 +16,5 @@ export const availableDomains = [
   'phong thủy',
   'đạo phật',
   'thích nhất hạnh',
-  'viên minh',
-  'khí công'
+  'viên minh'
 ];
