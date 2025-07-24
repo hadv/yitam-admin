@@ -21,5 +21,6 @@ export const availableDomains = [
   'phong thủy',
   'đạo phật',
   'thích nhất hạnh',
-  'viên minh'
+  'viên minh',
+  'phí tường trúc'
 ];
