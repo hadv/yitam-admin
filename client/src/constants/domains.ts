@@ -2,6 +2,11 @@
 export const availableDomains = [
   'nội kinh',
   'khí công',
+  'kinh dịch',
+  'dịch cân kinh',
+  'thái cực khí công',
+  'bát đoạn cẩm',
+  'ngũ cầm hí',
   'đông y',
   'y học cổ truyền',
   'y tông tâm lĩnh',
