@@ -1,4 +1,4 @@
-import { TaskType } from '@google/generative-ai';
+import { TaskType } from './embedding';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { createEmbedding } from './embedding';

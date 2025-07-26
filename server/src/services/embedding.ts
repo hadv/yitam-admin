@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import { FallbackService } from '../core/fallback-service';
-import { GoogleGenerativeAI, TaskType } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 // Load .env file from the server directory
 dotenv.config();
@@ -13,20 +13,29 @@ if (!GEMINI_API_KEY) {
 
 const GEMINI_VECTOR_SIZE = parseInt(process.env.GEMINI_VECTOR_SIZE || '768', 10);
 
+// Task type mapping for the new API
+export enum TaskType {
+  RETRIEVAL_DOCUMENT = 'RETRIEVAL_DOCUMENT',
+  RETRIEVAL_QUERY = 'RETRIEVAL_QUERY',
+  SEMANTIC_SIMILARITY = 'SEMANTIC_SIMILARITY',
+  CLASSIFICATION = 'CLASSIFICATION',
+  CLUSTERING = 'CLUSTERING'
+}
+
 // Create fallback service for embedding operations
 const embeddingFallback = new FallbackService('Embedding');
 
 /**
  * Generate an embedding vector for the provided text
- * 
+ *
  * Uses Google's Gemini for embeddings
- * 
+ *
  * @param text The text to generate an embedding for
  * @param taskType TaskType enum value for the embedding purpose
  * @returns A vector representation of the text
  */
 export const createEmbedding = async (
-  text: string, 
+  text: string,
   taskType: TaskType = TaskType.RETRIEVAL_DOCUMENT
 ): Promise<number[]> => {
   return embeddingFallback.withFallback(
@@ -101,20 +110,31 @@ async function generateGeminiEmbedding(
   
   // Helper function to process a single text chunk
   async function processTextChunk(chunk: string, chunkTaskType: TaskType): Promise<number[]> {
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" });
-    
-    // Create properly formatted request object with TaskType enum
-    // This format works with the Gemini API to properly specify the embedding use case
-    const result = await embeddingModel.embedContent({
-      content: {
-        parts: [{ text: chunk }],
-        role: "user"
-      },
-      taskType: chunkTaskType
+    const ai = new GoogleGenAI({
+      apiKey: GEMINI_API_KEY
     });
-    
-    return result.embedding.values;
+
+    // Use the new API structure for embeddings
+    const result = await ai.models.embedContent({
+      model: 'gemini-embedding-001',
+      contents: chunk,
+      config: {
+        taskType: chunkTaskType,
+        outputDimensionality: GEMINI_VECTOR_SIZE
+      }
+    });
+
+    // The response contains embeddings array, we want the first one
+    if (!result.embeddings || result.embeddings.length === 0) {
+      throw new Error('No embeddings returned from Gemini API');
+    }
+
+    const embedding = result.embeddings[0];
+    if (!embedding.values) {
+      throw new Error('No embedding values returned from Gemini API');
+    }
+
+    return embedding.values;
   }
 }
 
