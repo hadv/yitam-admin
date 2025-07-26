@@ -7,6 +7,7 @@ import { enhanceContent, EnhancementType } from './content-enhancement';
 import { DocumentChunk } from './chunking';
 import { google } from 'googleapis';
 import { getAuthenticatedClient } from './youtube-auth';
+import { processYouTubeAudioFallback, checkYtDlpAvailable } from './youtube-audio-fallback';
 
 // Configuration for scraping behavior
 const SCRAPING_CONFIG = {
@@ -580,11 +581,45 @@ export const processYoutubeTranscript = async (
         }
       }
 
-      // If all methods have failed, provide detailed error information
+      // If all methods have failed, try Google Services audio fallback as last resort
       if (!transcript) {
-        const detailedError = `All transcript retrieval methods failed for video ${videoId}.\n\nAttempted methods and their errors:\n${errors.map((err, i) => `${i + 1}. ${err}`).join('\n')}\n\nThis could be due to:\n- Video has no captions/transcripts available\n- YouTube anti-bot detection\n- Network connectivity issues\n- Rate limiting\n\nPlease try again later or verify the video has captions enabled.`;
-        console.error(detailedError);
-        throw new Error(detailedError);
+        console.log('All transcript methods failed. Attempting Google Services audio fallback...');
+        updateProgress('transcript_fetch', 'All transcript methods failed. Trying Google Speech API fallback...', 65);
+
+        try {
+          // Check if yt-dlp is available before attempting audio fallback
+          const ytDlpAvailable = await checkYtDlpAvailable();
+          if (!ytDlpAvailable) {
+            throw new Error('yt-dlp is not installed. Google Services audio fallback not available.');
+          }
+
+          // Attempt Google Services audio fallback
+          const audioFallbackChunks = await processYouTubeAudioFallback(
+            videoId,
+            domains,
+            chunkSize,
+            chunkOverlap,
+            'vi-VN', // Vietnamese language code for Google Speech API
+            (stage, message, progress) => {
+              if (progressCallback) {
+                progressCallback(stage as any, message, progress);
+              }
+            }
+          );
+
+          console.log(`Google Services audio fallback successful! Created ${audioFallbackChunks.length} chunks from audio transcription`);
+          updateProgress('transcript_process', `Google Services audio fallback completed with ${audioFallbackChunks.length} chunks`, 100);
+
+          return audioFallbackChunks;
+
+        } catch (audioError: any) {
+          console.error('Google Services audio fallback also failed:', audioError.message);
+
+          // Provide comprehensive error information including audio fallback failure
+          const detailedError = `All transcript retrieval methods failed for video ${videoId}, including Google Services audio fallback.\n\nTranscript methods attempted:\n${errors.map((err, i) => `${i + 1}. ${err}`).join('\n')}\n\nGoogle Services audio fallback error: ${audioError.message}\n\nThis could be due to:\n- Video has no captions/transcripts available\n- Video is private, deleted, or region-blocked\n- YouTube anti-bot detection\n- Network connectivity issues\n- Rate limiting\n- Google Cloud credentials not configured\n- yt-dlp not installed or not working\n\nPlease try again later, verify the video is publicly accessible, and ensure Google Cloud credentials are properly configured.`;
+          console.error(detailedError);
+          throw new Error(detailedError);
+        }
       }
     }
     

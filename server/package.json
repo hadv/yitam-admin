@@ -11,6 +11,8 @@
     "dev:debug": "ts-node -r tsconfig-paths/register --inspect src/index.ts"
   },
   "dependencies": {
+    "@google-cloud/speech": "^6.7.0",
+    "@google-cloud/storage": "^7.13.0",
     "@google-cloud/vision": "^4.3.3",
     "@google/generative-ai": "^0.2.1",
     "@qdrant/js-client-rest": "^1.6.0",
