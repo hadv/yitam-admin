@@ -8,6 +8,7 @@ import { DocumentChunk } from './chunking';
 import { google } from 'googleapis';
 import { getAuthenticatedClient } from './youtube-auth';
 
+
 // Configuration for scraping behavior
 const SCRAPING_CONFIG = {
   maxRetries: parseInt(process.env.YOUTUBE_SCRAPING_MAX_RETRIES || '5'),

@@ -474,6 +474,9 @@ dbService.initialize()
   }
 }
 
+
+
+
 // Create job manager instance
 const jobManager = new YoutubeJobManager();
 
@@ -497,11 +500,11 @@ export const addYoutubeProcessingJob = async (data: {
 // Get job status
 export const getJobStatus = async (jobId: string) => {
   const job = jobStore.getJob(jobId);
-  
+
   if (!job) {
     return { exists: false };
   }
-  
+
   return {
     exists: true,
     state: job.status,
@@ -519,4 +522,4 @@ export const getJobStatus = async (jobId: string) => {
   };
 };
 
-export default { addYoutubeProcessingJob, getJobStatus, JobStatus }; 
+export default { addYoutubeProcessingJob, getJobStatus, JobStatus };
