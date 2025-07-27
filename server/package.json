@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@google-cloud/vision": "^4.3.3",
+    "@google/genai": "^1.11.0",
     "@google/generative-ai": "^0.2.1",
     "@qdrant/js-client-rest": "^1.6.0",
     "axios": "^1.9.0",

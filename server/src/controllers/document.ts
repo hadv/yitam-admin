@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { createEmbedding } from '../services/embedding';
 import { parseDocument, parsePdfByPages, parseDocxByPages, processImageFolder, prepareContentForChunking, correctOcrWithLLM } from '../services/document';
 import { DatabaseService } from '../core/database-service';
-import { TaskType } from '@google/generative-ai';
+import { TaskType } from '../services/embedding';
 import { chunkDocument, ChunkingConfig } from '../services/chunking';
 import path from 'path';
 import fs from 'fs';
