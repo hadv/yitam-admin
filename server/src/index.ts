@@ -10,6 +10,7 @@ import documentRoutes from './routes/document';
 import youtubeRoutes from './routes/youtube';
 import authRoutes from './routes/auth';
 import fileManagerRoutes from './routes/file-manager';
+import migrationRoutes from './routes/migration';
 import { DatabaseService } from './core/database-service';
 
 // Load environment variables
@@ -169,6 +170,7 @@ dbService.initialize().then(() => {
   app.use('/api/youtube', youtubeRoutes);
   app.use('/api/auth', authRoutes);
   app.use('/api/files', fileManagerRoutes);
+  app.use('/api/migrate', migrationRoutes);
 
   // Serve static files in production
   if (process.env.NODE_ENV === 'production') {
