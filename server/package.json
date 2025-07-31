@@ -11,6 +11,7 @@
     "dev:debug": "ts-node -r tsconfig-paths/register --inspect src/index.ts"
   },
   "dependencies": {
+    "@distube/ytdl-core": "^4.16.12",
     "@google-cloud/vision": "^4.3.3",
     "@google/genai": "^1.11.0",
     "@google/generative-ai": "^0.2.1",
@@ -30,8 +31,7 @@
     "uuid": "^11.1.0",
     "youtube-transcript": "^1.2.1",
     "youtube-transcript-api": "^1.1.2",
-    "youtube-transcript-js-api": "^1.4.2",
-    "ytdl-core": "^4.11.5"
+    "youtube-transcript-js-api": "^1.4.2"
   },
   "devDependencies": {
     "@types/cors": "^2.8.13",

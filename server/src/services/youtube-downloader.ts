@@ -1,4 +1,4 @@
-import ytdl from 'ytdl-core';
+import ytdl from '@distube/ytdl-core';
 import fs from 'fs';
 import path from 'path';
 import { extractYouTubeId } from './youtube-transcript';
@@ -45,7 +45,20 @@ export const getVideoInfo = async (youtubeUrl: string): Promise<VideoInfo> => {
       throw new Error('Invalid YouTube URL');
     }
 
-    const info = await ytdl.getInfo(youtubeUrl);
+    // First validate the URL
+    if (!ytdl.validateURL(youtubeUrl)) {
+      throw new Error('Invalid YouTube URL format');
+    }
+
+    console.log(`Getting video info for: ${videoId}`);
+    const info = await ytdl.getInfo(youtubeUrl, {
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+      }
+    });
+
     const videoDetails = info.videoDetails;
 
     return {
@@ -98,13 +111,19 @@ export const downloadVideo = async (
       return { filePath, videoInfo };
     }
 
-    // Set download options
+    // Set download options with better configuration
     const downloadOptions: ytdl.downloadOptions = {
       quality: options.audioOnly ? 'highestaudio' : (options.quality || 'highest'),
-      filter: options.audioOnly ? 'audioonly' : 'videoandaudio'
+      filter: options.audioOnly ? 'audioonly' : 'videoandaudio',
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+      }
     };
 
     return new Promise((resolve, reject) => {
+      console.log(`Starting download with options:`, downloadOptions);
       const stream = ytdl(youtubeUrl, downloadOptions);
       const writeStream = fs.createWriteStream(filePath);
 
