@@ -4,6 +4,15 @@ import { DatabaseService } from '../core/database-service';
 import { isAuthenticated } from '../services/youtube-auth';
 import { progressTracker } from '../services/progress-tracker';
 import { addYoutubeProcessingJob, getJobStatus } from '../services/job-queue';
+import {
+  downloadVideo,
+  getVideoInfo,
+  getDownloadedVideos,
+  deleteDownloadedVideo,
+  getVideoFilePath,
+  DownloadOptions
+} from '../services/youtube-downloader';
+import path from 'path';
 
 // Create a singleton instance of the database service
 const dbService = new DatabaseService();
@@ -331,6 +340,204 @@ export const getYoutubeVideoChunks = async (req: Request, res: Response) => {
     console.error('Error in getYoutubeVideoChunks controller:', error);
     return res.status(500).json({
       message: 'An error occurred while processing your request',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Download YouTube video to server
+export const downloadYoutubeVideo = async (req: Request, res: Response) => {
+  try {
+    const { youtubeUrl, options = {} } = req.body;
+    const socketId = req.body.socketId;
+
+    if (!youtubeUrl) {
+      return res.status(400).json({ message: 'YouTube URL is required' });
+    }
+
+    const videoId = extractYouTubeId(youtubeUrl);
+    if (!videoId) {
+      return res.status(400).json({ message: 'Invalid YouTube URL' });
+    }
+
+    console.log(`Starting video download for: ${youtubeUrl}`);
+
+    // Initialize progress tracking if socket ID provided
+    if (socketId) {
+      progressTracker.initializeProgressTracking(videoId, socketId);
+      progressTracker.updateTranscriptFetch(videoId, 'Starting video download...', 0);
+    }
+
+    // Download the video with progress callback
+    const result = await downloadVideo(youtubeUrl, options as DownloadOptions, (progress) => {
+      if (socketId) {
+        progressTracker.updateTranscriptFetch(
+          videoId,
+          `Downloading: ${progress.progress.toFixed(1)}% (${(progress.downloadedBytes / 1024 / 1024).toFixed(1)}MB / ${(progress.totalBytes / 1024 / 1024).toFixed(1)}MB)`,
+          progress.progress
+        );
+      }
+    });
+
+    // Complete progress tracking
+    if (socketId) {
+      progressTracker.updateTranscriptFetch(videoId, 'Download completed successfully!', 100);
+      // For downloads, we don't have chunks, so we pass 1 to indicate completion
+      progressTracker.completeProcessing(videoId, 1);
+    }
+
+    console.log(`Video download completed: ${result.filePath}`);
+
+    return res.status(200).json({
+      message: 'Video downloaded successfully',
+      videoId,
+      filePath: result.filePath,
+      fileName: path.basename(result.filePath),
+      videoInfo: result.videoInfo
+    });
+
+  } catch (error: any) {
+    console.error('Error downloading YouTube video:', error);
+
+    const videoId = extractYouTubeId(req.body.youtubeUrl);
+    if (videoId && req.body.socketId) {
+      progressTracker.reportError(videoId, 'Download failed', error.message);
+    }
+
+    return res.status(500).json({
+      message: 'Failed to download video',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Get video information without downloading
+export const getYoutubeVideoInfo = async (req: Request, res: Response) => {
+  try {
+    const { youtubeUrl } = req.body;
+
+    if (!youtubeUrl) {
+      return res.status(400).json({ message: 'YouTube URL is required' });
+    }
+
+    const videoInfo = await getVideoInfo(youtubeUrl);
+
+    return res.status(200).json({
+      message: 'Video information retrieved successfully',
+      videoInfo
+    });
+
+  } catch (error: any) {
+    console.error('Error getting video info:', error);
+    return res.status(500).json({
+      message: 'Failed to get video information',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Get list of downloaded videos
+export const getDownloadedVideosList = async (req: Request, res: Response) => {
+  try {
+    const videos = getDownloadedVideos();
+
+    return res.status(200).json({
+      message: `Found ${videos.length} downloaded videos`,
+      videos
+    });
+
+  } catch (error: any) {
+    console.error('Error getting downloaded videos list:', error);
+    return res.status(500).json({
+      message: 'Failed to get downloaded videos list',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Delete downloaded video
+export const deleteDownloadedVideoFile = async (req: Request, res: Response) => {
+  try {
+    const { fileName } = req.params;
+
+    if (!fileName) {
+      return res.status(400).json({ message: 'File name is required' });
+    }
+
+    const success = deleteDownloadedVideo(fileName);
+
+    if (success) {
+      return res.status(200).json({
+        message: 'Video file deleted successfully',
+        fileName
+      });
+    } else {
+      return res.status(404).json({
+        message: 'Video file not found',
+        fileName
+      });
+    }
+
+  } catch (error: any) {
+    console.error('Error deleting video file:', error);
+    return res.status(500).json({
+      message: 'Failed to delete video file',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Serve downloaded video file
+export const serveDownloadedVideo = async (req: Request, res: Response) => {
+  try {
+    const { fileName } = req.params;
+
+    if (!fileName) {
+      return res.status(400).json({ message: 'File name is required' });
+    }
+
+    const filePath = getVideoFilePath(fileName);
+
+    if (!filePath) {
+      return res.status(404).json({
+        message: 'Video file not found',
+        fileName
+      });
+    }
+
+    // Set appropriate headers for video streaming
+    const stat = require('fs').statSync(filePath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    if (range) {
+      // Support for video streaming with range requests
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunksize = (end - start) + 1;
+      const file = require('fs').createReadStream(filePath, { start, end });
+      const head = {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': 'video/mp4',
+      };
+      res.writeHead(206, head);
+      file.pipe(res);
+    } else {
+      const head = {
+        'Content-Length': fileSize,
+        'Content-Type': 'video/mp4',
+      };
+      res.writeHead(200, head);
+      require('fs').createReadStream(filePath).pipe(res);
+    }
+
+  } catch (error: any) {
+    console.error('Error serving video file:', error);
+    return res.status(500).json({
+      message: 'Failed to serve video file',
       error: error.message || 'Unknown error'
     });
   }
