@@ -55,10 +55,17 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   const [checkingAuth, setCheckingAuth] = useState<boolean>(true);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const tokenClientRef = useRef<any>(null);
-  
+
   // Progress tracking state
   const [progressData, setProgressData] = useState<ProgressUpdate | null>(null);
   const [videoId, setVideoId] = useState<string | null>(null);
+
+  // Download functionality state
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<number>(0);
+  const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
+  const [downloadResult, setDownloadResult] = useState<any>(null);
+  const [actionMode, setActionMode] = useState<'transcript' | 'download'>('transcript');
 
   // Initialize socket connection on component mount
   useEffect(() => {
@@ -99,31 +106,46 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       socketService.registerProgressListener(videoId, (update: ProgressUpdate) => {
         console.log(`Progress update for ${videoId}:`, update);
         setProgressData(update);
-        
-        // Update processing message based on progress stage
-        switch (update.stage) {
-          case ProgressStage.INITIALIZING:
-            setProcessingMessage('Initializing YouTube video processing...');
-            break;
-          case ProgressStage.TRANSCRIPT_FETCH:
-            setProcessingMessage(`Fetching transcript: ${update.message}`);
-            break;
-          case ProgressStage.TRANSCRIPT_PROCESS:
-            setProcessingMessage(`Processing transcript: ${update.message}`);
-            break;
-          case ProgressStage.CHUNK_CREATION:
-            setProcessingMessage(`Creating chunks: ${update.message}`);
-            break;
-          case ProgressStage.EMBEDDING_GENERATION:
-            setProcessingMessage(`Generating embeddings: ${update.message}`);
-            break;
-          case ProgressStage.CHUNK_STORAGE:
-            setProcessingMessage(`Storing chunks: ${update.message}`);
-            break;
-          case ProgressStage.COMPLETED:
-            setIsProcessing(false);
-            setProcessingMessage('Processing completed successfully!');
-            setTimeout(() => setProcessingMessage(null), 3000); // Clear message after 3 seconds
+
+        // Handle different action modes
+        if (actionMode === 'download') {
+          // Update download progress
+          setDownloadProgress(update.progress || 0);
+          setDownloadMessage(update.message);
+
+          if (update.stage === ProgressStage.COMPLETED) {
+            setIsDownloading(false);
+            setDownloadMessage('Download completed successfully!');
+            setTimeout(() => setDownloadMessage(null), 3000);
+          } else if (update.stage === ProgressStage.ERROR) {
+            setIsDownloading(false);
+            setError(update.message);
+          }
+        } else {
+          // Update processing message based on progress stage for transcript processing
+          switch (update.stage) {
+            case ProgressStage.INITIALIZING:
+              setProcessingMessage('Initializing YouTube video processing...');
+              break;
+            case ProgressStage.TRANSCRIPT_FETCH:
+              setProcessingMessage(`Fetching transcript: ${update.message}`);
+              break;
+            case ProgressStage.TRANSCRIPT_PROCESS:
+              setProcessingMessage(`Processing transcript: ${update.message}`);
+              break;
+            case ProgressStage.CHUNK_CREATION:
+              setProcessingMessage(`Creating chunks: ${update.message}`);
+              break;
+            case ProgressStage.EMBEDDING_GENERATION:
+              setProcessingMessage(`Generating embeddings: ${update.message}`);
+              break;
+            case ProgressStage.CHUNK_STORAGE:
+              setProcessingMessage(`Storing chunks: ${update.message}`);
+              break;
+            case ProgressStage.COMPLETED:
+              setIsProcessing(false);
+              setProcessingMessage('Processing completed successfully!');
+              setTimeout(() => setProcessingMessage(null), 3000); // Clear message after 3 seconds
             
             // Store the processing result
             setProcessingResult({
@@ -141,6 +163,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             setError(update.message);
             setProcessingMessage(null);
             break;
+          }
         }
       });
       
@@ -340,27 +363,30 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!youtubeUrl) {
       setError('Please enter a YouTube URL');
       return;
     }
-    
+
     if (!isValidYoutubeUrl(youtubeUrl)) {
       setError('Please enter a valid YouTube URL');
       return;
     }
-    
+
     // Make sure socket is connected before proceeding
     const socketConnected = await socketService.connect();
     if (!socketConnected) {
       setError('Could not establish WebSocket connection for progress tracking. Please refresh the page and try again.');
       return;
     }
-    
+
     // Save the selected domains before processing
     setProcessingDomains([...selectedDomains]);
-    
+
+    // Set action mode to transcript processing
+    setActionMode('transcript');
+
     setIsProcessing(true);
     setError(null);
     setProcessingResult(null);
@@ -458,46 +484,140 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       }
     }
   };
-  
+
+  const handleDownload = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!youtubeUrl) {
+      setError('Please enter a YouTube URL');
+      return;
+    }
+
+    if (!isValidYoutubeUrl(youtubeUrl)) {
+      setError('Please enter a valid YouTube URL');
+      return;
+    }
+
+    // Make sure socket is connected before proceeding
+    const socketConnected = await socketService.connect();
+    if (!socketConnected) {
+      setError('Could not establish WebSocket connection for progress tracking. Please refresh the page and try again.');
+      return;
+    }
+
+    // Set action mode to download
+    setActionMode('download');
+
+    setIsDownloading(true);
+    setError(null);
+    setDownloadResult(null);
+    setDownloadMessage('Starting video download...');
+    setDownloadProgress(0);
+
+    // Extract YouTube ID from URL to use for progress tracking
+    const matches = youtubeUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    const extractedVideoId = matches && matches[1];
+
+    if (!extractedVideoId) {
+      setError('Could not extract valid YouTube ID from URL');
+      setIsDownloading(false);
+      return;
+    }
+
+    // Set the video ID which will trigger the useEffect for socket listeners
+    setVideoId(extractedVideoId);
+
+    try {
+      // Add socket ID to the request for tracking
+      const socketId = socketService.getSocketId();
+      console.log('Using socket ID for download tracking:', socketId);
+
+      // Start the video download
+      const response = await axios.post('/api/youtube/download', {
+        youtubeUrl,
+        socketId,
+        options: {
+          quality: 'highest',
+          format: 'mp4'
+        }
+      });
+
+      console.log('Download completed:', response.data);
+      setDownloadMessage('Download completed successfully!');
+      setDownloadProgress(100);
+      setIsDownloading(false);
+
+      // Store the download result
+      setDownloadResult({
+        fileName: response.data.fileName,
+        filePath: response.data.filePath,
+        videoInfo: response.data.videoInfo
+      });
+
+      setYoutubeUrl('');
+      onUploadSuccess();
+
+    } catch (err) {
+      setIsDownloading(false);
+      setDownloadMessage(null);
+
+      if (axios.isAxiosError(err) && err.response) {
+        const serverErrorMsg = err.response.data.error || err.response.data.message || 'Unknown server error';
+        setError(`Failed to download video: ${serverErrorMsg}`);
+        console.error('Download error:', err.response.data);
+      } else if (axios.isAxiosError(err) && err.request) {
+        setError('Network connection error. Please check your internet connection and try again.');
+        console.error('Request error:', err.request);
+      } else {
+        setError('An unexpected error occurred while downloading the video');
+        console.error('Error:', err);
+      }
+    }
+  };
+
   // Add progress bar to the processing section
   const renderProcessingState = () => {
-    if (isProcessing) {
+    if (isProcessing || isDownloading) {
       // Calculate progress percentage - protect against edge cases
-      const progress = progressData?.progress || 0;
+      const progress = isDownloading ? downloadProgress : (progressData?.progress || 0);
       const currentItem = progressData?.currentItem || 0;
       const totalItems = progressData?.totalItems || 1;
-      
+      const message = isDownloading ? downloadMessage : processingMessage;
+      const colorClass = isDownloading ? 'text-green-500' : 'text-blue-500';
+      const progressBarClass = isDownloading ? 'bg-green-500' : 'bg-blue-500';
+
       // Debug info
-      console.log('Progress rendering:', { 
-        progress, 
-        currentItem, 
-        totalItems, 
+      console.log('Progress rendering:', {
+        progress,
+        currentItem,
+        totalItems,
         stage: progressData?.stage,
-        message: processingMessage
+        message,
+        isDownloading
       });
-      
+
       // Function to request progress refresh
       const refreshProgress = () => {
         if (videoId) {
           socketService.requestLatestProgress(videoId);
         }
       };
-      
+
       return (
         <div className="mt-4 text-center">
           <div className="flex flex-col items-center justify-center">
-            <div className="animate-pulse text-blue-500 mb-2">
+            <div className={`animate-pulse ${colorClass} mb-2`}>
               <svg className="animate-spin h-8 w-8" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
             </div>
-            <p className="text-gray-700 mb-2">{processingMessage || 'Processing...'}</p>
-            
+            <p className="text-gray-700 mb-2">{message || (isDownloading ? 'Downloading...' : 'Processing...')}</p>
+
             {/* Progress bar */}
             <div className="w-full h-2 bg-gray-200 rounded-full mb-2 max-w-md">
-              <div 
-                className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-in-out"
+              <div
+                className={`h-full ${progressBarClass} rounded-full transition-all duration-300 ease-in-out`}
                 style={{ width: `${Math.max(1, progress)}%` }}
               ></div>
             </div>
@@ -592,9 +712,9 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
           <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
             <p><strong>Successfully processed:</strong> {processingResult.videoTitle}</p>
             <p className="text-sm">Created {processingResult.totalChunks} chunks for vector embedding</p>
-            <a 
-              href={`https://www.youtube.com/watch?v=${processingResult.videoId}`} 
-              target="_blank" 
+            <a
+              href={`https://www.youtube.com/watch?v=${processingResult.videoId}`}
+              target="_blank"
               rel="noopener noreferrer"
               className="text-blue-600 hover:underline text-sm"
             >
@@ -602,7 +722,32 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             </a>
           </div>
         )}
-        
+
+        {downloadResult && (
+          <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
+            <p><strong>Successfully downloaded:</strong> {downloadResult.videoInfo?.title || 'YouTube Video'}</p>
+            <p className="text-sm">File: {downloadResult.fileName}</p>
+            <div className="flex space-x-4 mt-2">
+              <a
+                href={`/api/youtube/downloads/${downloadResult.fileName}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline text-sm"
+              >
+                Download File
+              </a>
+              <a
+                href={`https://www.youtube.com/watch?v=${downloadResult.videoInfo?.videoId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline text-sm"
+              >
+                View on YouTube
+              </a>
+            </div>
+          </div>
+        )}
+
         {/* YouTube Authentication Button */}
         {!checkingAuth && !isAuthenticated && (
           <div className="mb-4 bg-yellow-50 border border-yellow-400 text-yellow-700 px-4 py-3 rounded">
@@ -652,14 +797,56 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
               </div>
             </div>
             <p className="mt-1 text-xs text-gray-500">
-              Enter a YouTube video URL to extract and process its transcript
+              Enter a YouTube video URL to extract and process its transcript or download the video
             </p>
           </div>
-          
+
+          {/* Action Mode Selector */}
           <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Select Knowledge Domains
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Action
             </label>
+            <div className="flex space-x-4">
+              <div className="flex items-center">
+                <input
+                  id="transcript-mode"
+                  name="action-mode"
+                  type="radio"
+                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+                  checked={actionMode === 'transcript'}
+                  onChange={() => setActionMode('transcript')}
+                  disabled={isProcessing || isDownloading}
+                />
+                <label htmlFor="transcript-mode" className="ml-2 block text-sm text-gray-700">
+                  Extract Transcript
+                </label>
+              </div>
+              <div className="flex items-center">
+                <input
+                  id="download-mode"
+                  name="action-mode"
+                  type="radio"
+                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+                  checked={actionMode === 'download'}
+                  onChange={() => setActionMode('download')}
+                  disabled={isProcessing || isDownloading}
+                />
+                <label htmlFor="download-mode" className="ml-2 block text-sm text-gray-700">
+                  Download Video
+                </label>
+              </div>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Choose whether to extract transcript for processing or download the video file
+            </p>
+          </div>
+
+          {/* Knowledge Domains - only show for transcript mode */}
+          {actionMode === 'transcript' && (
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Select Knowledge Domains
+              </label>
             <div className="mt-1 grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
               {availableDomains.map((domain) => (
                 <div key={domain} className="flex items-center">
@@ -680,22 +867,36 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
                   </label>
                 </div>
               ))}
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                Select relevant knowledge domains for better embedding
+              </p>
             </div>
-            <p className="mt-1 text-xs text-gray-500">
-              Select relevant knowledge domains for better embedding
-            </p>
-          </div>
-          
-          <div className="flex justify-end">
-            <button
-              type="submit"
-              className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
-                isProcessing ? 'opacity-50 cursor-not-allowed' : ''
-              }`}
-              disabled={isProcessing}
-            >
-              {isProcessing ? 'Processing...' : 'Process Video'}
-            </button>
+          )}
+
+          <div className="flex justify-end space-x-3">
+            {actionMode === 'transcript' ? (
+              <button
+                type="submit"
+                className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
+                  isProcessing || isDownloading ? 'opacity-50 cursor-not-allowed' : ''
+                }`}
+                disabled={isProcessing || isDownloading}
+              >
+                {isProcessing ? 'Processing...' : 'Process Transcript'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleDownload}
+                className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${
+                  isDownloading || isProcessing ? 'opacity-50 cursor-not-allowed' : ''
+                }`}
+                disabled={isDownloading || isProcessing}
+              >
+                {isDownloading ? 'Downloading...' : 'Download Video'}
+              </button>
+            )}
           </div>
         </form>
         

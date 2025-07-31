@@ -30,7 +30,8 @@
     "uuid": "^11.1.0",
     "youtube-transcript": "^1.2.1",
     "youtube-transcript-api": "^1.1.2",
-    "youtube-transcript-js-api": "^1.4.2"
+    "youtube-transcript-js-api": "^1.4.2",
+    "ytdl-core": "^4.11.5"
   },
   "devDependencies": {
     "@types/cors": "^2.8.13",

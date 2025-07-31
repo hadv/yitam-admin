@@ -1,5 +1,17 @@
 import { Router } from 'express';
-import { processYoutubeVideo, checkTranscriptAccess, checkTranscriptExists, countYoutubeVideoChunks, deleteYoutubeVideoChunks, getYoutubeVideoChunks } from '../controllers/youtube';
+import {
+  processYoutubeVideo,
+  checkTranscriptAccess,
+  checkTranscriptExists,
+  countYoutubeVideoChunks,
+  deleteYoutubeVideoChunks,
+  getYoutubeVideoChunks,
+  downloadYoutubeVideo,
+  getYoutubeVideoInfo,
+  getDownloadedVideosList,
+  deleteDownloadedVideoFile,
+  serveDownloadedVideo
+} from '../controllers/youtube';
 import { getJobStatus } from '../services/job-queue';
 import { getScrapingMetrics, resetScrapingMetrics } from '../services/youtube-transcript';
 
@@ -82,5 +94,21 @@ router.post('/metrics/reset', (req, res) => {
     });
   }
 });
+
+// Video download routes
+// Route for downloading YouTube video to server
+router.post('/download', downloadYoutubeVideo);
+
+// Route for getting video information without downloading
+router.post('/info', getYoutubeVideoInfo);
+
+// Route for getting list of downloaded videos
+router.get('/downloads', getDownloadedVideosList);
+
+// Route for serving downloaded video files
+router.get('/downloads/:fileName', serveDownloadedVideo);
+
+// Route for deleting downloaded video files
+router.delete('/downloads/:fileName', deleteDownloadedVideoFile);
 
 export default router;
