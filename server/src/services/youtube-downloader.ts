@@ -36,6 +36,35 @@ if (!fs.existsSync(downloadsDir)) {
 }
 
 /**
+ * Creates enhanced request options with authentication headers
+ * This attempts to use OAuth tokens in the request headers
+ */
+const createAuthenticatedRequestOptions = (authToken?: string): any => {
+  const baseOptions = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
+      'Referer': 'https://www.youtube.com/',
+      'Origin': 'https://www.youtube.com'
+    }
+  };
+
+  if (authToken) {
+    // Add OAuth token to headers
+    (baseOptions.headers as any)['Authorization'] = `Bearer ${authToken}`;
+    // Also try adding it as a cookie-like header that might be recognized
+    (baseOptions.headers as any)['Cookie'] = `oauth_token=${authToken}`;
+    console.log('Added authentication headers to request options');
+  }
+
+  return baseOptions;
+};
+
+/**
  * Categorizes YouTube access errors for better user feedback
  */
 const categorizeYouTubeError = (error: Error): { category: string; userMessage: string; originalError: string } => {
@@ -48,7 +77,7 @@ const categorizeYouTubeError = (error: Error): { category: string; userMessage: 
       errorMessage.includes('channel membership required')) {
     return {
       category: 'MEMBERS_ONLY',
-      userMessage: 'This video is restricted to channel members only. You need to join the channel as a member to access this content.',
+      userMessage: 'This video is restricted to channel members only. The system attempted to use your authentication but was unable to access the members-only content. This may be due to YouTube\'s technical restrictions on automated access to premium content.',
       originalError
     };
   }
@@ -142,18 +171,8 @@ export const getVideoInfo = async (youtubeUrl: string, authToken?: string): Prom
 
     console.log(`Getting video info for: ${videoId}`);
 
-    // Prepare request options with authentication if available
-    const requestOptions: any = {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
-    };
-
-    // Add authentication if available
-    if (authToken) {
-      (requestOptions.headers as Record<string, string>)['Authorization'] = `Bearer ${authToken}`;
-      console.log('Using authenticated request for video info');
-    }
+    // Create request options with authentication if available
+    const requestOptions = createAuthenticatedRequestOptions(authToken);
 
     const info = await ytdl.getInfo(youtubeUrl, {
       requestOptions
@@ -219,22 +238,15 @@ export const downloadVideo = async (
       return { filePath, videoInfo };
     }
 
+    // Create request options with authentication if available
+    const requestOptions = createAuthenticatedRequestOptions(authToken);
+
     // Set download options with better configuration
     const downloadOptions: ytdl.downloadOptions = {
       quality: options.audioOnly ? 'highestaudio' : (options.quality || 'highest'),
       filter: options.audioOnly ? 'audioonly' : 'videoandaudio',
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-      }
+      requestOptions
     };
-
-    // Add authentication if available
-    if (authToken) {
-      (downloadOptions.requestOptions!.headers as Record<string, string>)['Authorization'] = `Bearer ${authToken}`;
-      console.log('Using authenticated request for video download');
-    }
 
     return new Promise((resolve, reject) => {
       console.log(`Starting download with options:`, downloadOptions);

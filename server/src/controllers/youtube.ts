@@ -26,10 +26,13 @@ const getSuggestionsForError = (category: string, isAuthenticated: boolean): str
       return [
         'This video requires channel membership to access.',
         isAuthenticated
-          ? 'If you are a member of this channel, try refreshing your authentication or contact support.'
-          : 'Sign in with your Google account if you are a member of this channel.',
-        'Consider joining the channel as a member if you want to access this content.',
-        'Try accessing the video directly on YouTube first to confirm membership status.'
+          ? 'The system attempted to use your authentication but YouTube blocked access to this members-only content.'
+          : 'Sign in with your Google account if you are a member of this channel, then try again.',
+        'Alternative options if download continues to fail:',
+        '  • Watch the video directly on YouTube where you have membership access',
+        '  • Use screen recording software while watching on YouTube',
+        '  • Contact the channel owner about alternative access methods',
+        'Note: YouTube has technical restrictions on automated downloads of premium content.'
       ];
     case 'PRIVATE':
       return [
