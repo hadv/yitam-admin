@@ -562,8 +562,27 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       setDownloadMessage(null);
 
       if (axios.isAxiosError(err) && err.response) {
-        const serverErrorMsg = err.response.data.error || err.response.data.message || 'Unknown server error';
-        setError(`Failed to download video: ${serverErrorMsg}`);
+        const errorData = err.response.data;
+        const errorMsg = errorData.error || errorData.message || 'Unknown server error';
+        const category = errorData.category;
+        const suggestions = errorData.suggestions || [];
+
+        // Create a more informative error message
+        let fullErrorMessage = `Failed to download video: ${errorMsg}`;
+
+        // Add suggestions if available
+        if (suggestions.length > 0) {
+          fullErrorMessage += '\n\nSuggestions:\n' + suggestions.map((s: string, i: number) => `${i + 1}. ${s}`).join('\n');
+        }
+
+        // Special handling for members-only content
+        if (category === 'MEMBERS_ONLY') {
+          fullErrorMessage += '\n\n💡 This appears to be members-only content. If you are a channel member, try signing in with Google first.';
+        } else if (category === 'AGE_RESTRICTED' || category === 'PRIVATE') {
+          fullErrorMessage += '\n\n💡 Try signing in with Google if you have access to this content.';
+        }
+
+        setError(fullErrorMessage);
         console.error('Download error:', err.response.data);
       } else if (axios.isAxiosError(err) && err.request) {
         setError('Network connection error. Please check your internet connection and try again.');

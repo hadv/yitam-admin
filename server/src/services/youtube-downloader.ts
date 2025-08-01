@@ -36,9 +36,99 @@ if (!fs.existsSync(downloadsDir)) {
 }
 
 /**
+ * Categorizes YouTube access errors for better user feedback
+ */
+const categorizeYouTubeError = (error: Error): { category: string; userMessage: string; originalError: string } => {
+  const errorMessage = error.message.toLowerCase();
+  const originalError = error.message;
+
+  // Members-only content
+  if (errorMessage.includes('join this channel to get access to members-only content') ||
+      errorMessage.includes('members-only') ||
+      errorMessage.includes('channel membership required')) {
+    return {
+      category: 'MEMBERS_ONLY',
+      userMessage: 'This video is restricted to channel members only. You need to join the channel as a member to access this content.',
+      originalError
+    };
+  }
+
+  // Private videos
+  if (errorMessage.includes('private video') ||
+      errorMessage.includes('this video is private')) {
+    return {
+      category: 'PRIVATE',
+      userMessage: 'This video is private and cannot be accessed.',
+      originalError
+    };
+  }
+
+  // Age-restricted content
+  if (errorMessage.includes('age-restricted') ||
+      errorMessage.includes('sign in to confirm your age')) {
+    return {
+      category: 'AGE_RESTRICTED',
+      userMessage: 'This video is age-restricted. You may need to sign in to YouTube to access it.',
+      originalError
+    };
+  }
+
+  // Geo-blocked content
+  if (errorMessage.includes('not available in your country') ||
+      errorMessage.includes('geo-blocked') ||
+      errorMessage.includes('region')) {
+    return {
+      category: 'GEO_BLOCKED',
+      userMessage: 'This video is not available in your region due to geographic restrictions.',
+      originalError
+    };
+  }
+
+  // Video not found or deleted
+  if (errorMessage.includes('video unavailable') ||
+      errorMessage.includes('video not found') ||
+      errorMessage.includes('does not exist')) {
+    return {
+      category: 'NOT_FOUND',
+      userMessage: 'This video is unavailable, may have been deleted, or the URL is incorrect.',
+      originalError
+    };
+  }
+
+  // Rate limiting
+  if (errorMessage.includes('rate limit') ||
+      errorMessage.includes('too many requests')) {
+    return {
+      category: 'RATE_LIMITED',
+      userMessage: 'Too many requests. Please wait a moment before trying again.',
+      originalError
+    };
+  }
+
+  // Network issues
+  if (errorMessage.includes('network') ||
+      errorMessage.includes('timeout') ||
+      errorMessage.includes('econnreset') ||
+      errorMessage.includes('etimedout')) {
+    return {
+      category: 'NETWORK',
+      userMessage: 'Network connection issue. Please check your internet connection and try again.',
+      originalError
+    };
+  }
+
+  // Generic error
+  return {
+    category: 'UNKNOWN',
+    userMessage: `Failed to access video: ${originalError}`,
+    originalError
+  };
+};
+
+/**
  * Get video information from YouTube URL
  */
-export const getVideoInfo = async (youtubeUrl: string): Promise<VideoInfo> => {
+export const getVideoInfo = async (youtubeUrl: string, authToken?: string): Promise<VideoInfo> => {
   try {
     const videoId = extractYouTubeId(youtubeUrl);
     if (!videoId) {
@@ -51,12 +141,22 @@ export const getVideoInfo = async (youtubeUrl: string): Promise<VideoInfo> => {
     }
 
     console.log(`Getting video info for: ${videoId}`);
-    const info = await ytdl.getInfo(youtubeUrl, {
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+
+    // Prepare request options with authentication if available
+    const requestOptions: any = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
+    };
+
+    // Add authentication if available
+    if (authToken) {
+      (requestOptions.headers as Record<string, string>)['Authorization'] = `Bearer ${authToken}`;
+      console.log('Using authenticated request for video info');
+    }
+
+    const info = await ytdl.getInfo(youtubeUrl, {
+      requestOptions
     });
 
     const videoDetails = info.videoDetails;
@@ -73,7 +173,14 @@ export const getVideoInfo = async (youtubeUrl: string): Promise<VideoInfo> => {
     };
   } catch (error) {
     console.error('Error getting video info:', error);
-    throw new Error(`Failed to get video information: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    const categorizedError = categorizeYouTubeError(error as Error);
+
+    // Create a more informative error
+    const enhancedError = new Error(categorizedError.userMessage);
+    (enhancedError as any).category = categorizedError.category;
+    (enhancedError as any).originalError = categorizedError.originalError;
+
+    throw enhancedError;
   }
 };
 
@@ -83,7 +190,8 @@ export const getVideoInfo = async (youtubeUrl: string): Promise<VideoInfo> => {
 export const downloadVideo = async (
   youtubeUrl: string,
   options: DownloadOptions = {},
-  progressCallback?: (progress: DownloadProgress) => void
+  progressCallback?: (progress: DownloadProgress) => void,
+  authToken?: string
 ): Promise<{ filePath: string; videoInfo: VideoInfo }> => {
   try {
     const videoId = extractYouTubeId(youtubeUrl);
@@ -91,9 +199,9 @@ export const downloadVideo = async (
       throw new Error('Invalid YouTube URL');
     }
 
-    // Get video info first
-    const videoInfo = await getVideoInfo(youtubeUrl);
-    
+    // Get video info first with authentication if available
+    const videoInfo = await getVideoInfo(youtubeUrl, authToken);
+
     // Sanitize filename
     const sanitizedTitle = videoInfo.title
       .replace(/[^\w\s-]/g, '') // Remove special characters
@@ -121,6 +229,12 @@ export const downloadVideo = async (
         }
       }
     };
+
+    // Add authentication if available
+    if (authToken) {
+      (downloadOptions.requestOptions!.headers as Record<string, string>)['Authorization'] = `Bearer ${authToken}`;
+      console.log('Using authenticated request for video download');
+    }
 
     return new Promise((resolve, reject) => {
       console.log(`Starting download with options:`, downloadOptions);
@@ -163,7 +277,14 @@ export const downloadVideo = async (
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
         }
-        reject(new Error(`Download failed: ${error.message}`));
+
+        // Categorize the error for better user feedback
+        const categorizedError = categorizeYouTubeError(error);
+        const enhancedError = new Error(categorizedError.userMessage);
+        (enhancedError as any).category = categorizedError.category;
+        (enhancedError as any).originalError = categorizedError.originalError;
+
+        reject(enhancedError);
       });
 
       stream.on('end', () => {
@@ -185,7 +306,19 @@ export const downloadVideo = async (
 
   } catch (error) {
     console.error('Error downloading video:', error);
-    throw new Error(`Failed to download video: ${error instanceof Error ? error.message : 'Unknown error'}`);
+
+    // If it's already a categorized error, re-throw it
+    if (error instanceof Error && (error as any).category) {
+      throw error;
+    }
+
+    // Otherwise, categorize the error
+    const categorizedError = categorizeYouTubeError(error as Error);
+    const enhancedError = new Error(categorizedError.userMessage);
+    (enhancedError as any).category = categorizedError.category;
+    (enhancedError as any).originalError = categorizedError.originalError;
+
+    throw enhancedError;
   }
 };
 

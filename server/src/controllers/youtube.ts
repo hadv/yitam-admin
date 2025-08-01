@@ -17,6 +17,69 @@ import path from 'path';
 // Create a singleton instance of the database service
 const dbService = new DatabaseService();
 
+/**
+ * Provides user-friendly suggestions based on error category
+ */
+const getSuggestionsForError = (category: string, isAuthenticated: boolean): string[] => {
+  switch (category) {
+    case 'MEMBERS_ONLY':
+      return [
+        'This video requires channel membership to access.',
+        isAuthenticated
+          ? 'If you are a member of this channel, try refreshing your authentication or contact support.'
+          : 'Sign in with your Google account if you are a member of this channel.',
+        'Consider joining the channel as a member if you want to access this content.',
+        'Try accessing the video directly on YouTube first to confirm membership status.'
+      ];
+    case 'PRIVATE':
+      return [
+        'This video is set to private by the creator.',
+        'Only the video owner can access private videos.',
+        'Contact the video owner if you believe you should have access.'
+      ];
+    case 'AGE_RESTRICTED':
+      return [
+        'This video is age-restricted.',
+        isAuthenticated
+          ? 'Your account may need age verification on YouTube.'
+          : 'Sign in with a verified Google account to access age-restricted content.',
+        'Verify your age on YouTube if you haven\'t already.'
+      ];
+    case 'GEO_BLOCKED':
+      return [
+        'This video is not available in your region.',
+        'The content owner has restricted access in your country.',
+        'Try using a VPN if legally permitted in your jurisdiction.'
+      ];
+    case 'NOT_FOUND':
+      return [
+        'The video may have been deleted or made unavailable.',
+        'Check if the URL is correct.',
+        'The video might be temporarily unavailable.'
+      ];
+    case 'RATE_LIMITED':
+      return [
+        'Too many requests have been made recently.',
+        'Wait a few minutes before trying again.',
+        'Consider spacing out your download requests.'
+      ];
+    case 'NETWORK':
+      return [
+        'Check your internet connection.',
+        'Try again in a few moments.',
+        'The YouTube servers might be temporarily unavailable.'
+      ];
+    default:
+      return [
+        'Try the request again in a few moments.',
+        isAuthenticated
+          ? 'If the problem persists, try refreshing your authentication.'
+          : 'Consider signing in if this is restricted content.',
+        'Contact support if the issue continues.'
+      ];
+  }
+};
+
 // Process YouTube video URL, extract transcript, and store in vector DB
 export const processYoutubeVideo = async (req: Request, res: Response) => {
   try {
@@ -362,13 +425,27 @@ export const downloadYoutubeVideo = async (req: Request, res: Response) => {
 
     console.log(`Starting video download for: ${youtubeUrl}`);
 
+    // Check if user is authenticated and get access token
+    const userId = req.session?.userId;
+    let authToken: string | undefined;
+
+    if (userId && isAuthenticated(userId)) {
+      // Try to get authenticated client to extract access token
+      const authClient = await import('../services/youtube-auth').then(auth => auth.getAuthenticatedClient(userId));
+      if (authClient) {
+        const credentials = authClient.credentials;
+        authToken = credentials.access_token || undefined;
+        console.log('Using authenticated download for user:', userId);
+      }
+    }
+
     // Initialize progress tracking if socket ID provided
     if (socketId) {
       progressTracker.initializeProgressTracking(videoId, socketId);
       progressTracker.updateTranscriptFetch(videoId, 'Starting video download...', 0);
     }
 
-    // Download the video with progress callback
+    // Download the video with progress callback and authentication
     const result = await downloadVideo(youtubeUrl, options as DownloadOptions, (progress) => {
       if (socketId) {
         progressTracker.updateTranscriptFetch(
@@ -377,7 +454,7 @@ export const downloadYoutubeVideo = async (req: Request, res: Response) => {
           progress.progress
         );
       }
-    });
+    }, authToken);
 
     // Complete progress tracking
     if (socketId) {
@@ -404,9 +481,44 @@ export const downloadYoutubeVideo = async (req: Request, res: Response) => {
       progressTracker.reportError(videoId, 'Download failed', error.message);
     }
 
-    return res.status(500).json({
+    // Determine appropriate HTTP status code based on error category
+    let statusCode = 500;
+    let userMessage = error.message || 'Unknown error';
+
+    if (error.category) {
+      switch (error.category) {
+        case 'MEMBERS_ONLY':
+          statusCode = 403; // Forbidden
+          userMessage = error.message;
+          break;
+        case 'PRIVATE':
+          statusCode = 403; // Forbidden
+          break;
+        case 'AGE_RESTRICTED':
+          statusCode = 403; // Forbidden
+          break;
+        case 'GEO_BLOCKED':
+          statusCode = 451; // Unavailable For Legal Reasons
+          break;
+        case 'NOT_FOUND':
+          statusCode = 404; // Not Found
+          break;
+        case 'RATE_LIMITED':
+          statusCode = 429; // Too Many Requests
+          break;
+        case 'NETWORK':
+          statusCode = 503; // Service Unavailable
+          break;
+        default:
+          statusCode = 500; // Internal Server Error
+      }
+    }
+
+    return res.status(statusCode).json({
       message: 'Failed to download video',
-      error: error.message || 'Unknown error'
+      error: userMessage,
+      category: error.category || 'UNKNOWN',
+      suggestions: getSuggestionsForError(error.category, !!req.session?.userId)
     });
   }
 };
@@ -420,7 +532,19 @@ export const getYoutubeVideoInfo = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'YouTube URL is required' });
     }
 
-    const videoInfo = await getVideoInfo(youtubeUrl);
+    // Check if user is authenticated and get access token
+    const userId = req.session?.userId;
+    let authToken: string | undefined;
+
+    if (userId && isAuthenticated(userId)) {
+      const authClient = await import('../services/youtube-auth').then(auth => auth.getAuthenticatedClient(userId));
+      if (authClient) {
+        const credentials = authClient.credentials;
+        authToken = credentials.access_token || undefined;
+      }
+    }
+
+    const videoInfo = await getVideoInfo(youtubeUrl, authToken);
 
     return res.status(200).json({
       message: 'Video information retrieved successfully',
@@ -429,9 +553,40 @@ export const getYoutubeVideoInfo = async (req: Request, res: Response) => {
 
   } catch (error: any) {
     console.error('Error getting video info:', error);
-    return res.status(500).json({
+
+    // Use enhanced error handling
+    let statusCode = 500;
+    let userMessage = error.message || 'Unknown error';
+
+    if (error.category) {
+      switch (error.category) {
+        case 'MEMBERS_ONLY':
+        case 'PRIVATE':
+        case 'AGE_RESTRICTED':
+          statusCode = 403;
+          break;
+        case 'GEO_BLOCKED':
+          statusCode = 451;
+          break;
+        case 'NOT_FOUND':
+          statusCode = 404;
+          break;
+        case 'RATE_LIMITED':
+          statusCode = 429;
+          break;
+        case 'NETWORK':
+          statusCode = 503;
+          break;
+        default:
+          statusCode = 500;
+      }
+    }
+
+    return res.status(statusCode).json({
       message: 'Failed to get video information',
-      error: error.message || 'Unknown error'
+      error: userMessage,
+      category: error.category || 'UNKNOWN',
+      suggestions: getSuggestionsForError(error.category, !!req.session?.userId)
     });
   }
 };
