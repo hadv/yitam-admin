@@ -8,6 +8,7 @@ import {
   getYoutubeVideoChunks,
   downloadYoutubeVideo,
   getYoutubeVideoInfo,
+  checkYoutubeVideoAccess,
   getDownloadedVideosList,
   deleteDownloadedVideoFile,
   serveDownloadedVideo
@@ -98,6 +99,9 @@ router.post('/metrics/reset', (req, res) => {
 // Video download routes
 // Route for downloading YouTube video to server
 router.post('/download', downloadYoutubeVideo);
+
+// Route for checking if a video can be downloaded (pre-flight check)
+router.post('/check-access', checkYoutubeVideoAccess);
 
 // Route for getting video information without downloading
 router.post('/info', getYoutubeVideoInfo);

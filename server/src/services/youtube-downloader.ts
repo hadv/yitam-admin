@@ -74,10 +74,12 @@ const categorizeYouTubeError = (error: Error): { category: string; userMessage: 
   // Members-only content
   if (errorMessage.includes('join this channel to get access to members-only content') ||
       errorMessage.includes('members-only') ||
-      errorMessage.includes('channel membership required')) {
+      errorMessage.includes('channel membership required') ||
+      errorMessage.includes('appears to be members-only content') ||
+      errorMessage.includes('automated downloads of members-only content are not supported')) {
     return {
       category: 'MEMBERS_ONLY',
-      userMessage: 'This video is restricted to channel members only. The system attempted to use your authentication but was unable to access the members-only content. This may be due to YouTube\'s technical restrictions on automated access to premium content.',
+      userMessage: '🔒 This video is restricted to channel members only. YouTube prevents automated downloads of members-only content, even with proper authentication. This is a technical limitation that cannot be bypassed.',
       originalError
     };
   }
@@ -155,6 +157,42 @@ const categorizeYouTubeError = (error: Error): { category: string; userMessage: 
 };
 
 /**
+ * Pre-check if a video might be members-only by examining the page
+ */
+export const checkForMembersOnlyContent = async (youtubeUrl: string): Promise<{ isMembersOnly: boolean; reason?: string }> => {
+  try {
+    const response = await fetch(youtubeUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+
+    const html = await response.text();
+
+    // Check for members-only indicators in the HTML
+    const membersOnlyIndicators = [
+      'Join this channel to get access to members-only content',
+      'members-only content',
+      'channel membership required',
+      'exclusive to members',
+      '"isLiveContent":false,"isUnlisted":false,"isPrivate":false,"isUnpluggedCorpus":false,"isLiveDefaultBroadcast":false,"accessibility":{"accessibilityData":{"label":"Private video"}}',
+      'This video is available to this channel\'s members'
+    ];
+
+    for (const indicator of membersOnlyIndicators) {
+      if (html.toLowerCase().includes(indicator.toLowerCase())) {
+        return { isMembersOnly: true, reason: indicator };
+      }
+    }
+
+    return { isMembersOnly: false };
+  } catch (error) {
+    console.warn('Could not pre-check for members-only content:', error);
+    return { isMembersOnly: false };
+  }
+};
+
+/**
  * Get video information from YouTube URL
  */
 export const getVideoInfo = async (youtubeUrl: string, authToken?: string): Promise<VideoInfo> => {
@@ -170,6 +208,13 @@ export const getVideoInfo = async (youtubeUrl: string, authToken?: string): Prom
     }
 
     console.log(`Getting video info for: ${videoId}`);
+
+    // Pre-check for members-only content
+    const membersCheck = await checkForMembersOnlyContent(youtubeUrl);
+    if (membersCheck.isMembersOnly) {
+      console.log('Detected members-only content before attempting download');
+      throw new Error(`This video appears to be members-only content. Detected indicator: "${membersCheck.reason}". Unfortunately, automated downloads of members-only content are not supported due to YouTube's restrictions, even with authentication.`);
+    }
 
     // Create request options with authentication if available
     const requestOptions = createAuthenticatedRequestOptions(authToken);

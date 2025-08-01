@@ -10,6 +10,7 @@ import {
   getDownloadedVideos,
   deleteDownloadedVideo,
   getVideoFilePath,
+  checkForMembersOnlyContent,
   DownloadOptions
 } from '../services/youtube-downloader';
 import path from 'path';
@@ -24,15 +25,16 @@ const getSuggestionsForError = (category: string, isAuthenticated: boolean): str
   switch (category) {
     case 'MEMBERS_ONLY':
       return [
-        'This video requires channel membership to access.',
-        isAuthenticated
-          ? 'The system attempted to use your authentication but YouTube blocked access to this members-only content.'
-          : 'Sign in with your Google account if you are a member of this channel, then try again.',
-        'Alternative options if download continues to fail:',
-        '  • Watch the video directly on YouTube where you have membership access',
-        '  • Use screen recording software while watching on YouTube',
-        '  • Contact the channel owner about alternative access methods',
-        'Note: YouTube has technical restrictions on automated downloads of premium content.'
+        '🔒 This video is members-only content that cannot be downloaded automatically.',
+        'YouTube prevents all automated tools from accessing premium content, regardless of authentication.',
+        '',
+        '✅ Alternative solutions:',
+        '  • Watch directly on YouTube (where you have member access)',
+        '  • Use screen recording software (OBS, QuickTime, etc.) while watching',
+        '  • Use browser extensions that support authenticated downloads',
+        '  • Contact the channel owner about providing alternative access',
+        '',
+        '💡 This is a YouTube platform limitation, not an issue with your membership or authentication.'
       ];
     case 'PRIVATE':
       return [
@@ -522,6 +524,50 @@ export const downloadYoutubeVideo = async (req: Request, res: Response) => {
       error: userMessage,
       category: error.category || 'UNKNOWN',
       suggestions: getSuggestionsForError(error.category, !!req.session?.userId)
+    });
+  }
+};
+
+// Check if a video can be downloaded (pre-flight check)
+export const checkYoutubeVideoAccess = async (req: Request, res: Response) => {
+  try {
+    const { youtubeUrl } = req.body;
+
+    if (!youtubeUrl) {
+      return res.status(400).json({ message: 'YouTube URL is required' });
+    }
+
+    const videoId = extractYouTubeId(youtubeUrl);
+    if (!videoId) {
+      return res.status(400).json({ message: 'Invalid YouTube URL' });
+    }
+
+    // Check for members-only content
+    const membersCheck = await checkForMembersOnlyContent(youtubeUrl);
+
+    if (membersCheck.isMembersOnly) {
+      return res.status(403).json({
+        canDownload: false,
+        reason: 'MEMBERS_ONLY',
+        message: '🔒 This video is members-only content and cannot be downloaded automatically.',
+        suggestions: getSuggestionsForError('MEMBERS_ONLY', !!req.session?.userId),
+        detectedIndicator: membersCheck.reason
+      });
+    }
+
+    return res.status(200).json({
+      canDownload: true,
+      message: 'Video appears to be accessible for download',
+      videoId
+    });
+
+  } catch (error: any) {
+    console.error('Error checking video access:', error);
+    return res.status(500).json({
+      canDownload: false,
+      reason: 'ERROR',
+      message: 'Failed to check video accessibility',
+      error: error.message || 'Unknown error'
     });
   }
 };

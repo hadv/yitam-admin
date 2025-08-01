@@ -528,6 +528,31 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     setVideoId(extractedVideoId);
 
     try {
+      // First, check if the video can be downloaded
+      setDownloadMessage('Checking video accessibility...');
+
+      const accessCheck = await axios.post('/api/youtube/check-access', {
+        youtubeUrl
+      });
+
+      if (!accessCheck.data.canDownload) {
+        // Video cannot be downloaded, show specific error
+        const errorData = accessCheck.data;
+        let errorMessage = errorData.message || 'Video cannot be downloaded';
+
+        if (errorData.suggestions && errorData.suggestions.length > 0) {
+          errorMessage += '\n\n' + errorData.suggestions.join('\n');
+        }
+
+        setError(errorMessage);
+        setIsDownloading(false);
+        setDownloadMessage(null);
+        return;
+      }
+
+      // Video can be downloaded, proceed with download
+      setDownloadMessage('Starting video download...');
+
       // Add socket ID to the request for tracking
       const socketId = socketService.getSocketId();
       console.log('Using socket ID for download tracking:', socketId);
