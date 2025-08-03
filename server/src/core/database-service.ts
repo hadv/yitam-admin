@@ -48,73 +48,44 @@ export class DatabaseService {
     try {
       // Check if collections exist
       const collections = await this.qdrantClient.getCollections();
-
+      
       // Check if the knowledge base collection exists
       const collectionExists = collections.collections?.some(
         (collection) => collection.name === COLLECTION_NAME
       );
-
+      
       if (!collectionExists) {
         console.log(`Creating Qdrant collection: ${COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
-        await this.createCollection();
-      } else {
-        // Collection exists, check if vector dimensions match
-        await this.validateCollectionSchema();
+        
+        // Create knowledge base collection
+        await this.qdrantClient.createCollection(COLLECTION_NAME, {
+          vectors: {
+            size: VECTOR_SIZE,
+            distance: 'Cosine'
+          }
+        });
+        
+        // Create relevant payload indices for knowledge base
+        await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
+          field_name: 'documentName',
+          field_schema: 'keyword'
+        });
+        
+        await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
+          field_name: 'title',
+          field_schema: 'keyword'
+        });
+        
+        await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
+          field_name: 'domains',
+          field_schema: 'keyword'
+        });
       }
-
+      
       this.fallbackService.resetWarningFlag('initialize');
       console.log('Qdrant initialized successfully');
     } catch (error) {
       this.fallbackService.handleError('initialize', error);
-    }
-  }
-
-  // Create a new collection with current configuration
-  private async createCollection(): Promise<void> {
-    // Create knowledge base collection
-    await this.qdrantClient.createCollection(COLLECTION_NAME, {
-      vectors: {
-        size: VECTOR_SIZE,
-        distance: 'Cosine'
-      }
-    });
-
-    // Create relevant payload indices for knowledge base
-    await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-      field_name: 'documentName',
-      field_schema: 'keyword'
-    });
-
-    await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-      field_name: 'title',
-      field_schema: 'keyword'
-    });
-
-    await this.qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-      field_name: 'domains',
-      field_schema: 'keyword'
-    });
-  }
-
-  // Validate that existing collection schema matches current configuration
-  private async validateCollectionSchema(): Promise<void> {
-    try {
-      const collectionInfo = await this.qdrantClient.getCollection(COLLECTION_NAME);
-      const existingVectorSize = collectionInfo.config?.params?.vectors?.size;
-
-      if (existingVectorSize && existingVectorSize !== VECTOR_SIZE) {
-        console.warn(`⚠️  Vector dimension mismatch detected!`);
-        console.warn(`   Existing collection: ${existingVectorSize} dimensions`);
-        console.warn(`   Current configuration: ${VECTOR_SIZE} dimensions`);
-        console.warn(`   This may cause compatibility issues with new embeddings.`);
-        console.warn(`   Consider running a migration to update the collection.`);
-        console.warn(`   Use the migration endpoint: POST /api/migrate/collection`);
-      } else {
-        console.log(`✅ Collection schema validation passed (${VECTOR_SIZE} dimensions)`);
-      }
-    } catch (error) {
-      console.error('Error validating collection schema:', error);
-      // Don't throw here - let the service continue with fallback if needed
     }
   }
   
