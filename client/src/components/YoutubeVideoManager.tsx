@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import axios from '@/utils/axiosConfig';
-import { FiYoutube, FiSearch, FiLoader, FiAlertCircle, FiPlay } from 'react-icons/fi';
+import { FiYoutube, FiSearch, FiLoader, FiAlertCircle, FiPlay, FiVideo } from 'react-icons/fi';
 import { YoutubeVideoInfo, YoutubeVideoChunk } from '@/types/youtube';
 import YoutubeChunkViewer from './YoutubeChunkViewer';
+import VideoPlayerModal from './VideoPlayerModal';
 
 const YoutubeVideoManager = () => {
   const [videoId, setVideoId] = useState('');
@@ -10,6 +11,8 @@ const YoutubeVideoManager = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedChunk, setSelectedChunk] = useState<YoutubeVideoChunk | null>(null);
+  const [downloadedVideo, setDownloadedVideo] = useState<any | null>(null);
+  const [isPlayerOpen, setIsPlayerOpen] = useState(false);
 
   // Extract video ID from YouTube URL or use direct video ID
   const extractVideoId = (input: string): string => {
@@ -54,7 +57,10 @@ const YoutubeVideoManager = () => {
     try {
       const response = await axios.get(`/api/youtube/chunks/${extractedVideoId}`);
       setVideoInfo(response.data);
-      
+
+      // Also check for downloaded video
+      await checkForDownloadedVideo(extractedVideoId);
+
       if (response.data.chunks.length === 0) {
         setError('No chunks found for this video. Make sure the video has been processed first.');
       }
@@ -65,6 +71,9 @@ const YoutubeVideoManager = () => {
       } else {
         setError(err.response?.data?.message || 'Failed to load video chunks');
       }
+
+      // Still check for downloaded video even if chunks failed
+      await checkForDownloadedVideo(extractedVideoId);
     } finally {
       setLoading(false);
     }
@@ -76,6 +85,54 @@ const YoutubeVideoManager = () => {
 
   const handleCloseChunkViewer = () => {
     setSelectedChunk(null);
+  };
+
+  const checkForDownloadedVideo = async (videoId: string) => {
+    try {
+      const response = await axios.get('/api/youtube/downloads');
+      const videos = response.data.videos || [];
+
+      // Find video that starts with the video ID
+      const foundVideo = videos.find((video: any) =>
+        video.fileName.startsWith(`${videoId}_`)
+      );
+
+      setDownloadedVideo(foundVideo || null);
+    } catch (err) {
+      console.error('Error checking for downloaded video:', err);
+      setDownloadedVideo(null);
+    }
+  };
+
+  const openVideoPlayer = () => {
+    if (downloadedVideo) {
+      setIsPlayerOpen(true);
+    }
+  };
+
+  const closeVideoPlayer = () => {
+    setIsPlayerOpen(false);
+  };
+
+  const getVideoInfo = () => {
+    if (!downloadedVideo || !videoInfo) return null;
+
+    // Extract title from filename by removing video ID and extension
+    const title = downloadedVideo.fileName
+      .replace(/^[a-zA-Z0-9_-]{11}_/, '') // Remove video ID prefix
+      .replace(/\.[^/.]+$/, '') // Remove file extension
+      .replace(/_/g, ' '); // Replace underscores with spaces
+
+    return {
+      fileName: downloadedVideo.fileName,
+      title: title || downloadedVideo.fileName,
+      description: undefined,
+      duration: undefined,
+      author: undefined,
+      uploadDate: undefined,
+      viewCount: undefined,
+      thumbnail: undefined
+    };
   };
 
   return (
@@ -152,15 +209,29 @@ const YoutubeVideoManager = () => {
                   <p className="text-sm text-gray-600">Total Chunks: {videoInfo.totalChunks}</p>
                   <p className="text-sm text-gray-600">Domains: {videoInfo.domains.join(', ')}</p>
                 </div>
-                <a
-                  href={`https://www.youtube.com/watch?v=${videoInfo.videoId}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                >
-                  <FiPlay className="mr-2 h-4 w-4" />
-                  Watch Video
-                </a>
+                <div className="flex space-x-2">
+                  {/* Local Video Player Button */}
+                  {downloadedVideo && (
+                    <button
+                      onClick={openVideoPlayer}
+                      className="inline-flex items-center px-3 py-2 border border-transparent shadow-sm text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                    >
+                      <FiVideo className="mr-2 h-4 w-4" />
+                      Play Local
+                    </button>
+                  )}
+
+                  {/* YouTube Link */}
+                  <a
+                    href={`https://www.youtube.com/watch?v=${videoInfo.videoId}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                  >
+                    <FiPlay className="mr-2 h-4 w-4" />
+                    Watch on YouTube
+                  </a>
+                </div>
               </div>
             </div>
 
@@ -204,6 +275,15 @@ const YoutubeVideoManager = () => {
         <YoutubeChunkViewer
           chunk={selectedChunk}
           onClose={handleCloseChunkViewer}
+        />
+      )}
+
+      {/* Video Player Modal */}
+      {downloadedVideo && (
+        <VideoPlayerModal
+          video={getVideoInfo()!}
+          onClose={closeVideoPlayer}
+          isOpen={isPlayerOpen}
         />
       )}
     </div>
