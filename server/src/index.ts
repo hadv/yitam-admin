@@ -9,6 +9,7 @@ import { Server } from 'socket.io';
 import documentRoutes from './routes/document';
 import youtubeRoutes from './routes/youtube';
 import authRoutes from './routes/auth';
+import fileManagerRoutes from './routes/file-manager';
 import { DatabaseService } from './core/database-service';
 
 // Load environment variables
@@ -167,6 +168,7 @@ dbService.initialize().then(() => {
   app.use('/api/documents', documentRoutes);
   app.use('/api/youtube', youtubeRoutes);
   app.use('/api/auth', authRoutes);
+  app.use('/api/files', fileManagerRoutes);
 
   // Serve static files in production
   if (process.env.NODE_ENV === 'production') {
