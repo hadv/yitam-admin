@@ -61,13 +61,18 @@ async function checkStatus(migrationService: MigrationService) {
 async function runMigration(migrationService: MigrationService, args: string[]) {
   const preserveData = !args.includes('--no-preserve-data');
   const dryRun = args.includes('--dry-run');
+  const forceReEmbed = args.includes('--force-re-embed');
   const batchSizeArg = args.find(arg => arg.startsWith('--batch-size='));
   const batchSize = batchSizeArg ? parseInt(batchSizeArg.split('=')[1]) : 50;
+  const newCollectionArg = args.find(arg => arg.startsWith('--new-collection='));
+  const newCollectionName = newCollectionArg ? newCollectionArg.split('=')[1] : undefined;
 
   console.log('🚀 Starting migration...\n');
   console.log('📋 Migration Configuration:');
   console.log('─'.repeat(40));
   console.log(`Preserve data: ${preserveData ? '✅ YES' : '❌ NO'}`);
+  console.log(`Force re-embed: ${forceReEmbed ? '✅ YES' : '❌ NO'}`);
+  console.log(`New collection: ${newCollectionName || 'None (replace existing)'}`);
   console.log(`Dry run: ${dryRun ? '✅ YES' : '❌ NO'}`);
   console.log(`Batch size: ${batchSize}`);
   console.log('─'.repeat(40));
@@ -81,7 +86,9 @@ async function runMigration(migrationService: MigrationService, args: string[]) 
   const result = await migrationService.migrateCollection({
     preserveData,
     dryRun,
-    batchSize
+    batchSize,
+    forceReEmbed,
+    newCollectionName
   });
 
   console.log('\n📊 Migration Result:');
@@ -168,12 +175,18 @@ function showHelp() {
   console.log('  --dry-run                  Perform dry run without changes');
   console.log('  --preserve-data            Re-embed existing data (default)');
   console.log('  --no-preserve-data         Delete existing data (faster)');
+  console.log('  --force-re-embed           Force re-embedding even if dimensions match');
+  console.log('  --new-collection=NAME      Create new collection instead of replacing existing');
   console.log('  --batch-size=N             Set batch size for processing (default: 50)\n');
   
   console.log('Examples:');
   console.log('  npm run migrate status');
   console.log('  npm run migrate migrate --dry-run');
   console.log('  npm run migrate migrate --preserve-data --batch-size=25');
+  console.log('  npm run migrate migrate --force-re-embed --dry-run');
+  console.log('  npm run migrate migrate --force-re-embed --preserve-data');
+  console.log('  npm run migrate migrate -- --force-re-embed --new-collection=yitam_new');
+  console.log('  npm run migrate migrate -- --force-re-embed --new-collection=yitam_gemini --dry-run');
   console.log('  npm run migrate migrate --no-preserve-data');
   console.log('  npm run migrate rollback knowledge_base_backup_1234567890\n');
   

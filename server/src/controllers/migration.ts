@@ -5,13 +5,34 @@ import { MigrationService, MigrationOptions } from '../services/migration';
 const migrationService = new MigrationService();
 
 /**
+ * Get collection information
+ * GET /api/migrate/info
+ */
+export const getCollectionInfo = async (req: Request, res: Response) => {
+  try {
+    const info = await migrationService.getCollectionInfo();
+
+    res.status(200).json({
+      ...info,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error getting collection info:', error);
+    res.status(500).json({
+      error: 'Failed to get collection info',
+      details: String(error)
+    });
+  }
+};
+
+/**
  * Check if migration is needed
  * GET /api/migrate/status
  */
 export const checkMigrationStatus = async (req: Request, res: Response) => {
   try {
     const status = await migrationService.checkMigrationNeeded();
-    
+
     res.status(200).json({
       migrationNeeded: status.needed,
       currentVectorSize: status.currentSize,
@@ -21,7 +42,7 @@ export const checkMigrationStatus = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error checking migration status:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to check migration status',
       details: String(error)
     });
@@ -37,6 +58,8 @@ export const checkMigrationStatus = async (req: Request, res: Response) => {
  * - batchSize: number (default: 50) - Batch size for processing documents
  * - backupCollectionName: string (optional) - Custom backup collection name
  * - dryRun: boolean (default: false) - Perform a dry run without actual changes
+ * - forceReEmbed: boolean (default: false) - Force re-embedding even if dimensions match
+ * - newCollectionName: string (optional) - Create new collection instead of replacing existing
  */
 export const migrateCollection = async (req: Request, res: Response) => {
   try {
@@ -44,7 +67,9 @@ export const migrateCollection = async (req: Request, res: Response) => {
       preserveData: req.body.preserveData !== false, // Default to true
       batchSize: parseInt(req.body.batchSize) || 50,
       backupCollectionName: req.body.backupCollectionName,
-      dryRun: req.body.dryRun === true
+      dryRun: req.body.dryRun === true,
+      forceReEmbed: req.body.forceReEmbed === true,
+      newCollectionName: req.body.newCollectionName
     };
 
     console.log('🚀 Migration request received with options:', options);
@@ -91,9 +116,52 @@ export const migrateCollection = async (req: Request, res: Response) => {
 };
 
 /**
+ * Create manual backup of current collection
+ * POST /api/migrate/backup
+ *
+ * Body parameters:
+ * - backupCollectionName: string (optional) - Custom backup collection name
+ */
+export const createManualBackup = async (req: Request, res: Response) => {
+  try {
+    const { backupCollectionName } = req.body;
+
+    console.log(`📋 Manual backup request received${backupCollectionName ? ` for: ${backupCollectionName}` : ''}`);
+
+    const result = await migrationService.createManualBackup(backupCollectionName);
+
+    if (result.success) {
+      res.status(200).json({
+        success: true,
+        message: result.message,
+        details: {
+          backupCollectionName: result.backupCollectionName,
+          documentsBackedUp: result.documentsBackedUp,
+          timestamp: new Date().toISOString()
+        }
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: result.message,
+        timestamp: new Date().toISOString()
+      });
+    }
+  } catch (error) {
+    console.error('Manual backup failed with unexpected error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Manual backup failed with unexpected error',
+      details: String(error),
+      timestamp: new Date().toISOString()
+    });
+  }
+};
+
+/**
  * Rollback migration from backup
  * POST /api/migrate/rollback
- * 
+ *
  * Body parameters:
  * - backupCollectionName: string (required) - Name of the backup collection to restore from
  */
@@ -202,20 +270,42 @@ export const getMigrationHelp = async (req: Request, res: Response) => {
 };
 
 /**
+ * List all collections including backups
+ * GET /api/migrate/collections
+ */
+export const listAllCollections = async (req: Request, res: Response) => {
+  try {
+    const collections = await migrationService.listAllCollections();
+
+    res.status(200).json({
+      collections,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error listing collections:', error);
+    res.status(500).json({
+      error: 'Failed to list collections',
+      details: String(error)
+    });
+  }
+};
+
+/**
  * List available backup collections
  * GET /api/migrate/backups
  */
 export const listBackupCollections = async (req: Request, res: Response) => {
   try {
-    // This would require access to Qdrant client, so we'll implement it in the migration service
-    // For now, return a placeholder response
+    const collections = await migrationService.listAllCollections();
+    const backups = collections.filter(c => c.isBackup);
+
     res.status(200).json({
-      message: "Backup listing functionality will be implemented in migration service",
-      note: "Backup collections follow the pattern: {collection_name}_backup_{timestamp}"
+      backups,
+      timestamp: new Date().toISOString()
     });
   } catch (error) {
     console.error('Error listing backup collections:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to list backup collections',
       details: String(error)
     });
