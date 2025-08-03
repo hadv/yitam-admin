@@ -4,11 +4,12 @@ import YoutubeUpload from '@components/YoutubeUpload'
 import YoutubeDelete from '@components/YoutubeDelete'
 import YoutubeVideoManager from '@components/YoutubeVideoManager'
 import FileBrowser from '@components/FileBrowser'
+import VideoStreamingDemo from '@components/VideoStreamingDemo'
 
 function App() {
   const [uploadSuccess, setUploadSuccess] = useState<boolean>(false)
   const [deleteSuccess, setDeleteSuccess] = useState<boolean>(false)
-  const [activeTab, setActiveTab] = useState<'document' | 'youtube' | 'youtube-manage' | 'files'>('document')
+  const [activeTab, setActiveTab] = useState<'document' | 'youtube' | 'youtube-manage' | 'files' | 'video-streaming'>('document')
 
   const handleUploadSuccess = () => {
     setUploadSuccess(true)
@@ -87,6 +88,16 @@ function App() {
                 >
                   Server Files
                 </button>
+                <button
+                  onClick={() => setActiveTab('video-streaming')}
+                  className={`pb-4 px-1 border-b-2 font-medium text-sm ${
+                    activeTab === 'video-streaming'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
+                >
+                  Video Streaming
+                </button>
               </nav>
             </div>
             
@@ -112,6 +123,11 @@ function App() {
               <div>
                 <h2 className="text-xl font-semibold mb-4">Manage YouTube Videos</h2>
                 <YoutubeVideoManager />
+              </div>
+            ) : activeTab === 'video-streaming' ? (
+              <div>
+                <h2 className="text-xl font-semibold mb-4">Video Streaming</h2>
+                <VideoStreamingDemo />
               </div>
             ) : (
               <div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { FiDownload, FiTrash2, FiPlay, FiExternalLink } from 'react-icons/fi';
+import VideoPlayerModal from './VideoPlayerModal';
 
 interface DownloadedVideo {
   fileName: string;
@@ -14,6 +15,8 @@ const DownloadedVideos = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [selectedVideo, setSelectedVideo] = useState<DownloadedVideo | null>(null);
+  const [isPlayerOpen, setIsPlayerOpen] = useState(false);
 
   // Load downloaded videos on component mount
   useEffect(() => {
@@ -88,6 +91,35 @@ const DownloadedVideos = () => {
     return match ? match[1] : null;
   };
 
+  const openVideoPlayer = (video: DownloadedVideo) => {
+    setSelectedVideo(video);
+    setIsPlayerOpen(true);
+  };
+
+  const closeVideoPlayer = () => {
+    setSelectedVideo(null);
+    setIsPlayerOpen(false);
+  };
+
+  const getVideoInfo = (video: DownloadedVideo) => {
+    // Extract title from filename by removing video ID and extension
+    const title = video.fileName
+      .replace(/^[a-zA-Z0-9_-]{11}_/, '') // Remove video ID prefix
+      .replace(/\.[^/.]+$/, '') // Remove file extension
+      .replace(/_/g, ' '); // Replace underscores with spaces
+
+    return {
+      fileName: video.fileName,
+      title: title || video.fileName,
+      description: undefined,
+      duration: undefined,
+      author: undefined,
+      uploadDate: undefined,
+      viewCount: undefined,
+      thumbnail: undefined
+    };
+  };
+
   const getVideoTitle = (fileName: string): string => {
     // Extract title from filename (format: videoId_title.ext)
     const match = fileName.match(/^[a-zA-Z0-9_-]{11}_(.+)\.[^.]+$/);
@@ -156,15 +188,23 @@ const DownloadedVideos = () => {
                   </div>
                   
                   <div className="flex items-center space-x-2 ml-4">
-                    {/* Play/Download button */}
-                    <a
-                      href={`/api/youtube/downloads/${video.fileName}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    {/* Play button */}
+                    <button
+                      onClick={() => openVideoPlayer(video)}
                       className="inline-flex items-center p-2 border border-transparent rounded-md text-blue-600 hover:bg-blue-50"
-                      title="Play/Download video"
+                      title="Play video"
                     >
                       <FiPlay className="h-4 w-4" />
+                    </button>
+
+                    {/* Download button */}
+                    <a
+                      href={`/api/youtube/downloads/${video.fileName}`}
+                      download
+                      className="inline-flex items-center p-2 border border-transparent rounded-md text-green-600 hover:bg-green-50"
+                      title="Download video"
+                    >
+                      <FiDownload className="h-4 w-4" />
                     </a>
                     
                     {/* YouTube link */}
@@ -199,6 +239,15 @@ const DownloadedVideos = () => {
             );
           })}
         </div>
+      )}
+
+      {/* Video Player Modal */}
+      {selectedVideo && (
+        <VideoPlayerModal
+          video={getVideoInfo(selectedVideo)}
+          onClose={closeVideoPlayer}
+          isOpen={isPlayerOpen}
+        />
       )}
     </div>
   );
