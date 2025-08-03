@@ -36,8 +36,9 @@ lerna-debug.log*
 *.sln
 *.sw?
 
-# Uploads
+# Uploads and Downloads
 uploads/
+server/downloads/
 
 # Qdrant storage
 qdrant_storage/
