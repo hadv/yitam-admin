@@ -18,6 +18,13 @@ GOOGLE_REDIRECT_URI=http://localhost:3001/api/auth/google/callback
 
 ### 2. Google Cloud Console Setup
 
+**Nếu đã có YouTube API setup (như project hiện tại):**
+1. Truy cập [Google Cloud Console](https://console.cloud.google.com/)
+2. Chọn project hiện tại (cùng project với YouTube API)
+3. Vào **APIs & Services** → **Library**
+4. Tìm "Google Drive API" và click **Enable**
+
+**Nếu setup từ đầu:**
 1. Truy cập [Google Cloud Console](https://console.cloud.google.com/)
 2. Tạo hoặc chọn một project
 3. Bật Google Drive API và YouTube Data API v3
