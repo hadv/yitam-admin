@@ -62,6 +62,7 @@ const FileBrowser = () => {
     const accessToken = urlParams.get('access_token');
     const userId = urlParams.get('user_id');
     const authError = urlParams.get('auth_error');
+    const tabParam = urlParams.get('tab');
 
     if (authError) {
       console.error('Authentication error:', authError);
@@ -79,6 +80,16 @@ const FileBrowser = () => {
       window.history.replaceState({}, document.title, newUrl);
 
       console.log('Google authentication successful, token stored');
+
+      // Show success message
+      setError(null);
+      // You could add a success state here if needed
+    }
+
+    // If tab=files in URL, notify parent to switch to files tab
+    if (tabParam === 'files') {
+      // This component is already the Files tab, so just show a success message
+      console.log('Redirected to Files tab after authentication');
     }
   }, []);
 

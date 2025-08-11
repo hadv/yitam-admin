@@ -28,9 +28,10 @@ class GoogleDriveService {
   async syncFiles(request: SyncRequest): Promise<SyncResult> {
     try {
       const response = await axios.post('/api/google-drive/sync', request, {
-        headers: this.getAuthHeaders()
+        headers: this.getAuthHeaders(),
+        timeout: 3600000 // 1 hour for large file sync
       });
-      
+
       return response.data.result;
     } catch (error) {
       console.error('Error syncing files to Google Drive:', error);

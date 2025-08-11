@@ -84,7 +84,8 @@ export const handleGoogleCallback = async (req: Request, res: Response) => {
       ? returnUrl
       : 'http://localhost:5173';
 
-    const redirectUrl = `${frontendUrl}?access_token=${encodeURIComponent(tokens.access_token)}&user_id=${encodeURIComponent(userId)}`;
+    // Redirect to Files tab after auth for Google Drive sync
+    const redirectUrl = `${frontendUrl}?access_token=${encodeURIComponent(tokens.access_token)}&user_id=${encodeURIComponent(userId)}&tab=files`;
 
     console.log('Redirecting to:', redirectUrl);
     res.redirect(redirectUrl);

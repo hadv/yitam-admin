@@ -183,9 +183,15 @@ dbService.initialize().then(() => {
     });
   }
 
+  // Set server timeout for large file operations
+  httpServer.timeout = 3600000; // 1 hour
+  httpServer.keepAliveTimeout = 3600000; // 1 hour
+  httpServer.headersTimeout = 3610000; // Slightly more than keepAliveTimeout
+
   // Start server
   httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`Server timeout set to ${httpServer.timeout}ms for large file operations`);
   });
 }).catch(error => {
   console.error('Failed to initialize database service:', error);
