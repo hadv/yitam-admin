@@ -95,8 +95,8 @@ export const createDriveFolder = async (
       name: folder.name!,
       createdTime: folder.createdTime!,
       modifiedTime: folder.modifiedTime!,
-      webViewLink: folder.webViewLink,
-      parents: folder.parents
+      webViewLink: folder.webViewLink || undefined,
+      parents: folder.parents || undefined
     };
   } catch (error) {
     console.error('Error creating Drive folder:', error);
@@ -135,8 +135,8 @@ export const findOrCreateFolder = async (
         name: folder.name!,
         createdTime: folder.createdTime!,
         modifiedTime: folder.modifiedTime!,
-        webViewLink: folder.webViewLink,
-        parents: folder.parents
+        webViewLink: folder.webViewLink || undefined,
+        parents: folder.parents || undefined
       };
     }
 
@@ -192,12 +192,12 @@ export const uploadFileToDrive = async (
       id: file.id!,
       name: file.name!,
       mimeType: file.mimeType!,
-      size: file.size,
+      size: file.size || undefined,
       createdTime: file.createdTime!,
       modifiedTime: file.modifiedTime!,
-      webViewLink: file.webViewLink,
-      webContentLink: file.webContentLink,
-      parents: file.parents
+      webViewLink: file.webViewLink || undefined,
+      webContentLink: file.webContentLink || undefined,
+      parents: file.parents || undefined
     };
   } catch (error) {
     console.error('Error uploading file to Drive:', error);
@@ -234,12 +234,12 @@ export const checkFileExists = async (
         id: file.id!,
         name: file.name!,
         mimeType: file.mimeType!,
-        size: file.size,
+        size: file.size || undefined,
         createdTime: file.createdTime!,
         modifiedTime: file.modifiedTime!,
-        webViewLink: file.webViewLink,
-        webContentLink: file.webContentLink,
-        parents: file.parents
+        webViewLink: file.webViewLink || undefined,
+        webContentLink: file.webContentLink || undefined,
+        parents: file.parents || undefined
       };
     }
 
