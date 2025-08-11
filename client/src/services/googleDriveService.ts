@@ -159,6 +159,15 @@ class GoogleDriveService {
     // Redirect directly to the auth endpoint which will redirect to Google
     window.location.href = '/api/auth/google';
   }
+
+  /**
+   * Sign out from Google Drive
+   */
+  signOut(): void {
+    // Clear stored token
+    this.clearAccessToken();
+    console.log('Signed out from Google Drive');
+  }
 }
 
 // Export singleton instance

@@ -17,7 +17,8 @@ import {
   FiChevronUp,
   FiCloud,
   FiUpload,
-  FiX
+  FiX,
+  FiLogOut
 } from 'react-icons/fi';
 import {
   ServerFile,
@@ -50,10 +51,13 @@ const FileBrowser = () => {
   const [folderName, setFolderName] = useState('');
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [selectedDirectory, setSelectedDirectory] = useState<'uploads' | 'downloads'>('uploads');
+  const [isGoogleAuthenticated, setIsGoogleAuthenticated] = useState(false);
 
   // Load files on component mount and when filters change
   useEffect(() => {
     loadFiles();
+    // Check Google auth status
+    setIsGoogleAuthenticated(googleDriveService.isAuthenticated());
   }, []);
 
   // Check for access token in URL (from OAuth callback)
@@ -74,6 +78,9 @@ const FileBrowser = () => {
     } else if (accessToken && userId) {
       // Store the access token
       googleDriveService.setAccessToken(accessToken);
+
+      // Update auth state
+      setIsGoogleAuthenticated(true);
 
       // Clean up URL
       const newUrl = window.location.pathname;
@@ -283,6 +290,14 @@ const FileBrowser = () => {
     setSelectedDirectory('uploads');
   };
 
+  const handleSignOut = () => {
+    if (confirm('Are you sure you want to sign out from Google Drive?')) {
+      googleDriveService.signOut();
+      setIsGoogleAuthenticated(false);
+      console.log('Signed out from Google Drive');
+    }
+  };
+
   return (
     <div className="max-w-7xl mx-auto p-6">
       <div className="bg-white rounded-lg shadow-lg">
@@ -302,6 +317,18 @@ const FileBrowser = () => {
                 <FiCloud className="mr-2 h-4 w-4" />
                 Sync to Google Drive
               </button>
+
+              {/* Show signout button if authenticated */}
+              {isGoogleAuthenticated && (
+                <button
+                  onClick={handleSignOut}
+                  className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50"
+                  title="Sign out from Google Drive"
+                >
+                  <FiLogOut className="h-4 w-4" />
+                </button>
+              )}
+
               <button
                 onClick={loadFiles}
                 disabled={loading}
