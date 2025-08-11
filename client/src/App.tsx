@@ -15,19 +15,6 @@ function App() {
   // Check if this is the auth callback route
   const isAuthCallback = window.location.pathname === '/auth/callback'
 
-  // Check for tab parameter in URL and auto-switch
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const tabParam = urlParams.get('tab');
-
-    if (tabParam === 'files') {
-      setActiveTab('files');
-      // Clean up URL
-      const newUrl = window.location.pathname;
-      window.history.replaceState({}, document.title, newUrl);
-    }
-  }, []);
-
   // If it's auth callback, render the callback component
   if (isAuthCallback) {
     return <AuthCallback />
