@@ -51,13 +51,10 @@ const FileBrowser = () => {
   const [folderName, setFolderName] = useState('');
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [selectedDirectory, setSelectedDirectory] = useState<'uploads' | 'downloads'>('uploads');
-  const [isGoogleAuthenticated, setIsGoogleAuthenticated] = useState(false);
 
   // Load files on component mount and when filters change
   useEffect(() => {
     loadFiles();
-    // Check Google auth status
-    setIsGoogleAuthenticated(googleDriveService.isAuthenticated());
   }, []);
 
   // Check for access token in URL (from OAuth callback)
@@ -79,23 +76,14 @@ const FileBrowser = () => {
       // Store the access token
       googleDriveService.setAccessToken(accessToken);
 
-      // Update auth state immediately
-      setIsGoogleAuthenticated(true);
-
       // Clean up URL
       const newUrl = window.location.pathname;
       window.history.replaceState({}, document.title, newUrl);
 
       console.log('Google authentication successful, token stored');
-      console.log('Auth state updated to:', true);
 
       // Show success message
       setError(null);
-
-      // Force re-render by updating a dummy state
-      setTimeout(() => {
-        setIsGoogleAuthenticated(googleDriveService.isAuthenticated());
-      }, 100);
     }
 
     // If tab=files in URL, notify parent to switch to files tab
@@ -304,8 +292,9 @@ const FileBrowser = () => {
 
   const handleSignOut = () => {
     googleDriveService.signOut();
-    setIsGoogleAuthenticated(false);
     console.log('Signed out from Google Drive');
+    // Force page reload to reset all state
+    window.location.reload();
   };
 
   return (
@@ -329,7 +318,7 @@ const FileBrowser = () => {
               </button>
 
               {/* Show signout button if authenticated */}
-              {(isGoogleAuthenticated || googleDriveService.isAuthenticated()) && (
+              {googleDriveService.isAuthenticated() && (
                 <button
                   onClick={handleSignOut}
                   className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50"
