@@ -61,8 +61,16 @@ const FileBrowser = () => {
     const urlParams = new URLSearchParams(window.location.search);
     const accessToken = urlParams.get('access_token');
     const userId = urlParams.get('user_id');
+    const authError = urlParams.get('auth_error');
 
-    if (accessToken && userId) {
+    if (authError) {
+      console.error('Authentication error:', authError);
+      setError(`Authentication failed: ${authError}`);
+
+      // Clean up URL
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, document.title, newUrl);
+    } else if (accessToken && userId) {
       // Store the access token
       googleDriveService.setAccessToken(accessToken);
 

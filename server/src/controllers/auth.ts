@@ -85,18 +85,21 @@ export const handleGoogleCallback = async (req: Request, res: Response) => {
     res.redirect(redirectUrl);
   } catch (error) {
     console.error('Error handling Google callback:', error);
-    
+
     // More detailed error logging
     if (error instanceof Error) {
       console.error('Error name:', error.name);
       console.error('Error message:', error.message);
       console.error('Error stack:', error.stack);
     }
-    
-    res.status(500).json({ 
-      error: 'Failed to complete Google authentication', 
-      details: error instanceof Error ? error.message : 'Unknown error' 
-    });
+
+    // For debugging, also log the full error object
+    console.error('Full error object:', JSON.stringify(error, null, 2));
+
+    // Redirect to frontend with error instead of JSON response
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const redirectUrl = `/?auth_error=${encodeURIComponent(errorMessage)}`;
+    res.redirect(redirectUrl);
   }
 };
 

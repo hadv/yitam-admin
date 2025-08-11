@@ -53,15 +53,35 @@ export const getDriveClient = async (userId: string) => {
  * Get authenticated Google Drive client using access token
  */
 export const getDriveClientWithToken = async (accessToken: string) => {
-  const oauth2Client = await getClientWithAccessToken(accessToken);
-  if (!oauth2Client) {
-    throw new Error('Invalid access token');
+  try {
+    console.log('Creating Drive client with access token...');
+    const oauth2Client = await getClientWithAccessToken(accessToken);
+    if (!oauth2Client) {
+      throw new Error('Invalid access token');
+    }
+
+    const drive = google.drive({
+      version: 'v3',
+      auth: oauth2Client
+    });
+
+    // Test the connection by making a simple API call
+    console.log('Testing Drive API connection...');
+    await drive.about.get({ fields: 'user' });
+    console.log('Drive API connection successful');
+
+    return drive;
+  } catch (error) {
+    console.error('Error creating Drive client:', error);
+    if (error instanceof Error) {
+      console.error('Error details:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
+    }
+    throw error;
   }
-  
-  return google.drive({
-    version: 'v3',
-    auth: oauth2Client
-  });
 };
 
 /**
