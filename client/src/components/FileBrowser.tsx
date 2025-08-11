@@ -56,6 +56,24 @@ const FileBrowser = () => {
     loadFiles();
   }, []);
 
+  // Check for access token in URL (from OAuth callback)
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const accessToken = urlParams.get('access_token');
+    const userId = urlParams.get('user_id');
+
+    if (accessToken && userId) {
+      // Store the access token
+      googleDriveService.setAccessToken(accessToken);
+
+      // Clean up URL
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, document.title, newUrl);
+
+      console.log('Google authentication successful, token stored');
+    }
+  }, []);
+
   const loadFiles = async () => {
     try {
       setLoading(true);

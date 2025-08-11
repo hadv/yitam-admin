@@ -73,12 +73,16 @@ export const handleGoogleCallback = async (req: Request, res: Response) => {
     // Store user info in session
     req.session.userId = userId;
     req.session.authenticated = true;
-    
+
     // Get return URL from session or use default
     const returnUrl = req.session.returnUrl || '/';
     delete req.session.returnUrl;
-    
-    res.redirect(returnUrl);
+
+    // For Google Drive sync, redirect with access token
+    // Frontend will capture this and store in localStorage
+    const redirectUrl = `${returnUrl}?access_token=${encodeURIComponent(tokens.access_token)}&user_id=${encodeURIComponent(userId)}`;
+
+    res.redirect(redirectUrl);
   } catch (error) {
     console.error('Error handling Google callback:', error);
     

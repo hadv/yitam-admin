@@ -154,18 +154,9 @@ class GoogleDriveService {
   /**
    * Redirect to Google OAuth for authentication
    */
-  async authenticate(): Promise<void> {
-    try {
-      // Get the auth URL from the server
-      const response = await axios.get('/api/auth/google');
-      const authUrl = response.data.authUrl;
-      
-      // Redirect to Google OAuth
-      window.location.href = authUrl;
-    } catch (error) {
-      console.error('Error getting Google auth URL:', error);
-      throw new Error('Failed to initiate Google authentication');
-    }
+  authenticate(): void {
+    // Redirect directly to the auth endpoint which will redirect to Google
+    window.location.href = '/api/auth/google';
   }
 }
 
