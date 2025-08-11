@@ -79,7 +79,7 @@ const FileBrowser = () => {
       // Store the access token
       googleDriveService.setAccessToken(accessToken);
 
-      // Update auth state
+      // Update auth state immediately
       setIsGoogleAuthenticated(true);
 
       // Clean up URL
@@ -87,10 +87,15 @@ const FileBrowser = () => {
       window.history.replaceState({}, document.title, newUrl);
 
       console.log('Google authentication successful, token stored');
+      console.log('Auth state updated to:', true);
 
       // Show success message
       setError(null);
-      // You could add a success state here if needed
+
+      // Force re-render by updating a dummy state
+      setTimeout(() => {
+        setIsGoogleAuthenticated(googleDriveService.isAuthenticated());
+      }, 100);
     }
 
     // If tab=files in URL, notify parent to switch to files tab
@@ -253,6 +258,7 @@ const FileBrowser = () => {
     console.log('Is authenticated:', googleDriveService.isAuthenticated());
     console.log('Token:', googleDriveService.getAccessToken());
 
+    // Always check real-time auth status, not state
     if (!googleDriveService.isAuthenticated()) {
       console.log('Not authenticated, redirecting to Google OAuth...');
       // Redirect to Google OAuth
@@ -323,7 +329,7 @@ const FileBrowser = () => {
               </button>
 
               {/* Show signout button if authenticated */}
-              {isGoogleAuthenticated && (
+              {(isGoogleAuthenticated || googleDriveService.isAuthenticated()) && (
                 <button
                   onClick={handleSignOut}
                   className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50"

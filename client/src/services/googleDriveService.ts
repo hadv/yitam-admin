@@ -128,6 +128,7 @@ class GoogleDriveService {
    */
   isAuthenticated(): boolean {
     const token = localStorage.getItem('googleAccessToken');
+    console.log('Checking auth status:', { token: token ? 'exists' : 'null', authenticated: !!token });
     return !!token;
   }
 
