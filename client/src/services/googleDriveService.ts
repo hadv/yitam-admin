@@ -156,6 +156,8 @@ class GoogleDriveService {
    * Redirect to Google OAuth for authentication
    */
   authenticate(): void {
+    console.log('Authenticating with Google...');
+    console.log('Redirecting to:', '/api/auth/google');
     // Redirect directly to the auth endpoint which will redirect to Google
     window.location.href = '/api/auth/google';
   }

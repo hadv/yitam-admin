@@ -249,11 +249,17 @@ const FileBrowser = () => {
 
   // Google Drive sync functions
   const handleSyncToGoogleDrive = () => {
+    console.log('Sync button clicked');
+    console.log('Is authenticated:', googleDriveService.isAuthenticated());
+    console.log('Token:', googleDriveService.getAccessToken());
+
     if (!googleDriveService.isAuthenticated()) {
+      console.log('Not authenticated, redirecting to Google OAuth...');
       // Redirect to Google OAuth
       googleDriveService.authenticate();
       return;
     }
+    console.log('Already authenticated, opening sync modal...');
     setShowSyncModal(true);
   };
 
