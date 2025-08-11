@@ -127,8 +127,14 @@ class GoogleDriveService {
    * Check if user is authenticated with Google
    */
   isAuthenticated(): boolean {
-    const token = localStorage.getItem('googleAccessToken');
-    console.log('Checking auth status:', { token: token ? 'exists' : 'null', authenticated: !!token });
+    const localToken = localStorage.getItem('googleAccessToken');
+    const sessionToken = sessionStorage.getItem('googleAccessToken');
+    const token = localToken || sessionToken;
+    console.log('Checking auth status:', {
+      localToken: localToken ? 'exists' : 'null',
+      sessionToken: sessionToken ? 'exists' : 'null',
+      authenticated: !!token
+    });
     return !!token;
   }
 
@@ -136,7 +142,7 @@ class GoogleDriveService {
    * Get stored access token
    */
   getAccessToken(): string | null {
-    return localStorage.getItem('googleAccessToken');
+    return localStorage.getItem('googleAccessToken') || sessionStorage.getItem('googleAccessToken');
   }
 
   /**
@@ -144,6 +150,8 @@ class GoogleDriveService {
    */
   setAccessToken(token: string): void {
     localStorage.setItem('googleAccessToken', token);
+    sessionStorage.setItem('googleAccessToken', token);
+    console.log('Token stored in both localStorage and sessionStorage');
   }
 
   /**
@@ -151,6 +159,8 @@ class GoogleDriveService {
    */
   clearAccessToken(): void {
     localStorage.removeItem('googleAccessToken');
+    sessionStorage.removeItem('googleAccessToken');
+    console.log('Token cleared from both storages');
   }
 
   /**
