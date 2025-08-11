@@ -78,24 +78,16 @@ export const handleGoogleCallback = async (req: Request, res: Response) => {
     const returnUrl = req.session.returnUrl || '/';
     delete req.session.returnUrl;
 
-    // Check if this is from frontend SPA (has /auth/callback in referrer)
-    const referrer = req.get('Referrer') || '';
-    const isSPA = referrer.includes('localhost:5173') || req.headers['x-requested-with'] === 'XMLHttpRequest';
+    // Always redirect to frontend with token for now
+    // Frontend will capture this and store in localStorage
+    const frontendUrl = process.env.NODE_ENV === 'production'
+      ? returnUrl
+      : 'http://localhost:5173';
 
-    if (isSPA) {
-      // Return JSON for SPA
-      res.json({
-        success: true,
-        access_token: tokens.access_token,
-        user_id: userId,
-        redirect_url: returnUrl
-      });
-    } else {
-      // For Google Drive sync, redirect with access token
-      // Frontend will capture this and store in localStorage
-      const redirectUrl = `${returnUrl}?access_token=${encodeURIComponent(tokens.access_token)}&user_id=${encodeURIComponent(userId)}`;
-      res.redirect(redirectUrl);
-    }
+    const redirectUrl = `${frontendUrl}?access_token=${encodeURIComponent(tokens.access_token)}&user_id=${encodeURIComponent(userId)}`;
+
+    console.log('Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
   } catch (error) {
     console.error('Error handling Google callback:', error);
 
