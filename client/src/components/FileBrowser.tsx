@@ -291,11 +291,9 @@ const FileBrowser = () => {
   };
 
   const handleSignOut = () => {
-    if (confirm('Are you sure you want to sign out from Google Drive?')) {
-      googleDriveService.signOut();
-      setIsGoogleAuthenticated(false);
-      console.log('Signed out from Google Drive');
-    }
+    googleDriveService.signOut();
+    setIsGoogleAuthenticated(false);
+    console.log('Signed out from Google Drive');
   };
 
   return (
