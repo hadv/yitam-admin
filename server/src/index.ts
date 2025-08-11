@@ -11,6 +11,7 @@ import youtubeRoutes from './routes/youtube';
 import authRoutes from './routes/auth';
 import fileManagerRoutes from './routes/file-manager';
 import migrationRoutes from './routes/migration';
+import googleDriveRoutes from './routes/google-drive';
 import { DatabaseService } from './core/database-service';
 
 // Load environment variables
@@ -171,6 +172,7 @@ dbService.initialize().then(() => {
   app.use('/api/auth', authRoutes);
   app.use('/api/files', fileManagerRoutes);
   app.use('/api/migrate', migrationRoutes);
+  app.use('/api/google-drive', googleDriveRoutes);
 
   // Serve static files in production
   if (process.env.NODE_ENV === 'production') {
