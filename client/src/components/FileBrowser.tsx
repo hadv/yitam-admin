@@ -14,7 +14,11 @@ import {
   FiHardDrive,
   FiBarChart,
   FiChevronDown,
-  FiChevronUp
+  FiChevronUp,
+  FiCloud,
+  FiUpload,
+  FiX,
+  FiLogOut
 } from 'react-icons/fi';
 import {
   ServerFile,
@@ -24,6 +28,8 @@ import {
   SortField,
   SortDirection
 } from '@/types/file-manager';
+import { SyncResult } from '@/types/google-drive';
+import googleDriveService from '@/services/googleDriveService';
 
 const FileBrowser = () => {
   const [files, setFiles] = useState<ServerFile[]>([]);
@@ -38,9 +44,53 @@ const FileBrowser = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
 
+  // Google Drive sync state
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [folderName, setFolderName] = useState('');
+  const [overwriteExisting, setOverwriteExisting] = useState(false);
+  const [selectedDirectory, setSelectedDirectory] = useState<'uploads' | 'downloads'>('uploads');
+  const [authRefresh, setAuthRefresh] = useState(0); // Force re-render trigger
+
   // Load files on component mount and when filters change
   useEffect(() => {
     loadFiles();
+  }, []);
+
+  // Check for access token in URL (from OAuth callback)
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const accessToken = urlParams.get('access_token');
+    const userId = urlParams.get('user_id');
+    const authError = urlParams.get('auth_error');
+
+
+    if (authError) {
+      console.error('Authentication error:', authError);
+      setError(`Authentication failed: ${authError}`);
+
+      // Clean up URL
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, document.title, newUrl);
+    } else if (accessToken && userId) {
+      // Store the access token
+      googleDriveService.setAccessToken(accessToken);
+
+      // Clean up URL
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, document.title, newUrl);
+
+      console.log('Google authentication successful, token stored');
+
+      // Force component re-render to update auth state
+      setAuthRefresh(prev => prev + 1);
+
+      // Show success message
+      setError(null);
+    }
+
+    // Auth callback completed
   }, []);
 
   const loadFiles = async () => {
@@ -190,6 +240,64 @@ const FileBrowser = () => {
     );
   };
 
+  // Google Drive sync functions
+  const handleSyncToGoogleDrive = () => {
+    console.log('Sync button clicked');
+    console.log('Auth refresh counter:', authRefresh);
+    console.log('Is authenticated:', googleDriveService.isAuthenticated());
+    console.log('Token exists:', !!googleDriveService.getAccessToken());
+
+    // Always check real-time auth status, not state
+    if (!googleDriveService.isAuthenticated()) {
+      console.log('Not authenticated, redirecting to Google OAuth...');
+      // Redirect to Google OAuth
+      googleDriveService.authenticate();
+      return;
+    }
+    console.log('Already authenticated, opening sync modal...');
+    setShowSyncModal(true);
+  };
+
+  const handleSyncSubmit = async () => {
+    if (!folderName.trim()) {
+      alert('Please enter a folder name');
+      return;
+    }
+
+    setSyncLoading(true);
+    setSyncResult(null);
+
+    try {
+      const result = await googleDriveService.syncFiles({
+        directoryType: selectedDirectory,
+        folderName: folderName.trim(),
+        overwriteExisting
+      });
+
+      setSyncResult(result);
+    } catch (error) {
+      console.error('Sync error:', error);
+      alert(error instanceof Error ? error.message : 'Failed to sync files');
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const closeSyncModal = () => {
+    setShowSyncModal(false);
+    setSyncResult(null);
+    setFolderName('');
+    setOverwriteExisting(false);
+    setSelectedDirectory('uploads');
+  };
+
+  const handleSignOut = () => {
+    googleDriveService.signOut();
+    console.log('Signed out from Google Drive');
+    // Force component re-render to update auth state
+    setAuthRefresh(prev => prev + 1);
+  };
+
   return (
     <div className="max-w-7xl mx-auto p-6">
       <div className="bg-white rounded-lg shadow-lg">
@@ -200,14 +308,36 @@ const FileBrowser = () => {
               <FiHardDrive className="mr-3 text-blue-600" />
               Server Files
             </h1>
-            <button
-              onClick={loadFiles}
-              disabled={loading}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
-            >
-              <FiRefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
+            <div className="flex space-x-3">
+              <button
+                onClick={handleSyncToGoogleDrive}
+                disabled={loading || syncLoading}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+              >
+                <FiCloud className="mr-2 h-4 w-4" />
+                Sync to Google Drive
+              </button>
+
+              {/* Show signout button if authenticated */}
+              {googleDriveService.isAuthenticated() && (
+                <button
+                  onClick={handleSignOut}
+                  className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50"
+                  title="Sign out from Google Drive"
+                >
+                  <FiLogOut className="h-4 w-4" />
+                </button>
+              )}
+
+              <button
+                onClick={loadFiles}
+                disabled={loading}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+              >
+                <FiRefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
           </div>
 
           {/* Statistics */}
@@ -471,6 +601,155 @@ const FileBrowser = () => {
           </div>
         )}
       </div>
+
+      {/* Google Drive Sync Modal */}
+      {showSyncModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900 flex items-center">
+                  <FiCloud className="mr-2 text-green-600" />
+                  Sync to Google Drive
+                </h3>
+                <button
+                  onClick={closeSyncModal}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <FiX className="h-5 w-5" />
+                </button>
+              </div>
+
+              {!syncResult ? (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Directory to sync
+                    </label>
+                    <select
+                      value={selectedDirectory}
+                      onChange={(e) => setSelectedDirectory(e.target.value as 'uploads' | 'downloads')}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+                    >
+                      <option value="uploads">Uploads</option>
+                      <option value="downloads">Downloads</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Google Drive folder name
+                    </label>
+                    <input
+                      type="text"
+                      value={folderName}
+                      onChange={(e) => setFolderName(e.target.value)}
+                      placeholder="Enter folder name"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center">
+                    <input
+                      type="checkbox"
+                      id="overwrite"
+                      checked={overwriteExisting}
+                      onChange={(e) => setOverwriteExisting(e.target.checked)}
+                      className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
+                    />
+                    <label htmlFor="overwrite" className="ml-2 block text-sm text-gray-700">
+                      Overwrite existing files
+                    </label>
+                  </div>
+
+                  <div className="flex justify-end space-x-3 pt-4">
+                    <button
+                      onClick={closeSyncModal}
+                      className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSyncSubmit}
+                      disabled={syncLoading || !folderName.trim()}
+                      className="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-md flex items-center"
+                    >
+                      {syncLoading ? (
+                        <>
+                          <FiRefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                          Syncing...
+                        </>
+                      ) : (
+                        <>
+                          <FiUpload className="mr-2 h-4 w-4" />
+                          Start Sync
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className={`p-4 rounded-md ${syncResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
+                    <h4 className={`font-medium ${syncResult.success ? 'text-green-800' : 'text-red-800'}`}>
+                      {syncResult.success ? 'Sync Completed!' : 'Sync Completed with Errors'}
+                    </h4>
+                    <p className={`text-sm mt-1 ${syncResult.success ? 'text-green-700' : 'text-red-700'}`}>
+                      Folder: {syncResult.folderName}
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-4 text-center">
+                    <div className="bg-green-50 p-3 rounded-md">
+                      <div className="text-2xl font-bold text-green-600">{syncResult.summary.uploaded}</div>
+                      <div className="text-sm text-green-700">Uploaded</div>
+                    </div>
+                    <div className="bg-yellow-50 p-3 rounded-md">
+                      <div className="text-2xl font-bold text-yellow-600">{syncResult.summary.skipped}</div>
+                      <div className="text-sm text-yellow-700">Skipped</div>
+                    </div>
+                    <div className="bg-red-50 p-3 rounded-md">
+                      <div className="text-2xl font-bold text-red-600">{syncResult.summary.failed}</div>
+                      <div className="text-sm text-red-700">Failed</div>
+                    </div>
+                  </div>
+
+                  {syncResult.uploadedFiles.length > 0 && (
+                    <div>
+                      <h5 className="font-medium text-gray-900 mb-2">Uploaded Files:</h5>
+                      <div className="max-h-32 overflow-y-auto bg-gray-50 p-2 rounded text-sm">
+                        {syncResult.uploadedFiles.map((file, index) => (
+                          <div key={index} className="text-green-700">✓ {file}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {syncResult.errors.length > 0 && (
+                    <div>
+                      <h5 className="font-medium text-gray-900 mb-2">Errors:</h5>
+                      <div className="max-h-32 overflow-y-auto bg-red-50 p-2 rounded text-sm">
+                        {syncResult.errors.map((error, index) => (
+                          <div key={index} className="text-red-700">✗ {error}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end pt-4">
+                    <button
+                      onClick={closeSyncModal}
+                      className="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

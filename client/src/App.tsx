@@ -1,15 +1,24 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import DocumentUpload from '@components/DocumentUpload'
 import YoutubeUpload from '@components/YoutubeUpload'
 import YoutubeDelete from '@components/YoutubeDelete'
 import YoutubeVideoManager from '@components/YoutubeVideoManager'
 import FileBrowser from '@components/FileBrowser'
 import VideoStreamingDemo from '@components/VideoStreamingDemo'
+import AuthCallback from '@components/AuthCallback'
 
 function App() {
   const [uploadSuccess, setUploadSuccess] = useState<boolean>(false)
   const [deleteSuccess, setDeleteSuccess] = useState<boolean>(false)
   const [activeTab, setActiveTab] = useState<'document' | 'youtube' | 'youtube-manage' | 'files' | 'video-streaming'>('document')
+
+  // Check if this is the auth callback route
+  const isAuthCallback = window.location.pathname === '/auth/callback'
+
+  // If it's auth callback, render the callback component
+  if (isAuthCallback) {
+    return <AuthCallback />
+  }
 
   const handleUploadSuccess = () => {
     setUploadSuccess(true)

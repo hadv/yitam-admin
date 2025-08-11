@@ -11,6 +11,7 @@ import youtubeRoutes from './routes/youtube';
 import authRoutes from './routes/auth';
 import fileManagerRoutes from './routes/file-manager';
 import migrationRoutes from './routes/migration';
+import googleDriveRoutes from './routes/google-drive';
 import { DatabaseService } from './core/database-service';
 
 // Load environment variables
@@ -171,6 +172,7 @@ dbService.initialize().then(() => {
   app.use('/api/auth', authRoutes);
   app.use('/api/files', fileManagerRoutes);
   app.use('/api/migrate', migrationRoutes);
+  app.use('/api/google-drive', googleDriveRoutes);
 
   // Serve static files in production
   if (process.env.NODE_ENV === 'production') {
@@ -181,9 +183,15 @@ dbService.initialize().then(() => {
     });
   }
 
+  // Set server timeout for large file operations
+  httpServer.timeout = 3600000; // 1 hour
+  httpServer.keepAliveTimeout = 3600000; // 1 hour
+  httpServer.headersTimeout = 3610000; // Slightly more than keepAliveTimeout
+
   // Start server
   httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`Server timeout set to ${httpServer.timeout}ms for large file operations`);
   });
 }).catch(error => {
   console.error('Failed to initialize database service:', error);

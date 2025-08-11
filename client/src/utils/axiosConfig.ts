@@ -1,7 +1,7 @@
 import axios from 'axios';
 
-// Increase timeout for long-running operations like web scraping
-axios.defaults.timeout = 300000; // 5 minutes for web scraping operations
+// Increase timeout for long-running operations like web scraping and Google Drive sync
+axios.defaults.timeout = 1800000; // 30 minutes for large file operations
 
 // Request interceptor
 axios.interceptors.request.use(config => {
@@ -36,7 +36,11 @@ axios.interceptors.response.use(response => {
     
     // Check if this might be a timeout
     if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-      error.customMessage = 'The request timed out. YouTube transcript extraction can take longer for some videos. Please try again or try with a shorter video.';
+      if (error.config?.url?.includes('google-drive')) {
+        error.customMessage = 'Google Drive sync timed out. This can happen with large files. Please try syncing smaller batches or check your internet connection.';
+      } else {
+        error.customMessage = 'The request timed out. YouTube transcript extraction can take longer for some videos. Please try again or try with a shorter video.';
+      }
       error.isTimeout = true;
     } else {
       error.customMessage = 'Network connection error. The server may be unavailable or your internet connection is disrupted.';

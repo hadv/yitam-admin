@@ -10,10 +10,14 @@ const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/api/auth/google/callback';
 
-// Scopes required for YouTube captions
+// Scopes required for YouTube captions and Google Drive
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.force-ssl',
-  'https://www.googleapis.com/auth/youtube.readonly'
+  'https://www.googleapis.com/auth/youtube.readonly',
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+  'https://www.googleapis.com/auth/userinfo.profile',
+  'https://www.googleapis.com/auth/userinfo.email'
 ];
 
 // In-memory token storage (replace with database in production)
@@ -101,17 +105,25 @@ export const exchangeCodeForTokens = async (code: string): Promise<{ tokens: Tok
  * Gets user information from Google
  */
 const getUserInfo = async (oauth2Client: OAuth2Client) => {
-  const oauth2 = google.oauth2({
-    auth: oauth2Client,
-    version: 'v2'
-  });
-  
-  const { data } = await oauth2.userinfo.get();
-  return {
-    id: data.id || 'unknown',
-    email: data.email,
-    name: data.name
-  };
+  try {
+    console.log('Getting user info from Google...');
+    const oauth2 = google.oauth2({
+      auth: oauth2Client,
+      version: 'v2'
+    });
+
+    const { data } = await oauth2.userinfo.get();
+    console.log('User info retrieved:', { id: data.id, email: data.email, name: data.name });
+
+    return {
+      id: data.id || 'unknown',
+      email: data.email,
+      name: data.name
+    };
+  } catch (error) {
+    console.error('Error getting user info:', error);
+    throw new Error(`Failed to get user info: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 };
 
 /**

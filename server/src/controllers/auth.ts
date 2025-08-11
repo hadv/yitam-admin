@@ -73,26 +73,38 @@ export const handleGoogleCallback = async (req: Request, res: Response) => {
     // Store user info in session
     req.session.userId = userId;
     req.session.authenticated = true;
-    
+
     // Get return URL from session or use default
     const returnUrl = req.session.returnUrl || '/';
     delete req.session.returnUrl;
-    
-    res.redirect(returnUrl);
+
+    // Always redirect to frontend with token for now
+    // Frontend will capture this and store in localStorage
+    const frontendUrl = process.env.NODE_ENV === 'production'
+      ? returnUrl
+      : 'http://localhost:5173';
+
+    const redirectUrl = `${frontendUrl}?access_token=${encodeURIComponent(tokens.access_token)}&user_id=${encodeURIComponent(userId)}`;
+
+    console.log('Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
   } catch (error) {
     console.error('Error handling Google callback:', error);
-    
+
     // More detailed error logging
     if (error instanceof Error) {
       console.error('Error name:', error.name);
       console.error('Error message:', error.message);
       console.error('Error stack:', error.stack);
     }
-    
-    res.status(500).json({ 
-      error: 'Failed to complete Google authentication', 
-      details: error instanceof Error ? error.message : 'Unknown error' 
-    });
+
+    // For debugging, also log the full error object
+    console.error('Full error object:', JSON.stringify(error, null, 2));
+
+    // Redirect to frontend with error instead of JSON response
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const redirectUrl = `/?auth_error=${encodeURIComponent(errorMessage)}`;
+    res.redirect(redirectUrl);
   }
 };
 
