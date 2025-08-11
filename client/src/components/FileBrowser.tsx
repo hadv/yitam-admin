@@ -51,6 +51,7 @@ const FileBrowser = () => {
   const [folderName, setFolderName] = useState('');
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [selectedDirectory, setSelectedDirectory] = useState<'uploads' | 'downloads'>('uploads');
+  const [authRefresh, setAuthRefresh] = useState(0); // Force re-render trigger
 
   // Load files on component mount and when filters change
   useEffect(() => {
@@ -81,6 +82,9 @@ const FileBrowser = () => {
       window.history.replaceState({}, document.title, newUrl);
 
       console.log('Google authentication successful, token stored');
+
+      // Force component re-render to update auth state
+      setAuthRefresh(prev => prev + 1);
 
       // Show success message
       setError(null);
@@ -243,8 +247,9 @@ const FileBrowser = () => {
   // Google Drive sync functions
   const handleSyncToGoogleDrive = () => {
     console.log('Sync button clicked');
+    console.log('Auth refresh counter:', authRefresh);
     console.log('Is authenticated:', googleDriveService.isAuthenticated());
-    console.log('Token:', googleDriveService.getAccessToken());
+    console.log('Token exists:', !!googleDriveService.getAccessToken());
 
     // Always check real-time auth status, not state
     if (!googleDriveService.isAuthenticated()) {
@@ -293,8 +298,8 @@ const FileBrowser = () => {
   const handleSignOut = () => {
     googleDriveService.signOut();
     console.log('Signed out from Google Drive');
-    // Force page reload to reset all state
-    window.location.reload();
+    // Force component re-render to update auth state
+    setAuthRefresh(prev => prev + 1);
   };
 
   return (
