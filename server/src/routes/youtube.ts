@@ -10,7 +10,13 @@ import {
   getYoutubeVideoInfo,
   getDownloadedVideosList,
   deleteDownloadedVideoFile,
-  serveDownloadedVideo
+  serveDownloadedVideo,
+  checkYtDlpStatus,
+  downloadYoutubeVideoWithYtDlp,
+  getYoutubeVideoInfoWithYtDlp,
+  uploadCookiesFile,
+  getCookiesFilesList,
+  deleteCookiesFileController
 } from '../controllers/youtube';
 import { getJobStatus } from '../services/job-queue';
 import { getScrapingMetrics, resetScrapingMetrics } from '../services/youtube-transcript';
@@ -110,5 +116,27 @@ router.get('/downloads/:fileName', serveDownloadedVideo);
 
 // Route for deleting downloaded video files
 router.delete('/downloads/:fileName', deleteDownloadedVideoFile);
+
+// yt-dlp routes for member-only content
+
+// Route for checking yt-dlp installation status
+router.get('/yt-dlp/status', checkYtDlpStatus);
+
+// Route for downloading YouTube video with yt-dlp (member-only support)
+router.post('/yt-dlp/download', downloadYoutubeVideoWithYtDlp);
+
+// Route for getting video information with yt-dlp (member-only support)
+router.post('/yt-dlp/info', getYoutubeVideoInfoWithYtDlp);
+
+// Cookies management routes
+
+// Route for uploading browser cookies file
+router.post('/cookies/upload', uploadCookiesFile);
+
+// Route for getting list of cookies files
+router.get('/cookies', getCookiesFilesList);
+
+// Route for deleting cookies file
+router.delete('/cookies/:fileName', deleteCookiesFileController);
 
 export default router;

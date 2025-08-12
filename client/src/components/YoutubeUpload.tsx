@@ -4,6 +4,7 @@ import { FiYoutube } from 'react-icons/fi';
 import { availableDomains } from '../constants/domains';
 import { socketService } from '../services/socketService';
 import { ProgressStage, ProgressUpdate } from '../types/progress';
+import YtDlpDownloader from './YtDlpDownloader';
 
 // Extend AxiosError with our custom properties
 interface CustomAxiosError extends AxiosError {
@@ -65,7 +66,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
   const [downloadResult, setDownloadResult] = useState<any>(null);
-  const [actionMode, setActionMode] = useState<'transcript' | 'download'>('transcript');
+  const [actionMode, setActionMode] = useState<'transcript' | 'download' | 'yt-dlp'>('transcript');
 
   // Initialize socket connection on component mount
   useEffect(() => {
@@ -806,7 +807,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Action
             </label>
-            <div className="flex space-x-4">
+            <div className="flex flex-wrap gap-4">
               <div className="flex items-center">
                 <input
                   id="transcript-mode"
@@ -835,9 +836,23 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
                   Download Video
                 </label>
               </div>
+              <div className="flex items-center">
+                <input
+                  id="yt-dlp-mode"
+                  name="action-mode"
+                  type="radio"
+                  className="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300"
+                  checked={actionMode === 'yt-dlp'}
+                  onChange={() => setActionMode('yt-dlp')}
+                  disabled={isProcessing || isDownloading}
+                />
+                <label htmlFor="yt-dlp-mode" className="ml-2 block text-sm text-gray-700">
+                  yt-dlp Download (Member-Only)
+                </label>
+              </div>
             </div>
             <p className="mt-1 text-xs text-gray-500">
-              Choose whether to extract transcript for processing or download the video file
+              Choose whether to extract transcript, download with standard method, or use yt-dlp for member-only videos
             </p>
           </div>
 
@@ -874,31 +889,45 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             </div>
           )}
 
-          <div className="flex justify-end space-x-3">
-            {actionMode === 'transcript' ? (
-              <button
-                type="submit"
-                className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
-                  isProcessing || isDownloading ? 'opacity-50 cursor-not-allowed' : ''
-                }`}
-                disabled={isProcessing || isDownloading}
-              >
-                {isProcessing ? 'Processing...' : 'Process Transcript'}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleDownload}
-                className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${
-                  isDownloading || isProcessing ? 'opacity-50 cursor-not-allowed' : ''
-                }`}
-                disabled={isDownloading || isProcessing}
-              >
-                {isDownloading ? 'Downloading...' : 'Download Video'}
-              </button>
-            )}
-          </div>
+          {/* Show different content based on action mode */}
+          {actionMode === 'yt-dlp' ? (
+            <div className="mt-6">
+              {/* Close the form here and show YtDlpDownloader */}
+            </div>
+          ) : (
+            <div className="flex justify-end space-x-3">
+              {actionMode === 'transcript' ? (
+                <button
+                  type="submit"
+                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
+                    isProcessing || isDownloading ? 'opacity-50 cursor-not-allowed' : ''
+                  }`}
+                  disabled={isProcessing || isDownloading}
+                >
+                  {isProcessing ? 'Processing...' : 'Process Transcript'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleDownload}
+                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${
+                    isDownloading || isProcessing ? 'opacity-50 cursor-not-allowed' : ''
+                  }`}
+                  disabled={isDownloading || isProcessing}
+                >
+                  {isDownloading ? 'Downloading...' : 'Download Video'}
+                </button>
+              )}
+            </div>
+          )}
         </form>
+
+        {/* yt-dlp Downloader Component */}
+        {actionMode === 'yt-dlp' && (
+          <div className="mt-6">
+            <YtDlpDownloader onUploadSuccess={onUploadSuccess} />
+          </div>
+        )}
         
         {/* Processing spinner */}
         {renderProcessingState()}
