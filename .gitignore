@@ -44,4 +44,9 @@ server/downloads/
 qdrant_storage/
 
 # Data directories
-/server/data/ 
+/server/data/
+
+# yt-dlp related directories
+downloads/
+cookies/
+temp/

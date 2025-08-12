@@ -12,10 +12,36 @@ import {
   getVideoFilePath,
   DownloadOptions
 } from '../services/youtube-downloader';
+import {
+  checkYtDlpInstallation,
+  downloadVideoWithYtDlp,
+  getYtDlpVideoInfo,
+  saveCookiesFile,
+  listCookiesFiles,
+  deleteCookiesFile,
+  YtDlpDownloadOptions
+} from '../services/yt-dlp-downloader';
 import path from 'path';
+import multer from 'multer';
 
 // Create a singleton instance of the database service
 const dbService = new DatabaseService();
+
+// Configure multer for cookies file upload
+const cookiesUpload = multer({
+  dest: 'temp/',
+  fileFilter: (req, file, cb) => {
+    // Accept only .txt files for cookies
+    if (file.mimetype === 'text/plain' || file.originalname.endsWith('.txt')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .txt files are allowed for cookies'));
+    }
+  },
+  limits: {
+    fileSize: 1024 * 1024 // 1MB limit for cookies file
+  }
+});
 
 // Process YouTube video URL, extract transcript, and store in vector DB
 export const processYoutubeVideo = async (req: Request, res: Response) => {
@@ -538,6 +564,240 @@ export const serveDownloadedVideo = async (req: Request, res: Response) => {
     console.error('Error serving video file:', error);
     return res.status(500).json({
       message: 'Failed to serve video file',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// yt-dlp related controllers
+
+// Check if yt-dlp is installed
+export const checkYtDlpStatus = async (req: Request, res: Response) => {
+  try {
+    const isInstalled = await checkYtDlpInstallation();
+
+    return res.status(200).json({
+      installed: isInstalled,
+      message: isInstalled ? 'yt-dlp is available' : 'yt-dlp is not installed'
+    });
+  } catch (error: any) {
+    console.error('Error checking yt-dlp status:', error);
+    return res.status(500).json({
+      installed: false,
+      message: 'Failed to check yt-dlp status',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Download YouTube video using yt-dlp (for member-only content)
+export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response) => {
+  try {
+    const { youtubeUrl, options = {}, cookiesFileName } = req.body;
+    const socketId = req.body.socketId;
+
+    if (!youtubeUrl) {
+      return res.status(400).json({ message: 'YouTube URL is required' });
+    }
+
+    const videoId = extractYouTubeId(youtubeUrl);
+    if (!videoId) {
+      return res.status(400).json({ message: 'Invalid YouTube URL' });
+    }
+
+    // Check if yt-dlp is installed
+    const isInstalled = await checkYtDlpInstallation();
+    if (!isInstalled) {
+      return res.status(400).json({
+        message: 'yt-dlp is not installed. Please install yt-dlp to download member-only videos.'
+      });
+    }
+
+    console.log(`Starting yt-dlp video download for: ${youtubeUrl}`);
+
+    // Initialize progress tracking if socket ID provided
+    if (socketId) {
+      progressTracker.initializeProgressTracking(videoId, socketId);
+      progressTracker.updateTranscriptFetch(videoId, 'Starting yt-dlp video download...', 0);
+    }
+
+    // Prepare download options
+    const ytDlpOptions: YtDlpDownloadOptions = {
+      quality: options.quality || 'best[ext=mp4]/best',
+      format: options.format,
+      audioOnly: options.audioOnly,
+      extractAudio: options.extractAudio,
+      audioFormat: options.audioFormat,
+      cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined
+    };
+
+    // Download the video with progress callback
+    const result = await downloadVideoWithYtDlp(youtubeUrl, ytDlpOptions, (progress) => {
+      console.log(`🔄 yt-dlp progress callback received:`, progress);
+      if (socketId) {
+        console.log(`📡 Sending progress update via socket for video ${videoId}`);
+        progressTracker.updateTranscriptFetch(
+          videoId,
+          `Downloading: ${progress.progress.toFixed(1)}% - Speed: ${progress.speed} - ETA: ${progress.eta}`,
+          progress.progress
+        );
+      } else {
+        console.log('⚠️ No socketId available for progress tracking');
+      }
+    });
+
+    // Complete progress tracking
+    if (socketId) {
+      progressTracker.updateTranscriptFetch(videoId, 'Download completed successfully!', 100);
+      progressTracker.completeProcessing(videoId, 1);
+    }
+
+    console.log(`yt-dlp video download completed: ${result.filePath}`);
+
+    return res.status(200).json({
+      message: 'Video downloaded successfully with yt-dlp',
+      videoId,
+      filePath: result.filePath,
+      fileName: path.basename(result.filePath),
+      videoInfo: result.videoInfo
+    });
+
+  } catch (error: any) {
+    console.error('Error downloading YouTube video with yt-dlp:', error);
+
+    const videoId = extractYouTubeId(req.body.youtubeUrl);
+    if (videoId && req.body.socketId) {
+      progressTracker.reportError(videoId, 'yt-dlp download failed', error.message);
+    }
+
+    return res.status(500).json({
+      message: 'Failed to download video with yt-dlp',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Get video information using yt-dlp
+export const getYoutubeVideoInfoWithYtDlp = async (req: Request, res: Response) => {
+  try {
+    const { youtubeUrl, cookiesFileName } = req.body;
+
+    if (!youtubeUrl) {
+      return res.status(400).json({ message: 'YouTube URL is required' });
+    }
+
+    // Check if yt-dlp is installed
+    const isInstalled = await checkYtDlpInstallation();
+    if (!isInstalled) {
+      return res.status(400).json({
+        message: 'yt-dlp is not installed. Please install yt-dlp to get member-only video information.'
+      });
+    }
+
+    const cookiesFile = cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined;
+    const videoInfo = await getYtDlpVideoInfo(youtubeUrl, cookiesFile);
+
+    return res.status(200).json({
+      message: 'Video information retrieved successfully with yt-dlp',
+      videoInfo
+    });
+
+  } catch (error: any) {
+    console.error('Error getting video info with yt-dlp:', error);
+    return res.status(500).json({
+      message: 'Failed to get video information with yt-dlp',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Upload browser cookies file
+export const uploadCookiesFile = [
+  cookiesUpload.single('cookiesFile'),
+  async (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: 'No cookies file uploaded' });
+      }
+
+      const tempPath = req.file.path;
+      const originalName = req.file.originalname;
+
+      // Read the uploaded file
+      const fs = require('fs');
+      const cookiesContent = fs.readFileSync(tempPath, 'utf8');
+
+      // Save to cookies directory
+      const savedPath = await saveCookiesFile(cookiesContent, originalName);
+
+      // Clean up temp file
+      fs.unlinkSync(tempPath);
+
+      return res.status(200).json({
+        message: 'Cookies file uploaded successfully',
+        fileName: originalName,
+        path: savedPath
+      });
+
+    } catch (error: any) {
+      console.error('Error uploading cookies file:', error);
+
+      // Clean up temp file if it exists
+      if (req.file?.path) {
+        try {
+          require('fs').unlinkSync(req.file.path);
+        } catch (cleanupError) {
+          console.error('Error cleaning up temp file:', cleanupError);
+        }
+      }
+
+      return res.status(500).json({
+        message: 'Failed to upload cookies file',
+        error: error.message || 'Unknown error'
+      });
+    }
+  }
+];
+
+// List available cookies files
+export const getCookiesFilesList = async (req: Request, res: Response) => {
+  try {
+    const cookiesFiles = listCookiesFiles();
+
+    return res.status(200).json({
+      message: `Found ${cookiesFiles.length} cookies files`,
+      files: cookiesFiles
+    });
+
+  } catch (error: any) {
+    console.error('Error getting cookies files list:', error);
+    return res.status(500).json({
+      message: 'Failed to get cookies files list',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Delete cookies file
+export const deleteCookiesFileController = async (req: Request, res: Response) => {
+  try {
+    const { fileName } = req.params;
+
+    if (!fileName) {
+      return res.status(400).json({ message: 'File name is required' });
+    }
+
+    await deleteCookiesFile(fileName);
+
+    return res.status(200).json({
+      message: 'Cookies file deleted successfully',
+      fileName
+    });
+
+  } catch (error: any) {
+    console.error('Error deleting cookies file:', error);
+    return res.status(500).json({
+      message: 'Failed to delete cookies file',
       error: error.message || 'Unknown error'
     });
   }
