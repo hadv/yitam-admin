@@ -54,12 +54,20 @@ if (!fs.existsSync(COOKIES_DIR)) {
  */
 export const checkYtDlpInstallation = async (): Promise<boolean> => {
   return new Promise((resolve) => {
-    const ytdlp = spawn('yt-dlp', ['--version']);
-    
+    const ytdlpPath = '/usr/local/bin/yt-dlp';
+    const spawnOptions = {
+      env: {
+        ...process.env,
+        PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin'
+      }
+    };
+
+    const ytdlp = spawn(ytdlpPath, ['--version'], spawnOptions);
+
     ytdlp.on('close', (code) => {
       resolve(code === 0);
     });
-    
+
     ytdlp.on('error', () => {
       resolve(false);
     });
@@ -74,6 +82,8 @@ export const getYtDlpVideoInfo = async (
   cookiesFile?: string
 ): Promise<YtDlpVideoInfo> => {
   return new Promise((resolve, reject) => {
+    console.log('🔍 getYtDlpVideoInfo called with:', { youtubeUrl, cookiesFile });
+
     const videoId = extractYouTubeId(youtubeUrl);
     if (!videoId) {
       reject(new Error('Invalid YouTube URL'));
@@ -83,35 +93,73 @@ export const getYtDlpVideoInfo = async (
     const args = [
       '--dump-json',
       '--no-download',
+      '--no-playlist',
       youtubeUrl
     ];
 
     // Add cookies file if provided
     if (cookiesFile && fs.existsSync(cookiesFile)) {
+      console.log('✅ Cookies file exists, adding to args:', cookiesFile);
       args.push('--cookies', cookiesFile);
+    } else {
+      console.log('❌ Cookies file not found or not provided:', cookiesFile);
     }
 
-    const ytdlp = spawn('yt-dlp', args);
+    console.log('🚀 Spawning yt-dlp with args:', args);
+
+    // Use full path and proper environment
+    const ytdlpPath = '/usr/local/bin/yt-dlp';
+    const spawnOptions = {
+      env: {
+        ...process.env,
+        PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin'
+      },
+      cwd: process.cwd()
+    };
+
+    console.log('🔧 Spawn options:', spawnOptions);
+    const ytdlp = spawn(ytdlpPath, args, spawnOptions);
     let output = '';
     let errorOutput = '';
 
+    // Set a timeout for the process
+    const timeout = setTimeout(() => {
+      console.log('⏰ yt-dlp process timeout, killing...');
+      ytdlp.kill('SIGTERM');
+      reject(new Error('yt-dlp process timed out after 60 seconds'));
+    }, 60000); // 60 second timeout
+
     ytdlp.stdout.on('data', (data) => {
-      output += data.toString();
+      const chunk = data.toString();
+      console.log('📤 yt-dlp stdout:', chunk.substring(0, 200) + '...');
+      output += chunk;
     });
 
     ytdlp.stderr.on('data', (data) => {
-      errorOutput += data.toString();
+      const chunk = data.toString();
+      console.log('📤 yt-dlp stderr:', chunk.substring(0, 200) + '...');
+      errorOutput += chunk;
     });
 
     ytdlp.on('close', (code) => {
+      clearTimeout(timeout);
+      console.log(`🏁 yt-dlp process closed with code: ${code}`);
+
       if (code !== 0) {
+        console.log('❌ yt-dlp failed with error output:', errorOutput);
         reject(new Error(`yt-dlp failed: ${errorOutput}`));
         return;
       }
 
       try {
+        console.log('📋 Parsing yt-dlp output...');
         const info = JSON.parse(output);
-        
+        console.log('✅ Successfully parsed video info:', {
+          id: info.id,
+          title: info.title?.substring(0, 50) + '...',
+          availability: info.availability
+        });
+
         const videoInfo: YtDlpVideoInfo = {
           videoId,
           title: info.title || 'Unknown Title',
@@ -122,7 +170,7 @@ export const getYtDlpVideoInfo = async (
           viewCount: info.view_count || 0,
           uploadDate: info.upload_date || '',
           isLive: info.is_live || false,
-          isMemberOnly: info.availability === 'subscriber_only' || 
+          isMemberOnly: info.availability === 'subscriber_only' ||
                        info.availability === 'premium_only' ||
                        (info.live_status === 'is_upcoming' && info.availability !== 'public'),
           availability: info.availability || 'unknown'
@@ -130,11 +178,14 @@ export const getYtDlpVideoInfo = async (
 
         resolve(videoInfo);
       } catch (error) {
+        console.log('❌ Failed to parse JSON output:', error);
         reject(new Error(`Failed to parse video info: ${error}`));
       }
     });
 
     ytdlp.on('error', (error) => {
+      clearTimeout(timeout);
+      console.log('❌ yt-dlp spawn error:', error);
       reject(new Error(`Failed to spawn yt-dlp: ${error.message}`));
     });
   });
@@ -171,6 +222,7 @@ export const downloadVideoWithYtDlp = async (
       const args = [
         '--newline',
         '--progress',
+        '--no-playlist',
         '-o', outputTemplate,
         youtubeUrl
       ];
@@ -196,7 +248,17 @@ export const downloadVideoWithYtDlp = async (
 
       console.log('Starting yt-dlp download with args:', args);
 
-      const ytdlp = spawn('yt-dlp', args);
+      // Use full path and proper environment
+      const ytdlpPath = '/usr/local/bin/yt-dlp';
+      const spawnOptions = {
+        env: {
+          ...process.env,
+          PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin'
+        },
+        cwd: process.cwd()
+      };
+
+      const ytdlp = spawn(ytdlpPath, args, spawnOptions);
       let finalFilePath = '';
       let errorOutput = '';
 
