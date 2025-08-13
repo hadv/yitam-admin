@@ -681,6 +681,7 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
 export const getYoutubeVideoInfoWithYtDlp = async (req: Request, res: Response) => {
   try {
     const { youtubeUrl, cookiesFileName } = req.body;
+    console.log('🔍 yt-dlp info request received:', { youtubeUrl, cookiesFileName });
 
     if (!youtubeUrl) {
       return res.status(400).json({ message: 'YouTube URL is required' });
