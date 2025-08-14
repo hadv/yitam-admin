@@ -189,7 +189,7 @@ const VideoStreamingDemo: React.FC = () => {
             {/* Inline View */}
             {viewMode === 'inline' && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {videos.slice(0, 4).map((video) => (
+                {videos.map((video) => (
                   <div key={video.fileName} className="space-y-2">
                     <h3 className="text-sm font-medium text-gray-900 truncate">
                       {getVideoInfo(video).title}
@@ -200,6 +200,7 @@ const VideoStreamingDemo: React.FC = () => {
                       width="100%"
                       height="200px"
                       className="rounded-lg"
+                      onBigView={() => openModal(video)}
                     />
                     <p className="text-xs text-gray-500">
                       {formatFileSize(video.size)} • {new Date(video.createdAt).toLocaleDateString()}
@@ -234,17 +235,7 @@ const VideoStreamingDemo: React.FC = () => {
           </div>
         )}
 
-        {/* Full-screen Video Player Example */}
-        {viewMode === 'inline' && videos.length > 0 && (
-          <div className="mt-8">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">Full-screen Player Example</h3>
-            <VideoPlayer
-              src={`/api/youtube/downloads/${videos[0].fileName}`}
-              title={getVideoInfo(videos[0]).title}
-              className="w-full aspect-video rounded-lg"
-            />
-          </div>
-        )}
+
       </div>
 
       {/* Video Player Modal */}

@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiMaximize } from 'react-icons/fi';
+import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiMaximize, FiMonitor } from 'react-icons/fi';
 
 interface InlineVideoPlayerProps {
   src: string;
@@ -13,6 +13,7 @@ interface InlineVideoPlayerProps {
   onTimeUpdate?: (currentTime: number, duration: number) => void;
   onLoadedMetadata?: (duration: number) => void;
   onEnded?: () => void;
+  onBigView?: () => void;
 }
 
 const InlineVideoPlayer: React.FC<InlineVideoPlayerProps> = ({
@@ -26,7 +27,8 @@ const InlineVideoPlayer: React.FC<InlineVideoPlayerProps> = ({
   muted = false,
   onTimeUpdate,
   onLoadedMetadata,
-  onEnded
+  onEnded,
+  onBigView
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -201,6 +203,17 @@ const InlineVideoPlayer: React.FC<InlineVideoPlayerProps> = ({
           </div>
 
           <div className="flex items-center space-x-3">
+            {/* Big View */}
+            {onBigView && (
+              <button
+                onClick={onBigView}
+                className="text-white hover:text-blue-400 transition-colors"
+                title="Open in big view"
+              >
+                <FiMonitor size={18} />
+              </button>
+            )}
+
             {/* Fullscreen */}
             <button
               onClick={toggleFullscreen}
