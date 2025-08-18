@@ -22,10 +22,29 @@ interface CookiesFile {
   fileName: string;
 }
 
+interface EnhancedVideoMetadata {
+  originalMetadata: YtDlpVideoInfo;
+  enhancedTitle: string;
+  enhancedSummary: string;
+  contentBasedTitle?: string;
+  contentBasedSummary?: string;
+  keyTopics: string[];
+  contentTags: string[];
+  keyQuotes?: string[];
+  enhancementSource: 'transcript' | 'metadata' | 'combined';
+  language: string;
+  confidence: number;
+  processingTime: number;
+  audioTranscript?: string; // Raw audio transcript text
+  enhancedTranscript?: string; // LLM-enhanced transcript
+  transcriptWordCount?: number; // Word count for quality assessment
+}
+
 interface DownloadResult {
   fileName: string;
   filePath: string;
   videoInfo: YtDlpVideoInfo;
+  enhancedMetadata?: EnhancedVideoMetadata;
 }
 
 const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
@@ -37,7 +56,25 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   const [downloadResult, setDownloadResult] = useState<DownloadResult | null>(null);
   const [videoInfo, setVideoInfo] = useState<YtDlpVideoInfo | null>(null);
   const [isLoadingInfo, setIsLoadingInfo] = useState(false);
-  
+  const [useEnhancedMetadata, setUseEnhancedMetadata] = useState(true);
+  const [useAudioTranscription, setUseAudioTranscription] = useState(true);
+  const [forceAudioTranscription, setForceAudioTranscription] = useState(false);
+  const [useAudioOnly, setUseAudioOnly] = useState(false);
+  const [transcriptCopied, setTranscriptCopied] = useState(false);
+  const [activeTranscriptTab, setActiveTranscriptTab] = useState<'raw' | 'enhanced'>('enhanced');
+  const [transcriptCleaningLevel, setTranscriptCleaningLevel] = useState<'basic' | 'aggressive'>('aggressive');
+
+  // Copy transcript to clipboard
+  const copyTranscriptToClipboard = async (transcript: string) => {
+    try {
+      await navigator.clipboard.writeText(transcript);
+      setTranscriptCopied(true);
+      setTimeout(() => setTranscriptCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy transcript:', err);
+    }
+  };
+
   // Cookies management
   const [cookiesFiles, setCookiesFiles] = useState<CookiesFile[]>([]);
   const [selectedCookiesFile, setSelectedCookiesFile] = useState<string>('');
@@ -230,12 +267,36 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
         }, 1000);
       }
 
-      const response = await axios.post('/api/youtube/yt-dlp/download', {
+      const endpoint = useEnhancedMetadata ? '/api/youtube/yt-dlp/download-enhanced' : '/api/youtube/yt-dlp/download';
+      const requestBody: any = {
         youtubeUrl,
         socketId,
         cookiesFileName: selectedCookiesFile || undefined,
-        options: downloadOptions
-      });
+        options: downloadOptions,
+        useAudioOnly: useAudioOnly
+      };
+
+      // Add enhancement options if using enhanced endpoint
+      if (useEnhancedMetadata) {
+        requestBody.enhancementOptions = {
+          includeChapters: true,
+          includeKeyQuotes: true,
+          maxKeyTopics: 8,
+          maxContentTags: 12,
+          temperature: 0.3,
+          languagePreference: 'auto',
+          useAudioTranscription: useAudioTranscription,
+          forceAudioTranscription: forceAudioTranscription,
+          transcriptCleaningLevel: transcriptCleaningLevel,
+          audioTranscriptionOptions: {
+            languageCode: 'vi-VN',
+            enableAutomaticPunctuation: true,
+            useEnhancedModel: true
+          }
+        };
+      }
+
+      const response = await axios.post(endpoint, requestBody);
 
       console.log('yt-dlp download completed:', response.data);
 
@@ -252,7 +313,8 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
       setDownloadResult({
         fileName: response.data.fileName,
         filePath: response.data.filePath,
-        videoInfo: response.data.videoInfo
+        videoInfo: response.data.videoInfo,
+        enhancedMetadata: response.data.enhancedMetadata
       });
 
       setYoutubeUrl('');
@@ -505,6 +567,113 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
             />
           </div>
 
+          {/* Enhanced Metadata Toggle */}
+          <div className="space-y-2">
+            <label className="flex items-center">
+              <input
+                type="checkbox"
+                checked={useEnhancedMetadata}
+                onChange={(e) => setUseEnhancedMetadata(e.target.checked)}
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                disabled={isDownloading}
+              />
+              <span className="ml-2 text-sm text-gray-700">
+                Generate enhanced metadata with AI
+              </span>
+            </label>
+
+            {/* Audio-Only Option */}
+            {useEnhancedMetadata && (
+              <label className="flex items-center">
+                <input
+                  type="checkbox"
+                  checked={useAudioOnly}
+                  onChange={(e) => {
+                    setUseAudioOnly(e.target.checked);
+                    if (e.target.checked) {
+                      // Auto-enable audio transcription when audio-only is selected
+                      setUseAudioTranscription(true);
+                      setForceAudioTranscription(true);
+                    }
+                  }}
+                  className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                  disabled={isDownloading}
+                />
+                <span className="ml-2 text-sm font-medium text-red-700">
+                  🔥 AUDIO-ONLY MODE (no transcript fallback)
+                </span>
+              </label>
+            )}
+
+            {useEnhancedMetadata && !useAudioOnly && (
+              <div className="ml-6 space-y-2">
+                <label className="flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={useAudioTranscription}
+                    onChange={(e) => setUseAudioTranscription(e.target.checked)}
+                    className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
+                    disabled={isDownloading}
+                  />
+                  <span className="ml-2 text-sm text-gray-600">
+                    🎵 Use audio transcription (higher accuracy)
+                  </span>
+                </label>
+
+                {useAudioTranscription && (
+                  <div className="ml-6 space-y-2">
+                    <label className="flex items-center">
+                      <input
+                        type="checkbox"
+                        checked={forceAudioTranscription}
+                        onChange={(e) => setForceAudioTranscription(e.target.checked)}
+                        className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                        disabled={isDownloading}
+                      />
+                      <span className="ml-2 text-sm text-gray-600">
+                        🔥 Force audio transcription (skip YouTube transcript)
+                      </span>
+                    </label>
+
+                    {/* Transcript Cleaning Level */}
+                    <div className="ml-6">
+                      <label className="block text-xs text-gray-600 mb-1">
+                        🧹 Transcript cleaning level:
+                      </label>
+                      <select
+                        value={transcriptCleaningLevel}
+                        onChange={(e) => setTranscriptCleaningLevel(e.target.value as 'basic' | 'aggressive')}
+                        className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+                        disabled={isDownloading}
+                      >
+                        <option value="aggressive">🔥 Aggressive (Remove all irrelevant content)</option>
+                        <option value="basic">📝 Basic (Fix grammar only)</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Audio-Only Cleaning Level */}
+            {useEnhancedMetadata && useAudioOnly && (
+              <div className="ml-6">
+                <label className="block text-xs text-gray-600 mb-1">
+                  🧹 Transcript cleaning level:
+                </label>
+                <select
+                  value={transcriptCleaningLevel}
+                  onChange={(e) => setTranscriptCleaningLevel(e.target.value as 'basic' | 'aggressive')}
+                  className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+                  disabled={isDownloading}
+                >
+                  <option value="aggressive">🔥 Aggressive (Remove all irrelevant content)</option>
+                  <option value="basic">📝 Basic (Fix grammar only)</option>
+                </select>
+              </div>
+            )}
+          </div>
+
           <div className="flex space-x-3">
             <button
               onClick={getVideoInfo}
@@ -529,7 +698,15 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
               ) : (
                 <FiDownload className="h-4 w-4 mr-2" />
               )}
-              Download with yt-dlp
+              {useEnhancedMetadata
+                ? (useAudioOnly
+                   ? 'Download with AUDIO-ONLY Enhancement'
+                   : (forceAudioTranscription
+                      ? 'Download with Force Audio Transcription'
+                      : (useAudioTranscription
+                         ? 'Download with Enhanced Metadata + Audio'
+                         : 'Download with Enhanced Metadata')))
+                : 'Download with yt-dlp'}
             </button>
           </div>
         </div>
@@ -622,16 +799,189 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
         <div className="border border-green-200 rounded-lg p-4 bg-green-50">
           <h3 className="text-lg font-medium text-green-900 mb-4">Download Completed</h3>
 
-          <div className="space-y-2">
-            <p className="text-sm text-green-800">
-              <span className="font-medium">File:</span> {downloadResult.fileName}
-            </p>
-            <p className="text-sm text-green-800">
-              <span className="font-medium">Title:</span> {downloadResult.videoInfo.title}
-            </p>
-            <p className="text-sm text-green-800">
-              <span className="font-medium">Uploader:</span> {downloadResult.videoInfo.uploader}
-            </p>
+          <div className="space-y-4">
+            {/* Basic Info */}
+            <div className="space-y-2">
+              <p className="text-sm text-green-800">
+                <span className="font-medium">File:</span> {downloadResult.fileName}
+              </p>
+              <p className="text-sm text-green-800">
+                <span className="font-medium">Title:</span> {downloadResult.videoInfo.title}
+              </p>
+              <p className="text-sm text-green-800">
+                <span className="font-medium">Uploader:</span> {downloadResult.videoInfo.uploader}
+              </p>
+            </div>
+
+            {/* Enhanced Metadata */}
+            {downloadResult.enhancedMetadata && (
+              <div className="border-t border-green-300 pt-4">
+                <h4 className="text-md font-medium text-green-900 mb-3">🤖 AI-Enhanced Metadata</h4>
+
+                <div className="space-y-3">
+                  {/* Enhancement Info */}
+                  <div className="flex items-center space-x-4 text-xs text-green-700">
+                    <span className="bg-green-200 px-2 py-1 rounded">
+                      Source: {downloadResult.enhancedMetadata.enhancementSource}
+                    </span>
+                    <span className="bg-green-200 px-2 py-1 rounded">
+                      Confidence: {(downloadResult.enhancedMetadata.confidence * 100).toFixed(0)}%
+                    </span>
+                    <span className="bg-green-200 px-2 py-1 rounded">
+                      Language: {downloadResult.enhancedMetadata.language}
+                    </span>
+                  </div>
+
+                  {/* Enhanced Title */}
+                  <div>
+                    <p className="text-sm font-medium text-green-800">Enhanced Title:</p>
+                    <p className="text-sm text-green-700 italic">"{downloadResult.enhancedMetadata.enhancedTitle}"</p>
+                  </div>
+
+                  {/* Enhanced Summary */}
+                  <div>
+                    <p className="text-sm font-medium text-green-800">Enhanced Summary:</p>
+                    <p className="text-sm text-green-700">{downloadResult.enhancedMetadata.enhancedSummary}</p>
+                  </div>
+
+                  {/* Content-Based Info (if available) */}
+                  {downloadResult.enhancedMetadata.contentBasedTitle && (
+                    <div>
+                      <p className="text-sm font-medium text-green-800">Content-Based Title:</p>
+                      <p className="text-sm text-green-700 italic">"{downloadResult.enhancedMetadata.contentBasedTitle}"</p>
+                    </div>
+                  )}
+
+                  {downloadResult.enhancedMetadata.contentBasedSummary && (
+                    <div>
+                      <p className="text-sm font-medium text-green-800">Content-Based Summary:</p>
+                      <p className="text-sm text-green-700">{downloadResult.enhancedMetadata.contentBasedSummary}</p>
+                    </div>
+                  )}
+
+                  {/* Key Topics */}
+                  {downloadResult.enhancedMetadata.keyTopics.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-green-800">Key Topics:</p>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {downloadResult.enhancedMetadata.keyTopics.map((topic, index) => (
+                          <span key={index} className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded">
+                            {topic}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Content Tags */}
+                  {downloadResult.enhancedMetadata.contentTags.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-green-800">Content Tags:</p>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {downloadResult.enhancedMetadata.contentTags.map((tag, index) => (
+                          <span key={index} className="bg-purple-100 text-purple-800 text-xs px-2 py-1 rounded">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Key Quotes */}
+                  {downloadResult.enhancedMetadata.keyQuotes && downloadResult.enhancedMetadata.keyQuotes.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-green-800">Key Quotes:</p>
+                      <div className="space-y-1 mt-1">
+                        {downloadResult.enhancedMetadata.keyQuotes.map((quote, index) => (
+                          <p key={index} className="text-sm text-green-700 italic border-l-2 border-green-300 pl-2">
+                            "{quote}"
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Audio Transcript */}
+                  {downloadResult.enhancedMetadata.audioTranscript && (
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium text-green-800">Audio Transcript:</p>
+                        <div className="flex items-center space-x-2 text-xs text-green-600">
+                          <span className="bg-green-200 px-2 py-1 rounded">
+                            {downloadResult.enhancedMetadata.transcriptWordCount} words
+                          </span>
+                          <span className="bg-blue-200 px-2 py-1 rounded">
+                            Quality: {downloadResult.enhancedMetadata.confidence > 0.8 ? 'High' :
+                                     downloadResult.enhancedMetadata.confidence > 0.6 ? 'Medium' : 'Low'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Transcript Tabs */}
+                      <div className="mt-2 flex space-x-1 border-b border-gray-200">
+                        <button
+                          onClick={() => setActiveTranscriptTab('enhanced')}
+                          className={`px-3 py-1 text-xs font-medium rounded-t ${
+                            activeTranscriptTab === 'enhanced'
+                              ? 'bg-blue-100 text-blue-700 border-b-2 border-blue-500'
+                              : 'text-gray-600 hover:text-gray-800'
+                          }`}
+                        >
+                          🔧 Enhanced (Recommended)
+                        </button>
+                        <button
+                          onClick={() => setActiveTranscriptTab('raw')}
+                          className={`px-3 py-1 text-xs font-medium rounded-t ${
+                            activeTranscriptTab === 'raw'
+                              ? 'bg-gray-100 text-gray-700 border-b-2 border-gray-500'
+                              : 'text-gray-600 hover:text-gray-800'
+                          }`}
+                        >
+                          📝 Raw (Original)
+                        </button>
+                      </div>
+
+                      {/* Transcript Content */}
+                      <div className="relative">
+                        <div className="mt-2 p-3 bg-gray-50 border border-gray-200 rounded max-h-64 overflow-y-auto">
+                          <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
+                            {activeTranscriptTab === 'enhanced'
+                              ? (downloadResult.enhancedMetadata.enhancedTranscript || downloadResult.enhancedMetadata.audioTranscript)
+                              : downloadResult.enhancedMetadata.audioTranscript}
+                          </p>
+                        </div>
+
+                        {/* Copy Button */}
+                        <button
+                          onClick={() => copyTranscriptToClipboard(
+                            activeTranscriptTab === 'enhanced'
+                              ? (downloadResult.enhancedMetadata.enhancedTranscript || downloadResult.enhancedMetadata.audioTranscript!)
+                              : downloadResult.enhancedMetadata.audioTranscript!
+                          )}
+                          className="absolute top-4 right-4 bg-white hover:bg-gray-100 px-2 py-1 rounded text-xs border shadow-sm transition-colors"
+                        >
+                          {transcriptCopied ? '✅ Copied!' : '📋 Copy'}
+                        </button>
+                      </div>
+
+                      <div className="mt-2 text-xs text-gray-500">
+                        {activeTranscriptTab === 'enhanced' ? (
+                          <span>
+                            🔧 <strong>Enhanced transcript</strong>: Grammar fixed, slang removed, improved readability.
+                            <strong> Recommended for Qdrant embedding.</strong>
+                          </span>
+                        ) : (
+                          <span>
+                            📝 <strong>Raw transcript</strong>: Direct output from Speech-to-Text API.
+                            May contain errors, slang, and filler words.
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

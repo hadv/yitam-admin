@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
+    "@google-cloud/speech": "^7.2.0",
     "@google-cloud/vision": "^4.3.3",
     "@google/genai": "^1.11.0",
     "@google/generative-ai": "^0.2.1",

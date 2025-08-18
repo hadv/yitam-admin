@@ -50,3 +50,6 @@ qdrant_storage/
 downloads/
 cookies/
 temp/
+
+# Audio processing temporary files
+server/audio-processing/
