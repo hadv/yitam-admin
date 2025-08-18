@@ -21,6 +21,7 @@ import {
   deleteCookiesFile,
   YtDlpDownloadOptions
 } from '../services/yt-dlp-downloader';
+import { enhanceVideoMetadata, EnhancementOptions } from '../services/video-metadata-enhancer';
 import path from 'path';
 import multer from 'multer';
 
@@ -672,6 +673,202 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
 
     return res.status(500).json({
       message: 'Failed to download video with yt-dlp',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Download YouTube video with enhanced metadata using yt-dlp
+export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res: Response) => {
+  try {
+    const { youtubeUrl, options = {}, cookiesFileName, enhancementOptions = {}, useAudioOnly = false } = req.body;
+    const socketId = req.body.socketId;
+
+    if (!youtubeUrl) {
+      return res.status(400).json({ message: 'YouTube URL is required' });
+    }
+
+    const videoId = extractYouTubeId(youtubeUrl);
+    if (!videoId) {
+      return res.status(400).json({ message: 'Invalid YouTube URL' });
+    }
+
+    // Check if yt-dlp is installed
+    const isInstalled = await checkYtDlpInstallation();
+    if (!isInstalled) {
+      return res.status(400).json({
+        message: 'yt-dlp is not installed. Please install yt-dlp to download member-only videos.'
+      });
+    }
+
+    console.log(`Starting enhanced yt-dlp video download for: ${youtubeUrl}`);
+
+    // Initialize progress tracking if socket ID provided
+    if (socketId) {
+      progressTracker.initializeProgressTracking(videoId, socketId);
+      progressTracker.updateTranscriptFetch(videoId, 'Starting enhanced video download...', 0);
+    }
+
+    // Prepare download options
+    const ytDlpOptions: YtDlpDownloadOptions = {
+      quality: options.quality || 'best[ext=mp4]/best',
+      format: options.format,
+      audioOnly: options.audioOnly,
+      extractAudio: options.extractAudio,
+      audioFormat: options.audioFormat,
+      cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined
+    };
+
+    // Step 1: Download the video with progress callback
+    if (socketId) {
+      progressTracker.updateTranscriptFetch(videoId, 'Downloading video...', 10);
+    }
+
+    const result = await downloadVideoWithYtDlp(youtubeUrl, ytDlpOptions, (progress) => {
+      console.log(`🔄 yt-dlp progress callback received:`, progress);
+      if (socketId) {
+        // Map download progress to 10-70% of total progress
+        const mappedProgress = 10 + (progress.progress * 0.6);
+        progressTracker.updateTranscriptFetch(
+          videoId,
+          `Downloading: ${progress.progress.toFixed(1)}% - Speed: ${progress.speed} - ETA: ${progress.eta}`,
+          mappedProgress
+        );
+      }
+    });
+
+    // Step 2: Generate enhanced metadata
+    if (socketId) {
+      progressTracker.updateTranscriptFetch(videoId, 'Generating enhanced metadata...', 75);
+    }
+
+    const enhancementOpts: EnhancementOptions = {
+      includeChapters: enhancementOptions.includeChapters !== false,
+      includeKeyQuotes: enhancementOptions.includeKeyQuotes !== false,
+      maxKeyTopics: enhancementOptions.maxKeyTopics || 8,
+      maxContentTags: enhancementOptions.maxContentTags || 12,
+      temperature: enhancementOptions.temperature || 0.3,
+      maxOutputTokens: enhancementOptions.maxOutputTokens || 4000,
+      languagePreference: enhancementOptions.languagePreference || 'auto'
+    };
+
+    // Choose enhancement method based on user selection
+    let enhancedMetadata;
+    if (useAudioOnly) {
+      console.log('🎵 Using AUDIO-ONLY enhancement (no transcript fallback)');
+      const { enhanceVideoMetadataAudioOnly } = require('../services/video-metadata-enhancer');
+      enhancedMetadata = await enhanceVideoMetadataAudioOnly(
+        result.videoInfo,
+        result.filePath,
+        enhancementOpts
+      );
+    } else {
+      console.log('🔄 Using standard enhancement (with fallbacks)');
+      enhancedMetadata = await enhanceVideoMetadata(
+        result.videoInfo,
+        youtubeUrl,
+        result.filePath,
+        enhancementOpts
+      );
+    }
+
+    // Complete progress tracking
+    if (socketId) {
+      progressTracker.updateTranscriptFetch(videoId, 'Enhanced download completed successfully!', 100);
+      progressTracker.completeProcessing(videoId, 1);
+    }
+
+    console.log(`Enhanced yt-dlp video download completed: ${result.filePath}`);
+    console.log(`Enhancement source: ${enhancedMetadata.enhancementSource}, confidence: ${enhancedMetadata.confidence}`);
+
+    return res.status(200).json({
+      message: 'Video downloaded successfully with enhanced metadata',
+      videoId,
+      filePath: result.filePath,
+      fileName: path.basename(result.filePath),
+      videoInfo: result.videoInfo,
+      enhancedMetadata
+    });
+
+  } catch (error: any) {
+    console.error('Error downloading YouTube video with enhanced metadata:', error);
+
+    const videoId = extractYouTubeId(req.body.youtubeUrl);
+    if (videoId && req.body.socketId) {
+      progressTracker.reportError(videoId, 'Enhanced download failed', error.message);
+    }
+
+    return res.status(500).json({
+      message: 'Failed to download video with enhanced metadata',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Generate enhanced metadata for existing video info
+export const generateEnhancedMetadata = async (req: Request, res: Response) => {
+  try {
+    const { youtubeUrl, videoInfo, enhancementOptions = {} } = req.body;
+
+    if (!youtubeUrl && !videoInfo) {
+      return res.status(400).json({
+        message: 'Either youtubeUrl or videoInfo is required'
+      });
+    }
+
+    let targetVideoInfo = videoInfo;
+
+    // If only URL provided, get video info first
+    if (!targetVideoInfo && youtubeUrl) {
+      const videoId = extractYouTubeId(youtubeUrl);
+      if (!videoId) {
+        return res.status(400).json({ message: 'Invalid YouTube URL' });
+      }
+
+      // Check if yt-dlp is installed
+      const isInstalled = await checkYtDlpInstallation();
+      if (!isInstalled) {
+        return res.status(400).json({
+          message: 'yt-dlp is not installed. Please install yt-dlp to get video information.'
+        });
+      }
+
+      targetVideoInfo = await getYtDlpVideoInfo(youtubeUrl);
+    }
+
+    console.log(`Generating enhanced metadata for: ${targetVideoInfo.title}`);
+
+    // Prepare enhancement options
+    const enhancementOpts: EnhancementOptions = {
+      includeChapters: enhancementOptions.includeChapters !== false,
+      includeKeyQuotes: enhancementOptions.includeKeyQuotes !== false,
+      maxKeyTopics: enhancementOptions.maxKeyTopics || 8,
+      maxContentTags: enhancementOptions.maxContentTags || 12,
+      temperature: enhancementOptions.temperature || 0.3,
+      maxOutputTokens: enhancementOptions.maxOutputTokens || 4000,
+      languagePreference: enhancementOptions.languagePreference || 'auto'
+    };
+
+    // Generate enhanced metadata (no video file for metadata-only generation)
+    const enhancedMetadata = await enhanceVideoMetadata(
+      targetVideoInfo,
+      youtubeUrl || `https://www.youtube.com/watch?v=${targetVideoInfo.videoId}`,
+      undefined, // No video file available for metadata-only generation
+      enhancementOpts
+    );
+
+    console.log(`Enhanced metadata generated. Source: ${enhancedMetadata.enhancementSource}, confidence: ${enhancedMetadata.confidence}`);
+
+    return res.status(200).json({
+      message: 'Enhanced metadata generated successfully',
+      enhancedMetadata
+    });
+
+  } catch (error: any) {
+    console.error('Error generating enhanced metadata:', error);
+
+    return res.status(500).json({
+      message: 'Failed to generate enhanced metadata',
       error: error.message || 'Unknown error'
     });
   }

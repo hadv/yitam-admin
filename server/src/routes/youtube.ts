@@ -13,6 +13,8 @@ import {
   serveDownloadedVideo,
   checkYtDlpStatus,
   downloadYoutubeVideoWithYtDlp,
+  downloadYoutubeVideoWithEnhancedMetadata,
+  generateEnhancedMetadata,
   getYoutubeVideoInfoWithYtDlp,
   uploadCookiesFile,
   getCookiesFilesList,
@@ -124,6 +126,12 @@ router.get('/yt-dlp/status', checkYtDlpStatus);
 
 // Route for downloading YouTube video with yt-dlp (member-only support)
 router.post('/yt-dlp/download', downloadYoutubeVideoWithYtDlp);
+
+// Route for downloading YouTube video with enhanced metadata using yt-dlp
+router.post('/yt-dlp/download-enhanced', downloadYoutubeVideoWithEnhancedMetadata);
+
+// Route for generating enhanced metadata for existing video info
+router.post('/yt-dlp/enhance-metadata', generateEnhancedMetadata);
 
 // Route for getting video information with yt-dlp (member-only support)
 router.post('/yt-dlp/info', getYoutubeVideoInfoWithYtDlp);
