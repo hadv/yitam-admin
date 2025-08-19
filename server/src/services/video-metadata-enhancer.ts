@@ -7,6 +7,7 @@ import {
   isAudioTranscriptionAvailable,
   AudioTranscriptionOptions
 } from './audio-transcription';
+import { processAudioTranscript } from './audio-transcript-processor';
 
 // Load environment variables
 dotenv.config();
@@ -71,6 +72,7 @@ export interface EnhancementOptions {
   forceAudioTranscription?: boolean; // Force audio transcription even if transcript is available
   audioTranscriptionOptions?: Partial<AudioTranscriptionOptions>;
   transcriptCleaningLevel?: 'basic' | 'aggressive'; // Level of transcript cleaning
+  embedAudioTranscript?: boolean; // Enable embedding audio transcript into vector database
 }
 
 // Default enhancement options
@@ -123,7 +125,8 @@ export async function enhanceVideoMetadata(
       const audioResult = await tryAudioTranscriptionBasedEnhancement(
         videoInfo,
         videoFilePath,
-        fullOptions
+        fullOptions,
+        youtubeUrl
       );
 
       if (audioResult) {
@@ -185,7 +188,8 @@ export async function enhanceVideoMetadata(
 async function tryAudioTranscriptionBasedEnhancement(
   videoInfo: YtDlpVideoInfo,
   videoFilePath: string,
-  options: EnhancementOptions
+  options: EnhancementOptions,
+  youtubeUrl?: string
 ): Promise<Partial<EnhancedVideoMetadata> | null> {
   try {
     console.log('🎤 Attempting audio transcription-based enhancement...');
@@ -228,6 +232,32 @@ async function tryAudioTranscriptionBasedEnhancement(
 
     // Higher confidence for audio transcription as it's from actual content
     const confidence = Math.min(0.95, transcriptionResult.confidence + 0.1);
+
+    // Process audio transcript for embedding if enabled
+    if (options.embedAudioTranscript) {
+      try {
+        console.log('🔗 Processing audio transcript for embedding...');
+        const videoId = youtubeUrl ? extractVideoIdFromUrl(youtubeUrl) : videoInfo.videoId;
+        if (videoId) {
+          const embeddingResult = await processAudioTranscript(
+            transcriptionResult.transcript,
+            enhancedTranscript,
+            {
+              videoId,
+              videoTitle: videoInfo.title,
+              videoUrl: youtubeUrl || `https://www.youtube.com/watch?v=${videoInfo.videoId}`,
+              domains: ['youtube', 'audio']
+            }
+          );
+          console.log(`✅ Audio transcript embedded: ${embeddingResult.totalChunks} chunks created`);
+        } else {
+          console.warn('⚠️ Could not extract video ID for embedding');
+        }
+      } catch (embeddingError) {
+        console.error('❌ Failed to embed audio transcript:', embeddingError);
+        // Don't fail the entire process if embedding fails
+      }
+    }
 
     return {
       originalMetadata: videoInfo,
@@ -657,7 +687,8 @@ function detectLanguage(text: string): string {
 export async function enhanceVideoMetadataAudioOnly(
   videoInfo: YtDlpVideoInfo,
   videoFilePath: string,
-  options: Partial<EnhancementOptions> = {}
+  options: Partial<EnhancementOptions> = {},
+  youtubeUrl?: string
 ): Promise<EnhancedVideoMetadata> {
   const startTime = Date.now();
   const fullOptions: EnhancementOptions = {
@@ -679,7 +710,8 @@ export async function enhanceVideoMetadataAudioOnly(
     const audioResult = await tryAudioTranscriptionBasedEnhancement(
       videoInfo,
       videoFilePath,
-      fullOptions
+      fullOptions,
+      youtubeUrl
     );
 
     if (audioResult) {
@@ -696,6 +728,28 @@ export async function enhanceVideoMetadataAudioOnly(
     console.error('❌ Audio-only enhancement failed:', error.message);
     throw new Error(`Audio-only enhancement failed: ${error.message}`);
   }
+}
+
+/**
+ * Extract YouTube video ID from URL
+ */
+function extractVideoIdFromUrl(url: string): string | null {
+  if (!url) return null;
+
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
+    /youtube\.com\/v\/([^&\n?#]+)/,
+    /youtube\.com\/watch\?.*v=([^&\n?#]+)/
+  ];
+
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
 }
 
 /**

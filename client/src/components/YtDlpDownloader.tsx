@@ -60,6 +60,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   const [useAudioTranscription, setUseAudioTranscription] = useState(true);
   const [forceAudioTranscription, setForceAudioTranscription] = useState(false);
   const [useAudioOnly, setUseAudioOnly] = useState(false);
+  const [embedAudioTranscript, setEmbedAudioTranscript] = useState(true);
   const [transcriptCopied, setTranscriptCopied] = useState(false);
   const [activeTranscriptTab, setActiveTranscriptTab] = useState<'raw' | 'enhanced'>('enhanced');
   const [transcriptCleaningLevel, setTranscriptCleaningLevel] = useState<'basic' | 'aggressive'>('aggressive');
@@ -288,6 +289,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
           useAudioTranscription: useAudioTranscription,
           forceAudioTranscription: forceAudioTranscription,
           transcriptCleaningLevel: transcriptCleaningLevel,
+          embedAudioTranscript: embedAudioTranscript,
           audioTranscriptionOptions: {
             languageCode: 'vi-VN',
             enableAutomaticPunctuation: true,
@@ -650,6 +652,20 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                         <option value="basic">📝 Basic (Fix grammar only)</option>
                       </select>
                     </div>
+
+                    {/* Embed Audio Transcript Option */}
+                    <label className="flex items-center">
+                      <input
+                        type="checkbox"
+                        checked={embedAudioTranscript}
+                        onChange={(e) => setEmbedAudioTranscript(e.target.checked)}
+                        className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                        disabled={isDownloading}
+                      />
+                      <span className="ml-2 text-sm text-gray-600">
+                        🔗 Embed audio transcript for search (store in vector database)
+                      </span>
+                    </label>
                   </div>
                 )}
               </div>
@@ -657,19 +673,35 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
 
             {/* Audio-Only Cleaning Level */}
             {useEnhancedMetadata && useAudioOnly && (
-              <div className="ml-6">
-                <label className="block text-xs text-gray-600 mb-1">
-                  🧹 Transcript cleaning level:
+              <div className="ml-6 space-y-2">
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">
+                    🧹 Transcript cleaning level:
+                  </label>
+                  <select
+                    value={transcriptCleaningLevel}
+                    onChange={(e) => setTranscriptCleaningLevel(e.target.value as 'basic' | 'aggressive')}
+                    className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+                    disabled={isDownloading}
+                  >
+                    <option value="aggressive">🔥 Aggressive (Remove all irrelevant content)</option>
+                    <option value="basic">📝 Basic (Fix grammar only)</option>
+                  </select>
+                </div>
+
+                {/* Embed Audio Transcript Option for Audio-Only Mode */}
+                <label className="flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={embedAudioTranscript}
+                    onChange={(e) => setEmbedAudioTranscript(e.target.checked)}
+                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    disabled={isDownloading}
+                  />
+                  <span className="ml-2 text-sm text-gray-600">
+                    🔗 Embed audio transcript for search (store in vector database)
+                  </span>
                 </label>
-                <select
-                  value={transcriptCleaningLevel}
-                  onChange={(e) => setTranscriptCleaningLevel(e.target.value as 'basic' | 'aggressive')}
-                  className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
-                  disabled={isDownloading}
-                >
-                  <option value="aggressive">🔥 Aggressive (Remove all irrelevant content)</option>
-                  <option value="basic">📝 Basic (Fix grammar only)</option>
-                </select>
               </div>
             )}
           </div>
@@ -955,8 +987,8 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                         <button
                           onClick={() => copyTranscriptToClipboard(
                             activeTranscriptTab === 'enhanced'
-                              ? (downloadResult.enhancedMetadata.enhancedTranscript || downloadResult.enhancedMetadata.audioTranscript!)
-                              : downloadResult.enhancedMetadata.audioTranscript!
+                              ? (downloadResult.enhancedMetadata?.enhancedTranscript || downloadResult.enhancedMetadata?.audioTranscript || '')
+                              : downloadResult.enhancedMetadata?.audioTranscript || ''
                           )}
                           className="absolute top-4 right-4 bg-white hover:bg-gray-100 px-2 py-1 rounded text-xs border shadow-sm transition-colors"
                         >

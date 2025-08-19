@@ -760,7 +760,8 @@ export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res
       enhancedMetadata = await enhanceVideoMetadataAudioOnly(
         result.videoInfo,
         result.filePath,
-        enhancementOpts
+        enhancementOpts,
+        youtubeUrl
       );
     } else {
       console.log('🔄 Using standard enhancement (with fallbacks)');
