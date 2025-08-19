@@ -18,7 +18,6 @@ interface InlineVideoPlayerProps {
 
 const InlineVideoPlayer: React.FC<InlineVideoPlayerProps> = ({
   src,
-  title = 'Video',
   poster,
   width = '100%',
   height = 'auto',
@@ -36,7 +35,7 @@ const InlineVideoPlayer: React.FC<InlineVideoPlayerProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(muted ? 0 : 1);
+  const [volume] = useState(muted ? 0 : 1);
   const [isMuted, setIsMuted] = useState(muted);
   const [showControls, setShowControls] = useState(true);
   const [isLoading, setIsLoading] = useState(true);

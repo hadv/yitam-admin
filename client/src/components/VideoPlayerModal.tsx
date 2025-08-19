@@ -82,10 +82,7 @@ const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  const formatFileSize = (fileName: string): string => {
-    // This would ideally come from the server, but we can estimate
-    return 'Unknown size';
-  };
+
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -220,7 +217,7 @@ const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   
                   <div>
                     <label className="block text-sm font-medium text-gray-700">File Size</label>
-                    <p className="text-sm text-gray-900">{formatFileSize(video.fileName)}</p>
+                    <p className="text-sm text-gray-900">Unknown size</p>
                   </div>
                 </div>
               </div>

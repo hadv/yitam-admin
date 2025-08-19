@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from '@/utils/axiosConfig';
 import { FiPlay, FiDownload, FiVideo, FiList } from 'react-icons/fi';
-import VideoPlayer from './VideoPlayer';
+
 import InlineVideoPlayer from './InlineVideoPlayer';
 import VideoPlayerModal from './VideoPlayerModal';
 
