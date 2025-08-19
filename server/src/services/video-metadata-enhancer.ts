@@ -73,6 +73,7 @@ export interface EnhancementOptions {
   audioTranscriptionOptions?: Partial<AudioTranscriptionOptions>;
   transcriptCleaningLevel?: 'basic' | 'aggressive'; // Level of transcript cleaning
   embedAudioTranscript?: boolean; // Enable embedding audio transcript into vector database
+  domains?: string[]; // Knowledge domains for categorizing the content
 }
 
 // Default enhancement options
@@ -246,7 +247,7 @@ async function tryAudioTranscriptionBasedEnhancement(
               videoId,
               videoTitle: videoInfo.title,
               videoUrl: youtubeUrl || `https://www.youtube.com/watch?v=${videoInfo.videoId}`,
-              domains: ['youtube', 'audio']
+              domains: options.domains || ['youtube', 'audio']
             }
           );
           console.log(`✅ Audio transcript embedded: ${embeddingResult.totalChunks} chunks created`);

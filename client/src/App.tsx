@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import DocumentUpload from '@components/DocumentUpload'
 import YoutubeUpload from '@components/YoutubeUpload'
 import YoutubeDelete from '@components/YoutubeDelete'

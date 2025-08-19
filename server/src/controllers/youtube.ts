@@ -749,7 +749,13 @@ export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res
       maxContentTags: enhancementOptions.maxContentTags || 12,
       temperature: enhancementOptions.temperature || 0.3,
       maxOutputTokens: enhancementOptions.maxOutputTokens || 4000,
-      languagePreference: enhancementOptions.languagePreference || 'auto'
+      languagePreference: enhancementOptions.languagePreference || 'auto',
+      useAudioTranscription: enhancementOptions.useAudioTranscription,
+      forceAudioTranscription: enhancementOptions.forceAudioTranscription,
+      transcriptCleaningLevel: enhancementOptions.transcriptCleaningLevel,
+      embedAudioTranscript: enhancementOptions.embedAudioTranscript,
+      domains: enhancementOptions.domains,
+      audioTranscriptionOptions: enhancementOptions.audioTranscriptionOptions
     };
 
     // Choose enhancement method based on user selection

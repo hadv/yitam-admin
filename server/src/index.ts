@@ -130,9 +130,11 @@ dbService.initialize().then(() => {
       
       const allowedOrigins = [
         'http://localhost:5173',
+        'http://localhost:5174',
         'http://localhost:3000',
         // Add the actual frontend URL if different
-        'http://127.0.0.1:5173'
+        'http://127.0.0.1:5173',
+        'http://127.0.0.1:5174'
       ];
       
       console.log('CORS Request from origin:', origin);

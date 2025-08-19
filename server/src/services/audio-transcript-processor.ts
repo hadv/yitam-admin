@@ -1,6 +1,7 @@
 import { createEmbedding } from './embedding';
 import { DocumentChunk } from './chunking';
 import { DatabaseService } from '../core/database-service';
+import { enhanceContent, EnhancementType } from './content-enhancement';
 
 export interface AudioTranscriptProcessingOptions {
   chunkSize?: number;
@@ -53,8 +54,7 @@ export const processAudioTranscript = async (
   await dbService.initialize();
 
   // Check if audio transcript already exists in database
-  const audioTranscriptPattern = `audio_${videoId}`;
-  const existingTranscript = await dbService.doesTranscriptExist(audioTranscriptPattern);
+  const existingTranscript = await dbService.doesTranscriptExist(videoId);
   
   if (existingTranscript) {
     console.log(`⚠️ Audio transcript already exists for video ${videoId}, skipping embedding`);
@@ -79,30 +79,54 @@ export const processAudioTranscript = async (
 
   // Process chunks and create embeddings
   const documentChunks: DocumentChunk[] = [];
-  const idPrefix = `audio_${videoId}`;
+  const idPrefix = `youtube_${videoId}`;
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     console.log(`🔄 Processing chunk ${i + 1}/${chunks.length} (${chunk.length} chars)`);
 
     try {
-      // Generate embedding for the chunk
-      const embedding = await createEmbedding(chunk);
-
-      // Create document chunk
-      const documentChunk: DocumentChunk = {
+      // Create base document chunk
+      const baseChunk: DocumentChunk = {
         id: `${idPrefix}_chunk_${i}`,
         documentName: `${videoTitle} (Audio Transcript)`,
         content: chunk,
-        embedding: embedding,
+        embedding: [], // Will be set after enhancement
         title: `Audio Transcript Part ${i + 1} - ${videoTitle}`,
         summary: `Part ${i + 1} of audio transcript for video: ${videoTitle}`,
         sourceFile: videoUrl,
-        domains: domains,
-        enhancedContent: enhancedTranscript ? chunk : undefined
+        domains: domains
       };
 
-      documentChunks.push(documentChunk);
+      // Enhance the chunk content if enhanced transcript is available
+      let finalChunk = baseChunk;
+      if (enhancedTranscript) {
+        try {
+          console.log(`🎨 Enhancing chunk ${i + 1} content...`);
+          const enhancedChunk = await enhanceContent(baseChunk, {
+            types: [EnhancementType.FORMATTING, EnhancementType.READABILITY],
+            domain: domains.join(', ')
+          });
+
+          // Keep original content but add enhanced content
+          finalChunk = {
+            ...enhancedChunk,
+            content: chunk, // Keep original audio transcript
+            enhancedContent: enhancedChunk.enhancedContent // Use enhanced version
+          };
+          console.log(`✅ Enhanced chunk ${i + 1} content`);
+        } catch (enhanceError) {
+          console.warn(`⚠️ Failed to enhance chunk ${i + 1}, using original:`, enhanceError);
+          finalChunk = baseChunk;
+        }
+      }
+
+      // Generate embedding for the content (use enhanced if available, otherwise original)
+      const contentForEmbedding = finalChunk.enhancedContent || finalChunk.content;
+      const embedding = await createEmbedding(contentForEmbedding);
+      finalChunk.embedding = embedding;
+
+      documentChunks.push(finalChunk);
       console.log(`✅ Created embedding for chunk ${i + 1}`);
 
     } catch (error) {

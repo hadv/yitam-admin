@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import axios from '@/utils/axiosConfig';
 import { FiYoutube, FiSearch, FiLoader, FiAlertCircle, FiPlay, FiVideo } from 'react-icons/fi';
 import { YoutubeVideoInfo, YoutubeVideoChunk } from '@/types/youtube';

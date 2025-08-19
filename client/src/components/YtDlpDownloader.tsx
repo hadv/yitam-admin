@@ -3,6 +3,7 @@ import axios from 'axios';
 import { FiDownload, FiTrash2, FiInfo, FiAlertCircle, FiCheckCircle } from 'react-icons/fi';
 import { socketService } from '../services/socketService';
 import { ProgressStage, ProgressUpdate } from '../types/progress';
+import { availableDomains } from '../constants/domains';
 
 interface YtDlpVideoInfo {
   videoId: string;
@@ -61,6 +62,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   const [forceAudioTranscription, setForceAudioTranscription] = useState(false);
   const [useAudioOnly, setUseAudioOnly] = useState(false);
   const [embedAudioTranscript, setEmbedAudioTranscript] = useState(true);
+  const [selectedDomains, setSelectedDomains] = useState<string[]>(['youtube', 'audio']);
   const [transcriptCopied, setTranscriptCopied] = useState(false);
   const [activeTranscriptTab, setActiveTranscriptTab] = useState<'raw' | 'enhanced'>('enhanced');
   const [transcriptCleaningLevel, setTranscriptCleaningLevel] = useState<'basic' | 'aggressive'>('aggressive');
@@ -74,6 +76,15 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
     } catch (err) {
       console.error('Failed to copy transcript:', err);
     }
+  };
+
+  // Handle domain selection
+  const handleDomainChange = (domain: string) => {
+    setSelectedDomains(prev =>
+      prev.includes(domain)
+        ? prev.filter(d => d !== domain)
+        : [...prev, domain]
+    );
   };
 
   // Cookies management
@@ -290,6 +301,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
           forceAudioTranscription: forceAudioTranscription,
           transcriptCleaningLevel: transcriptCleaningLevel,
           embedAudioTranscript: embedAudioTranscript,
+          domains: embedAudioTranscript ? selectedDomains : undefined,
           audioTranscriptionOptions: {
             languageCode: 'vi-VN',
             enableAutomaticPunctuation: true,
@@ -666,6 +678,41 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                         🔗 Embed audio transcript for search (store in vector database)
                       </span>
                     </label>
+
+                    {/* Knowledge Domains Selection */}
+                    {embedAudioTranscript && (
+                      <div className="ml-6 mt-2">
+                        <label className="block text-xs text-gray-600 mb-2">
+                          🎯 Select Knowledge Domains:
+                        </label>
+                        <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-4 max-h-32 overflow-y-auto">
+                          {availableDomains.map((domain) => (
+                            <div key={domain} className="flex items-center">
+                              <input
+                                id={`domain-${domain}`}
+                                name="domains"
+                                type="checkbox"
+                                className="h-3 w-3 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                                checked={selectedDomains.includes(domain)}
+                                onChange={() => handleDomainChange(domain)}
+                                disabled={isDownloading}
+                              />
+                              <label
+                                htmlFor={`domain-${domain}`}
+                                className="ml-1 block text-xs text-gray-600"
+                              >
+                                {domain}
+                              </label>
+                            </div>
+                          ))}
+                        </div>
+                        {selectedDomains.length === 0 && (
+                          <p className="mt-1 text-xs text-red-500">
+                            Select at least one domain to categorize your content
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -702,6 +749,41 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                     🔗 Embed audio transcript for search (store in vector database)
                   </span>
                 </label>
+
+                {/* Knowledge Domains Selection for Audio-Only Mode */}
+                {embedAudioTranscript && (
+                  <div className="ml-6 mt-2">
+                    <label className="block text-xs text-gray-600 mb-2">
+                      🎯 Select Knowledge Domains:
+                    </label>
+                    <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-4 max-h-32 overflow-y-auto">
+                      {availableDomains.map((domain) => (
+                        <div key={domain} className="flex items-center">
+                          <input
+                            id={`audio-domain-${domain}`}
+                            name="audio-domains"
+                            type="checkbox"
+                            className="h-3 w-3 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                            checked={selectedDomains.includes(domain)}
+                            onChange={() => handleDomainChange(domain)}
+                            disabled={isDownloading}
+                          />
+                          <label
+                            htmlFor={`audio-domain-${domain}`}
+                            className="ml-1 block text-xs text-gray-600"
+                          >
+                            {domain}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                    {selectedDomains.length === 0 && (
+                      <p className="mt-1 text-xs text-red-500">
+                        Select at least one domain to categorize your content
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

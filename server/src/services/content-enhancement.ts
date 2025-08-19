@@ -168,4 +168,72 @@ export async function batchEnhanceContent(
   }
   
   return enhancedChunks;
-} 
+}
+
+/**
+ * Enhance transcript text using Generative AI
+ * Specifically designed for audio transcripts to fix grammar, punctuation, and readability
+ *
+ * @param transcript Raw transcript text
+ * @param language Language of the transcript (default: 'Vietnamese')
+ * @returns Enhanced transcript text
+ */
+export async function enhanceTranscriptWithLLM(
+  transcript: string,
+  language: string = 'Vietnamese'
+): Promise<string> {
+  try {
+    console.log(`Enhancing transcript with LLM (${language})`);
+
+    // Skip enhancement if transcript is empty
+    if (!transcript || transcript.trim() === '') {
+      console.warn('Skipping transcript enhancement - empty content');
+      return transcript;
+    }
+
+    // Initialize Gemini API
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+
+    // Build prompt for transcript enhancement
+    const prompt = `You are an expert transcript editor. Please enhance the following audio transcript by:
+
+1. LANGUAGE: The transcript is in ${language}. Your response MUST be in ${language} as well.
+2. GRAMMAR: Fix grammar mistakes and awkward phrasing
+3. PUNCTUATION: Add proper punctuation (periods, commas, question marks, etc.)
+4. CAPITALIZATION: Fix capitalization issues
+5. SLANG/COLLOQUIALISMS: Convert slang words and colloquial expressions to proper language
+6. READABILITY: Improve overall readability while preserving the original meaning
+7. STRUCTURE: Break into proper sentences and paragraphs where appropriate
+
+IMPORTANT RULES:
+- Preserve the original meaning and content completely
+- Do not add new information or interpretations
+- Do not remove any important content
+- Keep the conversational tone but make it more polished
+- Return ONLY the enhanced transcript, no additional commentary
+
+ORIGINAL TRANSCRIPT:
+${transcript}
+
+ENHANCED TRANSCRIPT:`;
+
+    // Call Gemini API
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 8000,
+      }
+    });
+
+    const enhancedTranscript = result.response.text().trim();
+    console.log('✅ Transcript enhanced successfully');
+
+    return enhancedTranscript;
+  } catch (error) {
+    console.error('Error enhancing transcript:', error);
+    // Return original transcript if enhancement fails
+    return transcript;
+  }
+}
