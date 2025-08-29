@@ -624,7 +624,7 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
 
     // Prepare download options
     const ytDlpOptions: YtDlpDownloadOptions = {
-      quality: options.quality || 'best[ext=mp4]/best',
+      quality: options.quality || 'best[ext=mp4][height<=1080]', // More robust default with server-side fallback
       format: options.format,
       audioOnly: options.audioOnly,
       extractAudio: options.extractAudio,
@@ -711,7 +711,7 @@ export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res
 
     // Prepare download options
     const ytDlpOptions: YtDlpDownloadOptions = {
-      quality: options.quality || 'best[ext=mp4]/best',
+      quality: options.quality || 'best[ext=mp4][height<=1080]', // More robust default with server-side fallback
       format: options.format,
       audioOnly: options.audioOnly,
       extractAudio: options.extractAudio,

@@ -192,79 +192,154 @@ export const getYtDlpVideoInfo = async (
 };
 
 /**
- * Download YouTube video using yt-dlp
+ * Get progressive format fallback options for yt-dlp
  */
-export const downloadVideoWithYtDlp = async (
+const getFormatFallbacks = (options: YtDlpDownloadOptions): string[] => {
+  if (options.audioOnly || options.extractAudio) {
+    return ['bestaudio']; // For audio extraction, format is handled by --extract-audio
+  }
+
+  // Build progressive fallback list starting with user preferences
+  const fallbackFormats: string[] = [];
+
+  // Start with user-specified format/quality if provided
+  if (options.format) {
+    fallbackFormats.push(options.format);
+  } else if (options.quality) {
+    fallbackFormats.push(options.quality);
+  }
+
+  // Add comprehensive fallback options (avoiding duplicates)
+  const standardFallbacks = [
+    'best[ext=mp4][height<=1080]',           // Prefer MP4, max 1080p
+    'best[ext=mp4]',                         // Any MP4 quality
+    'best[height<=1080]',                    // Max 1080p, any format
+    'best[height<=720]',                     // Max 720p, any format
+    'bestvideo[height<=1080]+bestaudio',     // Separate streams, max 1080p
+    'bestvideo[height<=720]+bestaudio',      // Separate streams, max 720p
+    'bestvideo+bestaudio/best',              // Best separate streams or combined
+    'best[protocol!=m3u8]',                  // Best non-HLS format
+    'best',                                  // Best available quality, any format
+    'bestvideo+bestaudio',                   // Any separate video+audio streams
+    'worst'                                  // Last resort - any available format
+  ];
+
+  // Add fallbacks that aren't already in the list
+  for (const format of standardFallbacks) {
+    if (!fallbackFormats.includes(format)) {
+      fallbackFormats.push(format);
+    }
+  }
+
+  return fallbackFormats;
+};
+
+/**
+ * Download YouTube video using yt-dlp with format fallback
+ */
+const downloadWithFormatFallback = async (
   youtubeUrl: string,
-  options: YtDlpDownloadOptions = {},
+  outputTemplate: string,
+  options: YtDlpDownloadOptions,
   progressCallback?: (progress: YtDlpDownloadProgress) => void
-): Promise<{ filePath: string; videoInfo: YtDlpVideoInfo }> => {
-  return new Promise(async (resolve, reject) => {
+): Promise<{ filePath: string; errorOutput: string }> => {
+  const formatOptions = getFormatFallbacks(options);
+  let lastError = '';
+
+  console.log(`🎬 Starting download with ${formatOptions.length} format fallback options:`, formatOptions);
+
+  for (let i = 0; i < formatOptions.length; i++) {
+    const format = formatOptions[i];
+    console.log(`🎯 Attempting download with format: ${format} (attempt ${i + 1}/${formatOptions.length})`);
+
     try {
-      const videoId = extractYouTubeId(youtubeUrl);
-      if (!videoId) {
-        reject(new Error('Invalid YouTube URL'));
-        return;
+      const result = await attemptDownloadWithFormat(
+        youtubeUrl,
+        outputTemplate,
+        format,
+        options,
+        progressCallback
+      );
+
+      console.log(`✅ Download successful with format: ${format}`);
+      return result;
+    } catch (error: any) {
+      lastError = error.message;
+      console.log(`❌ Format ${format} failed: ${error.message}`);
+
+      // If this is the last attempt, provide comprehensive error information
+      if (i === formatOptions.length - 1) {
+        console.log(`💥 All ${formatOptions.length} format options exhausted. Formats tried:`, formatOptions);
+        throw new Error(`All format options failed. Last error: ${lastError}`);
       }
 
-      // Get video info first
-      const videoInfo = await getYtDlpVideoInfo(youtubeUrl, options.cookiesFile);
-      
-      // Sanitize filename
-      const sanitizedTitle = videoInfo.title
-        .replace(/[^\w\s-]/g, '') // Remove special characters
-        .replace(/\s+/g, '_') // Replace spaces with underscores
-        .substring(0, 100); // Limit length
+      // Continue to next format option
+      console.log(`🔄 Trying next format option...`);
+    }
+  }
 
-      const outputTemplate = options.outputTemplate || 
-        path.join(DOWNLOADS_DIR, `${videoId}_${sanitizedTitle}.%(ext)s`);
+  throw new Error(`All format options failed. Last error: ${lastError}`);
+};
 
-      const args = [
-        '--newline',
-        '--progress',
-        '--no-playlist',
-        '-o', outputTemplate,
-        youtubeUrl
-      ];
+/**
+ * Attempt download with a specific format
+ */
+const attemptDownloadWithFormat = async (
+  youtubeUrl: string,
+  outputTemplate: string,
+  format: string,
+  options: YtDlpDownloadOptions,
+  progressCallback?: (progress: YtDlpDownloadProgress) => void
+): Promise<{ filePath: string; errorOutput: string }> => {
+  return new Promise((resolve, reject) => {
+    const videoId = extractYouTubeId(youtubeUrl);
+    if (!videoId) {
+      reject(new Error('Invalid YouTube URL'));
+      return;
+    }
 
-      // Add quality/format options
-      if (options.audioOnly || options.extractAudio) {
-        args.push('--extract-audio');
-        if (options.audioFormat) {
-          args.push('--audio-format', options.audioFormat);
-        }
-      } else if (options.format) {
-        args.push('-f', options.format);
-      } else if (options.quality) {
-        args.push('-f', options.quality);
-      } else {
-        args.push('-f', 'best[ext=mp4]/best');
+    const args = [
+      '--newline',
+      '--progress',
+      '--no-playlist',
+      '-o', outputTemplate,
+      youtubeUrl
+    ];
+
+    // Add quality/format options
+    if (options.audioOnly || options.extractAudio) {
+      args.push('--extract-audio');
+      if (options.audioFormat) {
+        args.push('--audio-format', options.audioFormat);
       }
+    } else {
+      args.push('-f', format);
+    }
 
-      // Add cookies file if provided
-      if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
-        args.push('--cookies', options.cookiesFile);
-      }
+    // Add cookies file if provided
+    if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
+      args.push('--cookies', options.cookiesFile);
+    }
 
-      console.log('Starting yt-dlp download with args:', args);
+    console.log('Starting yt-dlp download with args:', args);
 
-      // Use full path and proper environment
-      const ytdlpPath = '/usr/local/bin/yt-dlp';
-      const spawnOptions = {
-        env: {
-          ...process.env,
-          PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin'
-        },
-        cwd: process.cwd()
-      };
+    // Use full path and proper environment
+    const ytdlpPath = '/usr/local/bin/yt-dlp';
+    const spawnOptions = {
+      env: {
+        ...process.env,
+        PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin'
+      },
+      cwd: process.cwd()
+    };
 
-      const ytdlp = spawn(ytdlpPath, args, spawnOptions);
-      let finalFilePath = '';
-      let errorOutput = '';
+    const ytdlp = spawn(ytdlpPath, args, spawnOptions);
+    let finalFilePath = '';
+    let errorOutput = '';
 
-      ytdlp.stdout.on('data', (data) => {
-        const output = data.toString();
-        console.log('yt-dlp output:', output);
+    ytdlp.stdout.on('data', (data) => {
+      const output = data.toString();
+      console.log('yt-dlp output:', output);
 
         // Parse progress information with multiple regex patterns for robustness
         const progressPatterns = [
@@ -339,43 +414,71 @@ export const downloadVideoWithYtDlp = async (
         console.error('yt-dlp error:', data.toString());
       });
 
-      ytdlp.on('close', (code) => {
-        if (code !== 0) {
-          reject(new Error(`yt-dlp failed with code ${code}: ${errorOutput}`));
+    ytdlp.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`yt-dlp failed with code ${code}: ${errorOutput}`));
+        return;
+      }
+
+      if (!finalFilePath) {
+        // Try to find the downloaded file
+        const files = fs.readdirSync(DOWNLOADS_DIR);
+        const videoFiles = files.filter(file => file.startsWith(videoId!));
+        if (videoFiles.length > 0) {
+          finalFilePath = path.join(DOWNLOADS_DIR, videoFiles[0]);
+        } else {
+          reject(new Error('Could not determine downloaded file path'));
           return;
         }
+      }
 
-        if (!finalFilePath) {
-          // Try to find the downloaded file
-          const files = fs.readdirSync(DOWNLOADS_DIR);
-          const videoFiles = files.filter(file => file.startsWith(videoId));
-          if (videoFiles.length > 0) {
-            finalFilePath = path.join(DOWNLOADS_DIR, videoFiles[0]);
-          } else {
-            reject(new Error('Could not determine downloaded file path'));
-            return;
-          }
-        }
+      resolve({ filePath: finalFilePath, errorOutput });
+    });
 
-        if (progressCallback) {
-          progressCallback({
-            videoId,
-            progress: 100,
-            downloadedBytes: 0,
-            totalBytes: 0,
-            speed: '0B/s',
-            eta: '00:00',
-            status: 'complete'
-          });
-        }
+    ytdlp.on('error', (error) => {
+      reject(new Error(`Failed to spawn yt-dlp: ${error.message}`));
+    });
+  });
+};
 
-        console.log(`yt-dlp download completed: ${finalFilePath}`);
-        resolve({ filePath: finalFilePath, videoInfo });
-      });
+/**
+ * Download YouTube video using yt-dlp
+ */
+export const downloadVideoWithYtDlp = async (
+  youtubeUrl: string,
+  options: YtDlpDownloadOptions = {},
+  progressCallback?: (progress: YtDlpDownloadProgress) => void
+): Promise<{ filePath: string; videoInfo: YtDlpVideoInfo }> => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const videoId = extractYouTubeId(youtubeUrl);
+      if (!videoId) {
+        reject(new Error('Invalid YouTube URL'));
+        return;
+      }
 
-      ytdlp.on('error', (error) => {
-        reject(new Error(`Failed to spawn yt-dlp: ${error.message}`));
-      });
+      // Get video info first
+      const videoInfo = await getYtDlpVideoInfo(youtubeUrl, options.cookiesFile);
+
+      // Sanitize filename
+      const sanitizedTitle = videoInfo.title
+        .replace(/[^\w\s-]/g, '') // Remove special characters
+        .replace(/\s+/g, '_') // Replace spaces with underscores
+        .substring(0, 100); // Limit length
+
+      const outputTemplate = options.outputTemplate ||
+        path.join(DOWNLOADS_DIR, `${videoId}_${sanitizedTitle}.%(ext)s`);
+
+      // Use the new format fallback system
+      const result = await downloadWithFormatFallback(
+        youtubeUrl,
+        outputTemplate,
+        options,
+        progressCallback
+      );
+
+      console.log(`yt-dlp download completed: ${result.filePath}`);
+      resolve({ filePath: result.filePath, videoInfo });
 
     } catch (error) {
       reject(error);
