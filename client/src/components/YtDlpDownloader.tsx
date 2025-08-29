@@ -95,7 +95,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   
   // Download options
   const [downloadOptions, setDownloadOptions] = useState({
-    quality: 'best[ext=mp4]/best',
+    quality: 'best[ext=mp4][height<=1080]', // More robust default with fallback handled server-side
     audioOnly: false,
     extractAudio: false,
     audioFormat: 'mp3' as 'mp3' | 'aac' | 'flac' | 'wav'
