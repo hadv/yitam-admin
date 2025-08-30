@@ -594,7 +594,7 @@ export const checkYtDlpStatus = async (req: Request, res: Response) => {
 // Download YouTube video using yt-dlp (for member-only content)
 export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response) => {
   try {
-    const { youtubeUrl, options = {}, cookiesFileName } = req.body;
+    const { youtubeUrl, options = {}, cookiesFileName, cookiesFromBrowser } = req.body;
     const socketId = req.body.socketId;
 
     if (!youtubeUrl) {
@@ -629,7 +629,8 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
       audioOnly: options.audioOnly,
       extractAudio: options.extractAudio,
       audioFormat: options.audioFormat,
-      cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined
+      cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined,
+      cookiesFromBrowser: cookiesFromBrowser
     };
 
     // Download the video with progress callback
@@ -681,7 +682,7 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
 // Download YouTube video with enhanced metadata using yt-dlp
 export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res: Response) => {
   try {
-    const { youtubeUrl, options = {}, cookiesFileName, enhancementOptions = {}, useAudioOnly = false } = req.body;
+    const { youtubeUrl, options = {}, cookiesFileName, cookiesFromBrowser, enhancementOptions = {}, useAudioOnly = false } = req.body;
     const socketId = req.body.socketId;
 
     if (!youtubeUrl) {
@@ -716,7 +717,8 @@ export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res
       audioOnly: options.audioOnly,
       extractAudio: options.extractAudio,
       audioFormat: options.audioFormat,
-      cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined
+      cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined,
+      cookiesFromBrowser: cookiesFromBrowser
     };
 
     // Step 1: Download the video with progress callback
@@ -884,7 +886,7 @@ export const generateEnhancedMetadata = async (req: Request, res: Response) => {
 // Get video information using yt-dlp
 export const getYoutubeVideoInfoWithYtDlp = async (req: Request, res: Response) => {
   try {
-    const { youtubeUrl, cookiesFileName } = req.body;
+    const { youtubeUrl, cookiesFileName, cookiesFromBrowser } = req.body;
     console.log('🔍 yt-dlp info request received:', { youtubeUrl, cookiesFileName });
 
     if (!youtubeUrl) {
@@ -900,7 +902,7 @@ export const getYoutubeVideoInfoWithYtDlp = async (req: Request, res: Response) 
     }
 
     const cookiesFile = cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined;
-    const videoInfo = await getYtDlpVideoInfo(youtubeUrl, cookiesFile);
+    const videoInfo = await getYtDlpVideoInfo(youtubeUrl, cookiesFile, cookiesFromBrowser);
 
     return res.status(200).json({
       message: 'Video information retrieved successfully with yt-dlp',
