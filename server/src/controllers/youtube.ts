@@ -537,6 +537,32 @@ export const serveDownloadedVideo = async (req: Request, res: Response) => {
     const fileSize = stat.size;
     const range = req.headers.range;
 
+    // Determine content type based on file extension
+    const fileExtension = path.extname(fileName).toLowerCase();
+    let contentType = 'video/mp4'; // Default fallback
+
+    switch (fileExtension) {
+      case '.mkv':
+        contentType = 'video/x-matroska';
+        break;
+      case '.mp4':
+        contentType = 'video/mp4';
+        break;
+      case '.webm':
+        contentType = 'video/webm';
+        break;
+      case '.avi':
+        contentType = 'video/x-msvideo';
+        break;
+      case '.mov':
+        contentType = 'video/quicktime';
+        break;
+      default:
+        contentType = 'video/mp4';
+    }
+
+    console.log(`Serving video file: ${fileName} with content type: ${contentType}`);
+
     if (range) {
       // Support for video streaming with range requests
       const parts = range.replace(/bytes=/, "").split("-");
@@ -548,14 +574,14 @@ export const serveDownloadedVideo = async (req: Request, res: Response) => {
         'Content-Range': `bytes ${start}-${end}/${fileSize}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': chunksize,
-        'Content-Type': 'video/mp4',
+        'Content-Type': contentType,
       };
       res.writeHead(206, head);
       file.pipe(res);
     } else {
       const head = {
         'Content-Length': fileSize,
-        'Content-Type': 'video/mp4',
+        'Content-Type': contentType,
       };
       res.writeHead(200, head);
       require('fs').createReadStream(filePath).pipe(res);
@@ -624,7 +650,7 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
 
     // Prepare download options
     const ytDlpOptions: YtDlpDownloadOptions = {
-      quality: options.quality || 'best[ext=mp4][height<=1080]', // More robust default with server-side fallback
+      quality: options.quality || 'auto', // Default to auto (yt-dlp's natural format selection)
       format: options.format,
       audioOnly: options.audioOnly,
       extractAudio: options.extractAudio,
@@ -712,7 +738,7 @@ export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res
 
     // Prepare download options
     const ytDlpOptions: YtDlpDownloadOptions = {
-      quality: options.quality || 'best[ext=mp4][height<=1080]', // More robust default with server-side fallback
+      quality: options.quality || 'auto', // Default to auto (yt-dlp's natural format selection)
       format: options.format,
       audioOnly: options.audioOnly,
       extractAudio: options.extractAudio,

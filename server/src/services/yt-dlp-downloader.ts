@@ -96,7 +96,6 @@ export const getYtDlpVideoInfo = async (
       '--dump-json',
       '--no-download',
       '--no-playlist',
-      '-k', // Use -k flag like your working command
       youtubeUrl
     ];
 
@@ -216,6 +215,31 @@ const getFormatFallbacks = (options: YtDlpDownloadOptions): string[] => {
     fallbackFormats.push(options.quality);
   }
 
+  // If user selected "auto", just return that - no fallbacks needed
+  if (options.quality === 'auto') {
+    return ['auto'];
+  }
+
+  // If user specifically requested MKV, try more MKV variations before falling back
+  const userWantsMkv = options.quality?.includes('mkv') || options.format?.includes('mkv');
+
+  if (userWantsMkv) {
+    // Add more MKV-specific options before falling back to other formats
+    const mkvFallbacks = [
+      'best[ext=mkv]',                         // Any MKV quality
+      'best[ext=mkv][height<=1440]',           // MKV up to 1440p
+      'best[ext=mkv][height<=1080]',           // MKV up to 1080p
+      'best[ext=mkv][height<=720]',            // MKV up to 720p
+      'bestvideo[ext=mkv]+bestaudio[ext=m4a]/bestvideo[ext=mkv]+bestaudio', // MKV video + audio
+    ];
+
+    for (const format of mkvFallbacks) {
+      if (!fallbackFormats.includes(format)) {
+        fallbackFormats.push(format);
+      }
+    }
+  }
+
   // Add comprehensive fallback options (avoiding duplicates)
   const standardFallbacks = [
     'best[ext=mp4][height<=1080]',           // Prefer MP4, max 1080p
@@ -269,6 +293,12 @@ const downloadWithFormatFallback = async (
       );
 
       console.log(`✅ Download successful with format: ${format}`);
+      console.log(`📁 Downloaded file: ${result.filePath}`);
+
+      // Log the actual file extension to verify format
+      const fileExtension = result.filePath.split('.').pop()?.toLowerCase();
+      console.log(`📄 File extension: ${fileExtension}`);
+
       return result;
     } catch (error: any) {
       lastError = error.message;
@@ -309,7 +339,6 @@ const attemptDownloadWithFormat = async (
       '--newline',
       '--progress',
       '--no-playlist',
-      '-k', // Use -k flag like your working command
       '-o', outputTemplate,
       youtubeUrl
     ];
@@ -320,9 +349,11 @@ const attemptDownloadWithFormat = async (
       if (options.audioFormat) {
         args.push('--audio-format', options.audioFormat);
       }
-    } else {
+    } else if (format !== 'auto') {
+      // Only add format parameter if not using auto mode
       args.push('-f', format);
     }
+    // If format is 'auto', don't add -f parameter to let yt-dlp choose the best format automatically
 
     // Add cookies from browser if specified
     if (options.cookiesFromBrowser) {
@@ -414,11 +445,20 @@ const attemptDownloadWithFormat = async (
         const fileMatch = output.match(/\[download\] Destination: (.+)/);
         if (fileMatch) {
           finalFilePath = fileMatch[1].trim();
+          console.log(`📁 Detected destination file: ${finalFilePath}`);
         }
 
         const mergeMatch = output.match(/\[Merger\] Merging formats into "(.+)"/);
         if (mergeMatch) {
           finalFilePath = mergeMatch[1].trim();
+          console.log(`🔗 Detected merged file: ${finalFilePath}`);
+        }
+
+        // Also check for ffmpeg merge messages
+        const ffmpegMatch = output.match(/\[ffmpeg\] Merging formats into "(.+)"/);
+        if (ffmpegMatch) {
+          finalFilePath = ffmpegMatch[1].trim();
+          console.log(`🎬 Detected ffmpeg merged file: ${finalFilePath}`);
         }
       });
 
@@ -438,11 +478,40 @@ const attemptDownloadWithFormat = async (
         const files = fs.readdirSync(DOWNLOADS_DIR);
         const videoFiles = files.filter(file => file.startsWith(videoId!));
         if (videoFiles.length > 0) {
-          finalFilePath = path.join(DOWNLOADS_DIR, videoFiles[0]);
+          // Prefer merged files (mkv, mp4) over separate streams (f137, f251, etc.)
+          const mergedFiles = videoFiles.filter(file =>
+            !file.includes('.f1') && !file.includes('.f2') && !file.includes('.f3') &&
+            (file.endsWith('.mkv') || file.endsWith('.mp4') || file.endsWith('.webm'))
+          );
+
+          if (mergedFiles.length > 0) {
+            finalFilePath = path.join(DOWNLOADS_DIR, mergedFiles[0]);
+            console.log(`📁 Found merged file: ${finalFilePath}`);
+          } else {
+            finalFilePath = path.join(DOWNLOADS_DIR, videoFiles[0]);
+            console.log(`📁 Found file: ${finalFilePath}`);
+          }
         } else {
           reject(new Error('Could not determine downloaded file path'));
           return;
         }
+      }
+
+      // Clean up temporary stream files if they exist
+      try {
+        const files = fs.readdirSync(DOWNLOADS_DIR);
+        const tempFiles = files.filter(file =>
+          file.startsWith(videoId!) &&
+          (file.includes('.f1') || file.includes('.f2') || file.includes('.f3'))
+        );
+
+        for (const tempFile of tempFiles) {
+          const tempPath = path.join(DOWNLOADS_DIR, tempFile);
+          fs.unlinkSync(tempPath);
+          console.log(`🗑️ Cleaned up temporary file: ${tempFile}`);
+        }
+      } catch (cleanupError) {
+        console.log('⚠️ Could not clean up temporary files:', cleanupError);
       }
 
       resolve({ filePath: finalFilePath, errorOutput });
