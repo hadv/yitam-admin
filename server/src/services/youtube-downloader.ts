@@ -200,7 +200,7 @@ export const getDownloadedVideos = (): Array<{ fileName: string; filePath: strin
 
     const files = fs.readdirSync(downloadsDir);
     return files
-      .filter(file => file.match(/\.(mp4|webm|flv|mp3)$/i))
+      .filter(file => file.match(/\.(mp4|webm|flv|mp3|mkv|avi|mov)$/i))
       .map(file => {
         const filePath = path.join(downloadsDir, file);
         const stats = fs.statSync(filePath);

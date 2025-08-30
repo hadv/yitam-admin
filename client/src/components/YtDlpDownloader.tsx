@@ -97,7 +97,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   
   // Download options
   const [downloadOptions, setDownloadOptions] = useState({
-    quality: 'best[ext=mp4][height<=1080]', // More robust default with fallback handled server-side
+    quality: 'auto', // Default to yt-dlp's automatic format selection (usually MKV)
     audioOnly: false,
     extractAudio: false,
     audioFormat: 'mp3' as 'mp3' | 'aac' | 'flac' | 'wav'
@@ -553,7 +553,12 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
               onChange={(e) => setDownloadOptions(prev => ({ ...prev, quality: e.target.value }))}
               className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
             >
+              <option value="auto">Auto (yt-dlp default) - Usually MKV</option>
+              <option value="best[ext=mkv]">Best Quality (MKV Only) - Force MKV</option>
+              <option value="best[ext=mkv]/best">Best Quality (MKV Preferred)</option>
               <option value="best[ext=mp4]/best">Best Quality (MP4)</option>
+              <option value="best[ext=mkv][height<=1080]">1080p MKV Only</option>
+              <option value="best[ext=mkv][height<=720]">720p MKV Only</option>
               <option value="worst[ext=mp4]/worst">Worst Quality (MP4)</option>
               <option value="best[height<=720]">720p or lower</option>
               <option value="best[height<=480]">480p or lower</option>
