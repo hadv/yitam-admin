@@ -240,15 +240,35 @@ const getFormatFallbacks = (options: YtDlpDownloadOptions): string[] => {
     }
   }
 
+  // If user specifically requested MP4, provide better MP4 fallbacks
+  const userWantsMp4 = options.quality?.includes('mp4') || options.format?.includes('mp4');
+
+  if (userWantsMp4) {
+    // Add comprehensive MP4-specific options before falling back to other formats
+    const mp4Fallbacks = [
+      'bestvideo[ext=mp4]+bestaudio[ext=m4a]', // Best MP4 video + M4A audio (highest quality MP4 combo)
+      'bestvideo[ext=mp4]+bestaudio',          // Best MP4 video + any audio
+      'best[ext=mp4]',                         // Best single-file MP4 (may be lower quality)
+      'best[ext=mp4][height<=1440]',           // MP4 up to 1440p
+      'best[ext=mp4][height<=1080]',           // MP4 up to 1080p
+      'best[ext=mp4][height<=720]',            // MP4 up to 720p
+    ];
+
+    for (const format of mp4Fallbacks) {
+      if (!fallbackFormats.includes(format)) {
+        fallbackFormats.push(format);
+      }
+    }
+  }
+
   // Add comprehensive fallback options (avoiding duplicates)
   const standardFallbacks = [
-    'best[ext=mp4][height<=1080]',           // Prefer MP4, max 1080p
-    'best[ext=mp4]',                         // Any MP4 quality
+    'bestvideo+bestaudio/best',              // Best separate streams or combined (highest quality)
+    'best[height<=1440]',                    // Max 1440p, any format
     'best[height<=1080]',                    // Max 1080p, any format
     'best[height<=720]',                     // Max 720p, any format
     'bestvideo[height<=1080]+bestaudio',     // Separate streams, max 1080p
     'bestvideo[height<=720]+bestaudio',      // Separate streams, max 720p
-    'bestvideo+bestaudio/best',              // Best separate streams or combined
     'best[protocol!=m3u8]',                  // Best non-HLS format
     'best',                                  // Best available quality, any format
     'bestvideo+bestaudio',                   // Any separate video+audio streams

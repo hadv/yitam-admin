@@ -553,17 +553,40 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
               onChange={(e) => setDownloadOptions(prev => ({ ...prev, quality: e.target.value }))}
               className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
             >
-              <option value="auto">Auto (yt-dlp default) - Usually MKV</option>
-              <option value="best[ext=mkv]">Best Quality (MKV Only) - Force MKV</option>
-              <option value="best[ext=mkv]/best">Best Quality (MKV Preferred)</option>
-              <option value="best[ext=mp4]/best">Best Quality (MP4)</option>
-              <option value="best[ext=mkv][height<=1080]">1080p MKV Only</option>
-              <option value="best[ext=mkv][height<=720]">720p MKV Only</option>
-              <option value="worst[ext=mp4]/worst">Worst Quality (MP4)</option>
-              <option value="best[height<=720]">720p or lower</option>
-              <option value="best[height<=480]">480p or lower</option>
-              <option value="best[height<=360]">360p or lower</option>
+              <option value="auto">🎯 Auto (Highest Quality) - Usually MKV/WebM</option>
+              <option value="best[ext=mkv]">🏆 Best Quality (MKV Only) - Force MKV</option>
+              <option value="best[ext=mkv]/best">🥇 Best Quality (MKV Preferred)</option>
+              <option value="bestvideo[ext=mp4]+bestaudio[ext=m4a]">📱 Best MP4 Quality (Separate Streams)</option>
+              <option value="best[ext=mp4]/best">📱 Best MP4 (May be lower quality)</option>
+              <option value="best[ext=mkv][height<=1440]">🎬 1440p MKV Only</option>
+              <option value="best[ext=mkv][height<=1080]">📺 1080p MKV Only</option>
+              <option value="best[ext=mkv][height<=720]">📱 720p MKV Only</option>
+              <option value="best[ext=mp4][height<=1080]">📱 1080p MP4 Only</option>
+              <option value="best[ext=mp4][height<=720]">📱 720p MP4 Only</option>
+              <option value="worst[ext=mp4]/worst">⚡ Smallest File (MP4)</option>
+              <option value="best[height<=720]">📱 720p or lower (Any format)</option>
+              <option value="best[height<=480]">📱 480p or lower (Any format)</option>
+              <option value="best[height<=360]">📱 360p or lower (Any format)</option>
             </select>
+            <div className="mt-2 text-sm text-gray-600">
+              <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                <div className="flex items-start">
+                  <div className="flex-shrink-0">
+                    <svg className="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                    </svg>
+                  </div>
+                  <div className="ml-3">
+                    <h4 className="text-sm font-medium text-blue-800">Quality Guide</h4>
+                    <div className="mt-1 text-sm text-blue-700">
+                      <p><strong>Highest Quality:</strong> Auto or MKV options (may use VP9/AV1 codecs)</p>
+                      <p><strong>MP4 Compatibility:</strong> MP4 options prioritize compatibility but may have lower quality than MKV/WebM</p>
+                      <p><strong>Best MP4:</strong> "Separate Streams" option provides highest quality MP4 by merging best video + audio</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Audio Options */}
