@@ -92,6 +92,8 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   const [selectedCookiesFile, setSelectedCookiesFile] = useState<string>('');
   const [isUploadingCookies, setIsUploadingCookies] = useState(false);
   const [cookiesUploadMessage, setCookiesUploadMessage] = useState('');
+  const [cookiesFromBrowser, setCookiesFromBrowser] = useState('chrome');
+  const [cookieMethod, setCookieMethod] = useState<'file' | 'browser'>('browser');
   
   // Download options
   const [downloadOptions, setDownloadOptions] = useState({
@@ -185,7 +187,8 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
     try {
       const response = await axios.post('/api/youtube/yt-dlp/info', {
         youtubeUrl,
-        cookiesFileName: selectedCookiesFile || undefined
+        cookiesFileName: cookieMethod === 'file' ? selectedCookiesFile || undefined : undefined,
+        cookiesFromBrowser: cookieMethod === 'browser' ? cookiesFromBrowser : undefined
       });
 
       setVideoInfo(response.data.videoInfo);
@@ -283,7 +286,8 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
       const requestBody: any = {
         youtubeUrl,
         socketId,
-        cookiesFileName: selectedCookiesFile || undefined,
+        cookiesFileName: cookieMethod === 'file' ? selectedCookiesFile || undefined : undefined,
+        cookiesFromBrowser: cookieMethod === 'browser' ? cookiesFromBrowser : undefined,
         options: downloadOptions,
         useAudioOnly: useAudioOnly
       };
@@ -413,8 +417,61 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
       {/* Cookies Management */}
       <div className="border border-gray-200 rounded-lg p-4">
         <h3 className="text-lg font-medium text-gray-900 mb-4">Browser Cookies (for Member-Only Videos)</h3>
-        
-        {/* Upload Cookies */}
+
+        {/* Cookie Method Selection */}
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Cookie Method
+          </label>
+          <div className="flex space-x-4">
+            <label className="flex items-center">
+              <input
+                type="radio"
+                value="browser"
+                checked={cookieMethod === 'browser'}
+                onChange={(e) => setCookieMethod(e.target.value as 'file' | 'browser')}
+                className="mr-2"
+              />
+              <span className="text-sm text-gray-700">Use Live Browser Cookies (Recommended)</span>
+            </label>
+            <label className="flex items-center">
+              <input
+                type="radio"
+                value="file"
+                checked={cookieMethod === 'file'}
+                onChange={(e) => setCookieMethod(e.target.value as 'file' | 'browser')}
+                className="mr-2"
+              />
+              <span className="text-sm text-gray-700">Upload Cookie File</span>
+            </label>
+          </div>
+        </div>
+
+        {/* Browser Selection (when using live cookies) */}
+        {cookieMethod === 'browser' && (
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Select Browser
+            </label>
+            <select
+              value={cookiesFromBrowser}
+              onChange={(e) => setCookiesFromBrowser(e.target.value)}
+              className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="chrome">Google Chrome</option>
+              <option value="firefox">Mozilla Firefox</option>
+              <option value="safari">Safari</option>
+              <option value="edge">Microsoft Edge</option>
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              Make sure you're logged into YouTube in the selected browser
+            </p>
+          </div>
+        )}
+
+        {/* Upload Cookies (when using file method) */}
+        {cookieMethod === 'file' && (
+        <>
         <div className="mb-4">
           <label className="block text-sm font-medium text-gray-700 mb-2">
             Upload Browser Cookies File (.txt)
@@ -476,6 +533,8 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
               ))}
             </div>
           </div>
+        )}
+        </>
         )}
       </div>
 
@@ -869,7 +928,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                 </div>
               </div>
 
-              {videoInfo.isMemberOnly && !selectedCookiesFile && (
+              {videoInfo.isMemberOnly && cookieMethod === 'file' && !selectedCookiesFile && (
                 <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-md">
                   <div className="flex">
                     <FiAlertCircle className="h-5 w-5 text-yellow-400 mr-2 mt-0.5" />

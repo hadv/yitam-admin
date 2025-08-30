@@ -32,6 +32,7 @@ export interface YtDlpDownloadOptions {
   format?: string; // e.g., 'mp4', 'webm', 'best[ext=mp4]'
   audioOnly?: boolean;
   cookiesFile?: string; // Path to browser cookies file
+  cookiesFromBrowser?: string; // Browser to extract cookies from: 'chrome', 'firefox', 'safari', 'edge'
   outputTemplate?: string;
   extractAudio?: boolean;
   audioFormat?: 'mp3' | 'aac' | 'flac' | 'wav';
@@ -79,10 +80,11 @@ export const checkYtDlpInstallation = async (): Promise<boolean> => {
  */
 export const getYtDlpVideoInfo = async (
   youtubeUrl: string,
-  cookiesFile?: string
+  cookiesFile?: string,
+  cookiesFromBrowser?: string
 ): Promise<YtDlpVideoInfo> => {
   return new Promise((resolve, reject) => {
-    console.log('🔍 getYtDlpVideoInfo called with:', { youtubeUrl, cookiesFile });
+    console.log('🔍 getYtDlpVideoInfo called with:', { youtubeUrl, cookiesFile, cookiesFromBrowser });
 
     const videoId = extractYouTubeId(youtubeUrl);
     if (!videoId) {
@@ -94,15 +96,20 @@ export const getYtDlpVideoInfo = async (
       '--dump-json',
       '--no-download',
       '--no-playlist',
+      '-k', // Use -k flag like your working command
       youtubeUrl
     ];
 
-    // Add cookies file if provided
-    if (cookiesFile && fs.existsSync(cookiesFile)) {
+    // Add cookies from browser if specified
+    if (cookiesFromBrowser) {
+      args.push('--cookies-from-browser', `${cookiesFromBrowser}:Profile 5`);
+    }
+    // Otherwise, add cookies file if provided
+    else if (cookiesFile && fs.existsSync(cookiesFile)) {
       console.log('✅ Cookies file exists, adding to args:', cookiesFile);
       args.push('--cookies', cookiesFile);
     } else {
-      console.log('❌ Cookies file not found or not provided:', cookiesFile);
+      console.log('❌ No cookies provided (file or browser)');
     }
 
     console.log('🚀 Spawning yt-dlp with args:', args);
@@ -302,6 +309,7 @@ const attemptDownloadWithFormat = async (
       '--newline',
       '--progress',
       '--no-playlist',
+      '-k', // Use -k flag like your working command
       '-o', outputTemplate,
       youtubeUrl
     ];
@@ -316,8 +324,13 @@ const attemptDownloadWithFormat = async (
       args.push('-f', format);
     }
 
-    // Add cookies file if provided
-    if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
+    // Add cookies from browser if specified
+    if (options.cookiesFromBrowser) {
+      // Use the exact format that works in command line (without extra quotes)
+      args.push('--cookies-from-browser', `${options.cookiesFromBrowser}:Profile 5`);
+    }
+    // Otherwise, add cookies file if provided
+    else if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
       args.push('--cookies', options.cookiesFile);
     }
 
@@ -458,7 +471,7 @@ export const downloadVideoWithYtDlp = async (
       }
 
       // Get video info first
-      const videoInfo = await getYtDlpVideoInfo(youtubeUrl, options.cookiesFile);
+      const videoInfo = await getYtDlpVideoInfo(youtubeUrl, options.cookiesFile, options.cookiesFromBrowser);
 
       // Sanitize filename
       const sanitizedTitle = videoInfo.title
