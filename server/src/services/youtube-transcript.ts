@@ -666,6 +666,9 @@ export const processYoutubeTranscript = async (
         // Create embedding for the chunk
         chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i+1}/${totalChunks}`, i+1);
         const embedding = await createEmbedding(content);
+
+        // Add a small delay to avoid overwhelming the API and prevent 503 errors
+        await new Promise(resolve => setTimeout(resolve, 300)); // 300ms delay
         
         // Create clean content for AI processing
         const cleanContent = content.replace(/\[\d{1,2}:\d{1,2}(:\d{1,2})?\]/g, '')
@@ -749,6 +752,9 @@ export const processYoutubeTranscript = async (
         // Create embedding for the chunk
         chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i+1}/${totalChunks}`, i+1);
         const embedding = await createEmbedding(content);
+
+        // Add a small delay to avoid overwhelming the API and prevent 503 errors
+        await new Promise(resolve => setTimeout(resolve, 300)); // 300ms delay
         
         // Create clean content for AI processing
         const cleanContent = content.replace(/\[\d{1,2}:\d{1,2}(:\d{1,2})?\]/g, '')
@@ -1812,7 +1818,7 @@ async function generateTitleAndSummary(
   try {
     // Initialize Gemini API
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
     // Extract a shorter sample of the content for the title/summary generation
     // to avoid token limits (first 1500 chars should be enough for context)

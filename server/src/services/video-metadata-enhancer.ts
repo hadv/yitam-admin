@@ -388,7 +388,7 @@ async function generateTranscriptBasedMetadata(
   }
 
   const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
   // Truncate transcript if too long (keep first 8000 chars for context)
   const transcriptSample = transcript.length > 8000 
@@ -427,7 +427,7 @@ async function generateMetadataBasedEnhancement(
   }
 
   const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
   const prompt = buildMetadataEnhancementPrompt(videoInfo, language, options);
 
@@ -608,7 +608,7 @@ async function enhanceTranscriptWithLLM(
     console.log('🔧 Enhancing transcript with LLM...');
 
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
     // Build prompt based on cleaning level
     const isAggressive = cleaningLevel === 'aggressive';

@@ -392,7 +392,7 @@ async function generateChunkMetadata(
   }
 
   const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
   
   // Process chunks in batches to avoid API rate limits
   const batchSize = 3;
