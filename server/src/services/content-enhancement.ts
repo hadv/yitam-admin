@@ -12,6 +12,45 @@ if (!GEMINI_API_KEY) {
 }
 
 /**
+ * Retry function with exponential backoff for handling temporary service outages
+ */
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  baseDelay: number = 1000
+): Promise<T> {
+  let lastError: Error;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+
+      // Check if it's a retryable error (503, 429, network issues)
+      const isRetryable = error.message?.includes('503') ||
+                         error.message?.includes('Service Unavailable') ||
+                         error.message?.includes('429') ||
+                         error.message?.includes('Too Many Requests') ||
+                         error.message?.includes('ECONNRESET') ||
+                         error.message?.includes('ETIMEDOUT');
+
+      if (!isRetryable || attempt === maxRetries) {
+        throw error;
+      }
+
+      // Calculate delay with exponential backoff
+      const delay = baseDelay * Math.pow(2, attempt);
+      console.log(`Gemini API error (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`);
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+
+  throw lastError!;
+}
+
+/**
  * Enhancement types for content processing
  */
 export enum EnhancementType {
@@ -73,7 +112,7 @@ export async function enhanceContent(
 
     // Initialize Gemini API
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
     // Build prompt based on enhancement types
     let prompt = `Enhance the following content according to these specific instructions:\n\n`;
@@ -118,14 +157,16 @@ export async function enhanceContent(
 
     prompt += `\nCONTENT:\n${chunk.content}\n\nReturn ONLY the enhanced content in ${detectedLanguage}, with no additional explanations or commentary. PRESERVE THE ORIGINAL TEXT STRUCTURE.`;
 
-    // Call Gemini API
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: fullOptions.temperature,
-        maxOutputTokens: fullOptions.maxOutputTokens,
-      }
-    });
+    // Call Gemini API with retry mechanism for service unavailable errors
+    const result = await retryWithBackoff(async () => {
+      return await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: fullOptions.temperature,
+          maxOutputTokens: fullOptions.maxOutputTokens,
+        }
+      });
+    }, 3, 2000); // 3 retries, starting with 2 second delay
     
     const enhancedContent = result.response.text().trim();
     
@@ -193,7 +234,7 @@ export async function enhanceTranscriptWithLLM(
 
     // Initialize Gemini API
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
     // Build prompt for transcript enhancement
     const prompt = `You are an expert transcript editor. Please enhance the following audio transcript by:
