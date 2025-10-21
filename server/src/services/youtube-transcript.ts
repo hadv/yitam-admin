@@ -831,7 +831,8 @@ const splitTextIntoChunks = (
   }
   
   // Try to split by timestamps - this is the YouTube specific format
-  const timestampPattern = /\[\d{2}:\d{2}\]/g;
+  // Supports formats like [M:SS], [MM:SS], [MMM:SS], [HH:MM:SS], etc.
+  const timestampPattern = /\[\d{1,}:\d{2}(?::\d{2})?\]/g;
   const timestamps = text.match(timestampPattern);
   
   // If no timestamps found, use simple text chunking
@@ -1683,6 +1684,7 @@ const parseXmlTranscript = (xmlContent: string): string | null => {
       const start = parseFloat($(elem).attr('start') || '0');
 
       // Format the timestamp with hours if needed
+      // Supports variable-length timestamps: [M:SS], [MM:SS], [MMM:SS], [HH:MM:SS], etc.
       let timeCode: string;
       if (start >= 3600) {
         // Format as [HH:MM:SS] for videos longer than 1 hour
@@ -1691,10 +1693,10 @@ const parseXmlTranscript = (xmlContent: string): string | null => {
         const seconds = Math.floor(start % 60);
         timeCode = `[${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
       } else {
-        // Format as [MM:SS] for shorter videos
+        // Format as [MM:SS] or [MMM:SS] for shorter videos (allows variable digit count)
         const minutes = Math.floor(start / 60);
         const seconds = Math.floor(start % 60);
-        timeCode = `[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}]`;
+        timeCode = `[${minutes}:${seconds.toString().padStart(2, '0')}]`;
       }
 
       const text = $(elem).text().trim();
@@ -1883,7 +1885,8 @@ SUMMARY: [your generated summary in ${language}]`;
 // Function to resize a chunk that exceeds embedding limits
 function resizeChunk(chunk: string, maxSize: number, overlap: number): string[] {
   // Try to split by timestamps
-  const timestampPattern = /\[\d{2}:\d{2}\]/g;
+  // Supports formats like [M:SS], [MM:SS], [MMM:SS], [HH:MM:SS], etc.
+  const timestampPattern = /\[\d{1,}:\d{2}(?::\d{2})?\]/g;
   const hasTimestamps = timestampPattern.test(chunk);
   
   if (hasTimestamps) {
