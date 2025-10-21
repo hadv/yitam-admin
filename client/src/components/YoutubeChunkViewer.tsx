@@ -26,8 +26,8 @@ const YoutubeChunkViewer = ({ chunk, onClose }: YoutubeChunkViewerProps) => {
   };
 
   const extractTimestamps = (content: string): string[] => {
-    // Extract timestamps in format [MM:SS] or [HH:MM:SS]
-    const timestampRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+    // Extract timestamps in format [M:SS], [MM:SS], [MMM:SS], [HH:MM:SS], etc.
+    const timestampRegex = /\[(\d{1,}:\d{2}(?::\d{2})?)\]/g;
     const matches = content.match(timestampRegex);
     return matches ? matches.map(match => match.slice(1, -1)) : [];
   };
