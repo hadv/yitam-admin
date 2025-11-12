@@ -807,7 +807,7 @@ export class DatabaseService {
       // Fallback function
       () => {
         let deletedCount = 0;
-        
+
         // Delete each matching document
         for (const id of chunkIds) {
           if (inMemoryDocuments.has(id)) {
@@ -815,14 +815,14 @@ export class DatabaseService {
             deletedCount++;
           }
         }
-        
+
         console.log(`Deleted ${deletedCount} in-memory chunks`);
         return deletedCount;
       },
       // Qdrant function
       async () => {
         if (chunkIds.length === 0) return 0;
-        
+
         try {
           // In Qdrant, we need to create a filter that matches these IDs
           const filter = {
@@ -831,26 +831,26 @@ export class DatabaseService {
               match: { value: id }
             }))
           };
-          
+
           console.log(`Attempting to delete ${chunkIds.length} chunks`);
-          
+
           // Count how many points match our filter
           const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
           const pointCount = countResponse.count;
-          
+
           if (pointCount === 0) {
             console.log('No matching chunks found to delete');
             return 0;
           }
-          
+
           console.log(`Found ${pointCount} chunks to delete`);
-          
+
           // Use the delete method with the filter
           await this.qdrantClient.delete(COLLECTION_NAME, {
             filter,
             wait: true
           });
-          
+
           console.log(`Deleted ${pointCount} chunks`);
           return pointCount;
         } catch (error) {
@@ -861,4 +861,195 @@ export class DatabaseService {
       this.fallbackService.isFallbackActive()
     );
   }
-} 
+
+  /**
+   * Update chunks with new content and embeddings
+   * This is useful for fixing typos or correcting content in existing chunks
+   */
+  public async updateChunks(updates: Array<{
+    pointId: string;  // The Qdrant point ID (UUID)
+    chunkId: string;  // The chunk ID in payload
+    content?: string;
+    enhancedContent?: string;
+    embedding?: number[];
+    title?: string;
+    summary?: string;
+  }>): Promise<number> {
+    return this.fallbackService.withFallback(
+      'updateChunks',
+      // Fallback function
+      () => {
+        let updatedCount = 0;
+
+        for (const update of updates) {
+          const existing = inMemoryDocuments.get(update.chunkId);
+          if (existing) {
+            // Update the document with new values
+            if (update.content !== undefined) existing.document.content = update.content;
+            if (update.enhancedContent !== undefined) existing.document.enhancedContent = update.enhancedContent;
+            if (update.embedding !== undefined) existing.document.embedding = update.embedding;
+            if (update.title !== undefined) existing.document.title = update.title;
+            if (update.summary !== undefined) existing.document.summary = update.summary;
+
+            updatedCount++;
+          }
+        }
+
+        console.log(`Updated ${updatedCount} in-memory chunks`);
+        return updatedCount;
+      },
+      // Qdrant function
+      async () => {
+        if (updates.length === 0) return 0;
+
+        try {
+          // First, we need to get the existing points to preserve data we're not updating
+          const pointIds = updates.map(u => u.pointId);
+
+          // Get existing points
+          const existingPoints = await this.qdrantClient.retrieve(COLLECTION_NAME, {
+            ids: pointIds,
+            with_payload: true,
+            with_vector: true
+          });
+
+          // Create a map for quick lookup
+          const updateMap = new Map(updates.map(u => [u.pointId, u]));
+
+          // Prepare updated points
+          const updatedPoints = existingPoints
+            .map(point => {
+              const update = updateMap.get(String(point.id));
+              if (!update) return null;
+
+              const payload = point.payload as any;
+
+              // Merge updates with existing payload
+              const updatedPayload = {
+                ...payload,
+                ...(update.content !== undefined && { content: update.content }),
+                ...(update.enhancedContent !== undefined && { enhancedContent: update.enhancedContent }),
+                ...(update.title !== undefined && { title: update.title }),
+                ...(update.summary !== undefined && { summary: update.summary })
+              };
+
+              return {
+                id: point.id,
+                vector: update.embedding !== undefined ? update.embedding : (point.vector as number[]),
+                payload: updatedPayload
+              };
+            })
+            .filter((p): p is { id: string | number; vector: number[]; payload: any } => p !== null);
+
+          if (updatedPoints.length === 0) {
+            console.log('No matching chunks found to update');
+            return 0;
+          }
+
+          console.log(`Updating ${updatedPoints.length} chunks in Qdrant`);
+
+          // Use upsert to update the points
+          await this.qdrantClient.upsert(COLLECTION_NAME, {
+            wait: true,
+            points: updatedPoints
+          });
+
+          console.log(`Successfully updated ${updatedPoints.length} chunks`);
+          return updatedPoints.length;
+        } catch (error) {
+          console.error('Error updating chunks:', error);
+          throw error;
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+
+  /**
+   * Get all chunks with their Qdrant point IDs
+   * Useful for bulk operations that need to update chunks
+   */
+  public async getAllChunksWithPointIds(filter?: any): Promise<Array<{
+    pointId: string;
+    chunkId: string;
+    content: string;
+    enhancedContent?: string;
+    title?: string;
+    summary?: string;
+    documentName: string;
+    sourceFile?: string;
+    domains?: string[];
+  }>> {
+    return this.fallbackService.withFallback(
+      'getAllChunksWithPointIds',
+      // Fallback function
+      () => {
+        return Array.from(inMemoryDocuments.entries()).map(([id, item]) => ({
+          pointId: id,
+          chunkId: item.document.id,
+          content: item.document.content,
+          enhancedContent: item.document.enhancedContent,
+          title: item.document.title,
+          summary: item.document.summary,
+          documentName: item.document.documentName,
+          sourceFile: item.document.sourceFile,
+          domains: item.document.domains
+        }));
+      },
+      // Qdrant function
+      async () => {
+        try {
+          const chunks: Array<{
+            pointId: string;
+            chunkId: string;
+            content: string;
+            enhancedContent?: string;
+            title?: string;
+            summary?: string;
+            documentName: string;
+            sourceFile?: string;
+            domains?: string[];
+          }> = [];
+
+          let nextPageOffset: string | undefined;
+          const limit = 100;
+
+          do {
+            const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+              filter,
+              with_payload: true,
+              limit,
+              offset: nextPageOffset,
+            });
+
+            const resultsPage = response.points.map(point => {
+              const payload = point.payload as any;
+
+              return {
+                pointId: String(point.id),
+                chunkId: payload.id,
+                content: payload.content,
+                enhancedContent: payload.enhancedContent,
+                title: payload.title,
+                summary: payload.summary,
+                documentName: payload.documentName,
+                sourceFile: payload.sourceFile,
+                domains: payload.domains || ['default']
+              };
+            });
+
+            chunks.push(...resultsPage);
+            nextPageOffset = response.next_page_offset as string | undefined;
+          } while (nextPageOffset);
+
+          console.log(`Retrieved ${chunks.length} chunks with point IDs`);
+          return chunks;
+        } catch (error) {
+          console.error('Error getting chunks with point IDs:', error);
+          return [];
+        }
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+}

@@ -20,6 +20,12 @@ import {
   getCookiesFilesList,
   deleteCookiesFileController
 } from '../controllers/youtube';
+import {
+  correctAllTranscripts,
+  correctYoutubeTranscripts,
+  getCorrectionRules,
+  previewCorrections
+} from '../controllers/transcript-correction';
 import { getJobStatus } from '../services/job-queue';
 import { getScrapingMetrics, resetScrapingMetrics } from '../services/youtube-transcript';
 
@@ -146,5 +152,19 @@ router.get('/cookies', getCookiesFilesList);
 
 // Route for deleting cookies file
 router.delete('/cookies/:fileName', deleteCookiesFileController);
+
+// Transcript correction routes
+
+// Route for correcting all transcripts
+router.post('/correct-transcripts', correctAllTranscripts);
+
+// Route for correcting YouTube transcripts only
+router.post('/correct-youtube-transcripts', correctYoutubeTranscripts);
+
+// Route for getting default correction rules
+router.get('/correction-rules', getCorrectionRules);
+
+// Route for previewing corrections without applying them
+router.post('/preview-corrections', previewCorrections);
 
 export default router;
