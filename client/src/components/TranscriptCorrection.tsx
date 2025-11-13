@@ -51,8 +51,20 @@ const TranscriptCorrection = () => {
     setResult(null);
 
     try {
+      // Filter out empty rules
+      const validRules = correctionRules.filter(
+        rule => rule.incorrect.trim() && rule.correct.trim()
+      );
+
+      if (validRules.length === 0) {
+        setError('Please add at least one valid correction rule');
+        setLoading(false);
+        return;
+      }
+
       const requestData: CorrectionRequest = {
         dryRun,
+        correctionRules: validRules,
         ...(videoId && { videoId: videoId.trim() })
       };
 
@@ -81,9 +93,23 @@ const TranscriptCorrection = () => {
     setPreviewResult(null);
 
     try {
+      // Filter out empty rules
+      const validRules = correctionRules.filter(
+        rule => rule.incorrect.trim() && rule.correct.trim()
+      );
+
+      if (validRules.length === 0) {
+        setError('Please add at least one valid correction rule');
+        setPreviewLoading(false);
+        return;
+      }
+
       const response = await axios.post<PreviewCorrectionResponse>(
         '/api/youtube/preview-corrections',
-        { text: previewText }
+        {
+          text: previewText,
+          correctionRules: validRules
+        }
       );
 
       setPreviewResult(response.data);
@@ -424,11 +450,13 @@ const TranscriptCorrection = () => {
             </div>
 
             <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
-              <h4 className="font-medium text-blue-900 mb-2">Note</h4>
-              <p className="text-sm text-blue-800">
-                Custom rules are currently for preview only. The actual correction will use the default Buddhist terminology rules.
-                To use custom rules in production, you need to pass them in the API request.
-              </p>
+              <h4 className="font-medium text-blue-900 mb-2">How to Use</h4>
+              <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
+                <li>Add or modify correction rules above</li>
+                <li>Use the "Preview" tab to test your rules on sample text</li>
+                <li>Use the "Run Correction" tab to apply rules to your database</li>
+                <li>Always run a "Dry Run" first to preview changes before applying them</li>
+              </ul>
             </div>
           </div>
         )}
