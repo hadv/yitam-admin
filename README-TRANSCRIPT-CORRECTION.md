@@ -2,7 +2,13 @@
 
 ## Tổng quan
 
-Chức năng này cho phép sửa các lỗi chính tả trong transcript đã được lưu trong vector database. Đặc biệt hữu ích cho việc sửa các từ chuyên biệt của Phật giáo trong tiếng Việt bị nhận dạng sai khi transcript từ YouTube.
+Chức năng này cho phép sửa các lỗi chính tả trong transcript, title, và summary đã được lưu trong vector database. Đặc biệt hữu ích cho việc sửa các từ chuyên biệt của Phật giáo trong tiếng Việt bị nhận dạng sai khi transcript từ YouTube.
+
+**Các trường được sửa:**
+- `content`: Nội dung transcript chính
+- `enhancedContent`: Nội dung transcript đã được LLM enhance
+- `title`: Tiêu đề của chunk
+- `summary`: Tóm tắt của chunk
 
 ## Các lỗi chính tả mặc định
 
@@ -46,7 +52,7 @@ curl -X POST http://localhost:3001/api/youtube/correct-youtube-transcripts \
 
 ## Tính năng
 
-- ✅ Sửa lỗi chính tả trong content và enhancedContent
+- ✅ Sửa lỗi chính tả trong content, enhancedContent, title, và summary
 - ✅ Tự động tạo embedding mới cho content đã sửa
 - ✅ Hỗ trợ dry run để xem trước kết quả
 - ✅ Hỗ trợ quy tắc sửa lỗi tùy chỉnh
