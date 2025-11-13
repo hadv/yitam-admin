@@ -98,6 +98,8 @@ export class TranscriptCorrectionService {
         chunkId: string;
         content: string;
         enhancedContent?: string;
+        title?: string;
+        summary?: string;
         embedding: number[];
       }> = [];
 
@@ -107,30 +109,65 @@ export class TranscriptCorrectionService {
 
         // Apply corrections to content
         const contentResult = this.applyCorrections(chunk.content, correctionRules);
-        
+
         // Apply corrections to enhancedContent if it exists
         let enhancedContentResult = null;
         if (chunk.enhancedContent) {
           enhancedContentResult = this.applyCorrections(chunk.enhancedContent, correctionRules);
         }
 
+        // Apply corrections to title if it exists
+        let titleResult = null;
+        if (chunk.title) {
+          titleResult = this.applyCorrections(chunk.title, correctionRules);
+        }
+
+        // Apply corrections to summary if it exists
+        let summaryResult = null;
+        if (chunk.summary) {
+          summaryResult = this.applyCorrections(chunk.summary, correctionRules);
+        }
+
         // Check if any changes were made
         const contentChanged = contentResult.correctedText !== chunk.content;
-        const enhancedContentChanged = enhancedContentResult && 
+        const enhancedContentChanged = enhancedContentResult &&
           enhancedContentResult.correctedText !== chunk.enhancedContent;
+        const titleChanged = titleResult &&
+          titleResult.correctedText !== chunk.title;
+        const summaryChanged = summaryResult &&
+          summaryResult.correctedText !== chunk.summary;
 
-        if (contentChanged || enhancedContentChanged) {
+        if (contentChanged || enhancedContentChanged || titleChanged || summaryChanged) {
           stats.chunksModified++;
 
-          // Merge replacement counts
+          // Merge replacement counts from content
           contentResult.replacements.forEach((count, rule) => {
             const currentCount = stats.replacementsByRule.get(rule) || 0;
             stats.replacementsByRule.set(rule, currentCount + count);
             stats.totalReplacements += count;
           });
 
+          // Merge replacement counts from enhancedContent
           if (enhancedContentResult) {
             enhancedContentResult.replacements.forEach((count, rule) => {
+              const currentCount = stats.replacementsByRule.get(rule) || 0;
+              stats.replacementsByRule.set(rule, currentCount + count);
+              stats.totalReplacements += count;
+            });
+          }
+
+          // Merge replacement counts from title
+          if (titleResult) {
+            titleResult.replacements.forEach((count, rule) => {
+              const currentCount = stats.replacementsByRule.get(rule) || 0;
+              stats.replacementsByRule.set(rule, currentCount + count);
+              stats.totalReplacements += count;
+            });
+          }
+
+          // Merge replacement counts from summary
+          if (summaryResult) {
+            summaryResult.replacements.forEach((count, rule) => {
               const currentCount = stats.replacementsByRule.get(rule) || 0;
               stats.replacementsByRule.set(rule, currentCount + count);
               stats.totalReplacements += count;
@@ -147,6 +184,8 @@ export class TranscriptCorrectionService {
                 chunkId: chunk.chunkId,
                 content: contentResult.correctedText,
                 enhancedContent: enhancedContentResult?.correctedText,
+                title: titleResult?.correctedText,
+                summary: summaryResult?.correctedText,
                 embedding: newEmbedding
               });
 

@@ -2,7 +2,12 @@
 
 ## Overview
 
-The Transcript Correction UI provides a visual interface for fixing spelling mistakes in YouTube transcripts stored in the vector database. This is particularly useful for correcting Buddhist terminology that may be incorrectly transcribed.
+The Transcript Correction UI provides a visual interface for fixing spelling mistakes in YouTube transcripts, titles, and summaries stored in the vector database. This is particularly useful for correcting Buddhist terminology that may be incorrectly transcribed.
+
+**Fields corrected:**
+- Transcript content (both original and LLM-enhanced)
+- Chunk titles
+- Chunk summaries
 
 ## Accessing the UI
 

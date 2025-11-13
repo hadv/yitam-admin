@@ -2,7 +2,13 @@
 
 ## Tổng quan
 
-Chức năng này cho phép sửa các lỗi chính tả trong transcript đã được lưu trong vector database. Đặc biệt hữu ích cho việc sửa các từ chuyên biệt của Phật giáo trong tiếng Việt bị nhận dạng sai khi transcript từ YouTube.
+Chức năng này cho phép sửa các lỗi chính tả trong transcript, title, và summary đã được lưu trong vector database. Đặc biệt hữu ích cho việc sửa các từ chuyên biệt của Phật giáo trong tiếng Việt bị nhận dạng sai khi transcript từ YouTube.
+
+**Các trường được sửa:**
+- `content`: Nội dung transcript chính
+- `enhancedContent`: Nội dung transcript đã được LLM enhance
+- `title`: Tiêu đề của chunk
+- `summary`: Tóm tắt của chunk
 
 ## Các lỗi chính tả mặc định được sửa
 
