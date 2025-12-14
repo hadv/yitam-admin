@@ -28,7 +28,7 @@ import {
   SortField,
   SortDirection
 } from '@/types/file-manager';
-import { SyncResult } from '@/types/google-drive';
+import { SyncResult, RenameResult } from '@/types/google-drive';
 import googleDriveService from '@/services/googleDriveService';
 
 const FileBrowser = () => {
@@ -177,7 +177,7 @@ const FileBrowser = () => {
 
       // Remove from local state
       setFiles(prev => prev.filter(f => f.fileName !== file.fileName));
-      
+
       // Update statistics
       if (statistics) {
         setStatistics({
@@ -298,6 +298,48 @@ const FileBrowser = () => {
     setAuthRefresh(prev => prev + 1);
   };
 
+  // Rename feature functions
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameLoading, setRenameLoading] = useState(false);
+  const [renameResult, setRenameResult] = useState<RenameResult | null>(null);
+  const [renameFolderUrl, setRenameFolderUrl] = useState('');
+
+  const handleRenameClick = () => {
+    if (!googleDriveService.isAuthenticated()) {
+      googleDriveService.authenticate();
+      return;
+    }
+    setShowRenameModal(true);
+  };
+
+  const closeRenameModal = () => {
+    setShowRenameModal(false);
+    setRenameResult(null);
+    setRenameFolderUrl('');
+  };
+
+  const handleRenameSubmit = async () => {
+    if (!renameFolderUrl.trim()) {
+      alert('Please enter a folder URL');
+      return;
+    }
+
+    setRenameLoading(true);
+    setRenameResult(null);
+
+    try {
+      const result = await googleDriveService.renameYoutubeFiles({
+        folderUrl: renameFolderUrl.trim()
+      });
+      setRenameResult(result);
+    } catch (error) {
+      console.error('Rename error:', error);
+      alert(error instanceof Error ? error.message : 'Failed to rename files');
+    } finally {
+      setRenameLoading(false);
+    }
+  };
+
   return (
     <div className="max-w-7xl mx-auto p-6">
       <div className="bg-white rounded-lg shadow-lg">
@@ -310,8 +352,17 @@ const FileBrowser = () => {
             </h1>
             <div className="flex space-x-3">
               <button
+                onClick={handleRenameClick}
+                disabled={loading || syncLoading || renameLoading}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50"
+              >
+                <FiFile className="mr-2 h-4 w-4" />
+                Rename YouTube Files
+              </button>
+
+              <button
                 onClick={handleSyncToGoogleDrive}
-                disabled={loading || syncLoading}
+                disabled={loading || syncLoading || renameLoading}
                 className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
               >
                 <FiCloud className="mr-2 h-4 w-4" />
@@ -340,7 +391,7 @@ const FileBrowser = () => {
             </div>
           </div>
 
-          {/* Statistics */}
+          {/* ... existing statistics code ... */}
           {statistics && (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
               <div className="bg-blue-50 p-4 rounded-lg">
@@ -528,11 +579,10 @@ const FileBrowser = () => {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                        file.type === 'document' ? 'bg-blue-100 text-blue-800' :
+                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${file.type === 'document' ? 'bg-blue-100 text-blue-800' :
                         file.type === 'video' ? 'bg-red-100 text-red-800' :
-                        'bg-gray-100 text-gray-800'
-                      }`}>
+                          'bg-gray-100 text-gray-800'
+                        }`}>
                         {file.type}
                       </span>
                     </td>
@@ -560,7 +610,7 @@ const FileBrowser = () => {
                         >
                           <FiEye className="h-4 w-4" />
                         </a>
-                        
+
                         {/* Download button */}
                         <a
                           href={`/api/files/${file.fileName}/serve?directory=${file.directory}&download=true`}
@@ -569,7 +619,7 @@ const FileBrowser = () => {
                         >
                           <FiDownload className="h-4 w-4" />
                         </a>
-                        
+
                         {/* Delete button */}
                         <button
                           onClick={() => deleteFile(file)}
@@ -740,6 +790,127 @@ const FileBrowser = () => {
                     <button
                       onClick={closeSyncModal}
                       className="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rename YouTube Files Modal */}
+      {showRenameModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900 flex items-center">
+                  <FiFile className="mr-2 text-purple-600" />
+                  Rename YouTube Files
+                </h3>
+                <button
+                  onClick={closeRenameModal}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <FiX className="h-5 w-5" />
+                </button>
+              </div>
+
+              {!renameResult ? (
+                <div className="space-y-4">
+                  <p className="text-sm text-gray-600">
+                    Enter the Google Drive folder URL. Files starting with a YouTube video ID will be renamed to include the video title.
+                  </p>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Google Drive Folder URL
+                    </label>
+                    <input
+                      type="text"
+                      value={renameFolderUrl}
+                      onChange={(e) => setRenameFolderUrl(e.target.value)}
+                      placeholder="https://drive.google.com/..."
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
+
+                  <div className="flex justify-end space-x-3 pt-4">
+                    <button
+                      onClick={closeRenameModal}
+                      className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleRenameSubmit}
+                      disabled={renameLoading || !renameFolderUrl.trim()}
+                      className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-md flex items-center"
+                    >
+                      {renameLoading ? (
+                        <>
+                          <FiRefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                          Processing...
+                        </>
+                      ) : (
+                        <>
+                          <FiFile className="mr-2 h-4 w-4" />
+                          Start Rename
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className={`p-4 rounded-md ${renameResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
+                    <h4 className={`font-medium ${renameResult.success ? 'text-green-800' : 'text-red-800'}`}>
+                      {renameResult.success ? 'Rename Completed!' : 'Rename Completed with Errors'}
+                    </h4>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 text-center">
+                    <div className="bg-green-50 p-3 rounded-md">
+                      <div className="text-2xl font-bold text-green-600">{renameResult.renamedFiles.length}</div>
+                      <div className="text-sm text-green-700">Renamed</div>
+                    </div>
+                    <div className="bg-yellow-50 p-3 rounded-md">
+                      <div className="text-2xl font-bold text-yellow-600">{renameResult.skippedFiles.length}</div>
+                      <div className="text-sm text-yellow-700">Skipped</div>
+                    </div>
+                  </div>
+
+                  {renameResult.renamedFiles.length > 0 && (
+                    <div>
+                      <h5 className="font-medium text-gray-900 mb-2">Renamed Files:</h5>
+                      <div className="max-h-32 overflow-y-auto bg-gray-50 p-2 rounded text-sm">
+                        {renameResult.renamedFiles.map((file: { original: string; new: string }, index: number) => (
+                          <div key={index} className="text-gray-700 mb-1">
+                            <div className="text-xs text-gray-500">{file.original}</div>
+                            <div className="text-green-700">→ {file.new}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {renameResult.errors.length > 0 && (
+                    <div>
+                      <h5 className="font-medium text-gray-900 mb-2">Errors:</h5>
+                      <div className="max-h-32 overflow-y-auto bg-red-50 p-2 rounded text-sm">
+                        {renameResult.errors.map((error: string, index: number) => (
+                          <div key={index} className="text-red-700">✗ {error}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end pt-4">
+                    <button
+                      onClick={closeRenameModal}
+                      className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md"
                     >
                       Close
                     </button>

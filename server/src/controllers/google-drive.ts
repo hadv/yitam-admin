@@ -5,7 +5,10 @@ import {
   uploadFileToDrive,
   checkFileExists,
   DriveFolder,
-  SyncResult
+  SyncResult,
+  extractFolderIdFromUrl,
+  renameFilesInDrive,
+  RenameResult
 } from '../services/google-drive';
 import { validateClientToken } from '../services/youtube-auth';
 
@@ -37,7 +40,7 @@ export const syncFiles = async (req: Request, res: Response) => {
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       accessToken = authHeader.substring(7);
-      
+
       // Validate the token and get user info
       const tokenValidation = await validateClientToken(accessToken);
       if (!tokenValidation) {
@@ -110,7 +113,7 @@ export const createFolder = async (req: Request, res: Response) => {
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       accessToken = authHeader.substring(7);
-      
+
       const tokenValidation = await validateClientToken(accessToken);
       if (!tokenValidation) {
         return res.status(401).json({
@@ -178,7 +181,7 @@ export const uploadSingleFile = async (req: Request, res: Response) => {
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       accessToken = authHeader.substring(7);
-      
+
       const tokenValidation = await validateClientToken(accessToken);
       if (!tokenValidation) {
         return res.status(401).json({
@@ -255,7 +258,7 @@ export const checkFileInDrive = async (req: Request, res: Response) => {
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       accessToken = authHeader.substring(7);
-      
+
       const tokenValidation = await validateClientToken(accessToken);
       if (!tokenValidation) {
         return res.status(401).json({
@@ -294,6 +297,71 @@ export const checkFileInDrive = async (req: Request, res: Response) => {
     console.error('Error checking file in Google Drive:', error);
     res.status(500).json({
       message: 'Failed to check file in Google Drive',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
+ * Rename files in Google Drive folder based on YouTube IDs
+ */
+export const renameYoutubeFiles = async (req: Request, res: Response) => {
+  try {
+    const { folderUrl } = req.body;
+    const authHeader = req.headers.authorization;
+
+    if (!folderUrl) {
+      return res.status(400).json({
+        message: 'Folder URL is required'
+      });
+    }
+
+    // Extract access token
+    let accessToken: string | undefined;
+    let userId: string | undefined;
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      accessToken = authHeader.substring(7);
+
+      const tokenValidation = await validateClientToken(accessToken);
+      if (!tokenValidation) {
+        return res.status(401).json({
+          message: 'Invalid or expired access token'
+        });
+      }
+      userId = tokenValidation.userId;
+    } else {
+      return res.status(401).json({
+        message: 'Authorization header with Bearer token is required'
+      });
+    }
+
+    // Extract folder ID
+    const folderId = extractFolderIdFromUrl(folderUrl);
+    if (!folderId) {
+      return res.status(400).json({
+        message: 'Invalid Google Drive folder URL or ID'
+      });
+    }
+
+    console.log(`Starting rename process for folder: ${folderId}`);
+
+    // Perform rename operation
+    const result: RenameResult = await renameFilesInDrive(
+      folderId,
+      userId,
+      accessToken
+    );
+
+    res.status(200).json({
+      message: result.success ? 'Rename operation completed successfully' : 'Rename operation completed with errors',
+      result
+    });
+
+  } catch (error) {
+    console.error('Error renaming files:', error);
+    res.status(500).json({
+      message: 'Failed to rename files',
       error: error instanceof Error ? error.message : 'Unknown error'
     });
   }

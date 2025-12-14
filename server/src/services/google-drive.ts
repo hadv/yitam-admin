@@ -42,7 +42,7 @@ export const getDriveClient = async (userId: string) => {
   if (!oauth2Client) {
     throw new Error('Not authenticated. Please authenticate with Google first.');
   }
-  
+
   return google.drive({
     version: 'v3',
     auth: oauth2Client
@@ -94,7 +94,7 @@ export const createDriveFolder = async (
   accessToken?: string
 ): Promise<DriveFolder> => {
   try {
-    const drive = userId 
+    const drive = userId
       ? await getDriveClient(userId)
       : await getDriveClientWithToken(accessToken!);
 
@@ -134,7 +134,7 @@ export const findOrCreateFolder = async (
   accessToken?: string
 ): Promise<DriveFolder> => {
   try {
-    const drive = userId 
+    const drive = userId
       ? await getDriveClient(userId)
       : await getDriveClientWithToken(accessToken!);
 
@@ -179,7 +179,7 @@ export const uploadFileToDrive = async (
   accessToken?: string
 ): Promise<DriveFile> => {
   try {
-    const drive = userId 
+    const drive = userId
       ? await getDriveClient(userId)
       : await getDriveClientWithToken(accessToken!);
 
@@ -235,7 +235,7 @@ export const checkFileExists = async (
   accessToken?: string
 ): Promise<DriveFile | null> => {
   try {
-    const drive = userId 
+    const drive = userId
       ? await getDriveClient(userId)
       : await getDriveClientWithToken(accessToken!);
 
@@ -292,7 +292,7 @@ const getMimeType = (fileName: string): string => {
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
   };
-  
+
   return mimeTypes[ext] || 'application/octet-stream';
 };
 
@@ -316,7 +316,7 @@ export const syncFilesToDrive = async (
   try {
     // Get directory path
     const directoryPath = path.join(process.cwd(), directoryType);
-    
+
     if (!fs.existsSync(directoryPath)) {
       throw new Error(`Directory not found: ${directoryPath}`);
     }
@@ -338,7 +338,7 @@ export const syncFilesToDrive = async (
     for (const fileName of files) {
       try {
         const filePath = path.join(directoryPath, fileName);
-        
+
         // Check if file already exists in Drive
         if (!overwriteExisting) {
           const existingFile = await checkFileExists(fileName, folder.id, userId, accessToken);
@@ -365,6 +365,246 @@ export const syncFilesToDrive = async (
     return result;
   } catch (error) {
     const errorMessage = `Sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    console.error(errorMessage);
+    result.errors.push(errorMessage);
+    return result;
+  }
+};
+
+export interface RenameResult {
+  success: boolean;
+  renamedFiles: { original: string; new: string }[];
+  skippedFiles: string[];
+  errors: string[];
+}
+
+/**
+ * Extract Folder ID from Google Drive URL
+ */
+export const extractFolderIdFromUrl = (url: string): string | null => {
+  // Pattern 1: https://drive.google.com/drive/folders/FOLDER_ID
+  // Pattern 2: https://drive.google.com/drive/u/0/folders/FOLDER_ID
+  const patterns = [
+    /\/folders\/([a-zA-Z0-9_-]+)/,
+    /id=([a-zA-Z0-9_-]+)/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  // If the input is just the ID (not a URL), return it
+  if (/^[a-zA-Z0-9_-]+$/.test(url)) {
+    return url;
+  }
+
+  return null;
+};
+
+/**
+ * Rename files in Google Drive folder based on YouTube Video ID in filename
+ */
+/**
+ * Rename files in Google Drive folder based on YouTube Video ID in filename
+ * Orders files by YouTube publish date and adds numeric prefix (00_, 01_, etc.)
+ */
+export const renameFilesInDrive = async (
+  folderId: string,
+  userId: string,
+  accessToken?: string
+): Promise<RenameResult> => {
+  const result: RenameResult = {
+    success: false,
+    renamedFiles: [],
+    skippedFiles: [],
+    errors: []
+  };
+
+  try {
+    // 1. Get authenticated clients
+    const driveClient = userId
+      ? await getDriveClient(userId)
+      : await getDriveClientWithToken(accessToken!);
+
+    // Create YouTube client for batch fetching
+    const oauth2Client = userId
+      ? await getAuthenticatedClient(userId)
+      : await getClientWithAccessToken(accessToken!);
+
+    if (!oauth2Client) {
+      throw new Error('Failed to create authenticated YouTube client');
+    }
+
+    const youtube = google.youtube({
+      version: 'v3',
+      auth: oauth2Client
+    });
+
+    // 2. List all files in the folder
+    let files: any[] = [];
+    let pageToken: string | undefined = undefined;
+
+    do {
+      const response: any = await driveClient.files.list({
+        // q: `'${folderId}' in parents and trashed=false`, // Removed mimeType filter to get all files
+        q: `'${folderId}' in parents and trashed=false`,
+        fields: 'nextPageToken, files(id, name, mimeType)',
+        pageToken: pageToken
+      });
+
+      if (response.data.files) {
+        files = files.concat(response.data.files);
+      }
+      pageToken = response.data.nextPageToken;
+    } while (pageToken);
+
+    console.log(`Found ${files.length} files in folder ${folderId}`);
+
+    // 3. Identify YouTube files and extract IDs
+    const matchedFiles: { file: any; videoId: string; extension: string; originalName: string }[] = [];
+
+    // Regex for ID at Start: 11 chars + something + ext
+    const prefixRegex = /^([a-zA-Z0-9_-]{11})(.*)(\.[a-zA-Z0-9]+)$/;
+    // Regex for ID at End: something + _ + 11 chars + ext
+    const suffixRegex = /.*_([a-zA-Z0-9_-]{11})(\.[a-zA-Z0-9]+)$/;
+
+    for (const file of files) {
+      let videoId: string | null = null;
+      let extension: string | null = null;
+
+      // Try matching suffix first (more specific to likely current state)
+      const suffixMatch = file.name.match(suffixRegex);
+      if (suffixMatch) {
+        videoId = suffixMatch[1];
+        extension = suffixMatch[2];
+      } else {
+        // Try matching prefix logic
+        const prefixMatch = file.name.match(prefixRegex);
+        if (prefixMatch) {
+          videoId = prefixMatch[1];
+          extension = prefixMatch[3];
+        }
+      }
+
+      if (videoId && extension) {
+        matchedFiles.push({
+          file,
+          videoId: videoId,
+          extension: extension,
+          originalName: file.name
+        });
+      } else {
+        console.log(`Skipping file ${file.name} - could not extract YouTube ID`);
+        result.skippedFiles.push(file.name);
+      }
+    }
+
+    if (matchedFiles.length === 0) {
+      console.log('No files matched the YouTube ID pattern.');
+      // Return success=true because we successfully processed (skipped) all files?
+      result.success = true;
+      return result;
+    }
+
+    console.log(`Found ${matchedFiles.length} matched files to process.`);
+
+    // 4. Batch fetch video details
+    const videoDetailsMap = new Map<string, { title: string; publishedAt: string }>();
+    const videoIds = matchedFiles.map(i => i.videoId);
+
+    // Chunk IDs into batches of 50
+    const chunkSize = 50;
+    for (let i = 0; i < videoIds.length; i += chunkSize) {
+      const batchIds = videoIds.slice(i, i + chunkSize);
+
+      try {
+        const videoResponse = await youtube.videos.list({
+          part: ['snippet'],
+          id: batchIds
+        });
+
+        if (videoResponse.data.items) {
+          for (const item of videoResponse.data.items) {
+            if (item.id && item.snippet) {
+              videoDetailsMap.set(item.id, {
+                title: item.snippet.title || `Video ${item.id}`,
+                publishedAt: item.snippet.publishedAt || '' // ISO date string
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching video batch details:', err);
+        // Continue, will handle missing details later
+      }
+    }
+
+    // 5. Sort matched files by publish date
+    // If date missing, put at the end? Or beginning?
+    matchedFiles.sort((a, b) => {
+      const detailsA = videoDetailsMap.get(a.videoId);
+      const detailsB = videoDetailsMap.get(b.videoId);
+
+      const dateA = detailsA?.publishedAt || '9999-99-99'; // Missing dates go last
+      const dateB = detailsB?.publishedAt || '9999-99-99';
+
+      return dateA.localeCompare(dateB);
+    });
+
+    // 6. Rename files with index prefix
+    for (let i = 0; i < matchedFiles.length; i++) {
+      const item = matchedFiles[i];
+      const details = videoDetailsMap.get(item.videoId);
+
+      try {
+        if (!details) {
+          throw new Error('Could not fetch video details from YouTube');
+        }
+
+        // Sanitize title
+        const safeTitle = details.title.replace(/[\/\\]/g, '_');
+
+        // Format index: 01_, 02_, ... 10_, etc.
+        const indexPrefix = (i + 1).toString().padStart(2, '0');
+
+        // New name format: XX_Title_ID.ext
+        const newName = `${indexPrefix}_${safeTitle}_${item.videoId}${item.extension}`;
+
+        if (item.originalName === newName) {
+          console.log(`File ${item.originalName} is already named correctly. Skipping.`);
+          result.skippedFiles.push(item.originalName);
+          continue;
+        }
+
+        console.log(`Renaming '${item.originalName}' to '${newName}' (Date: ${details.publishedAt})`);
+
+        await driveClient.files.update({
+          fileId: item.file.id,
+          requestBody: {
+            name: newName
+          }
+        });
+
+        result.renamedFiles.push({
+          original: item.originalName,
+          new: newName
+        });
+
+      } catch (err: any) {
+        const msg = `Failed to process ${item.originalName} (Video ID: ${item.videoId}): ${err.message}`;
+        console.error(msg);
+        result.errors.push(msg);
+      }
+    }
+
+    result.success = result.errors.length === 0;
+    return result;
+
+  } catch (error) {
+    const errorMessage = `Rename operation failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
     console.error(errorMessage);
     result.errors.push(errorMessage);
     return result;

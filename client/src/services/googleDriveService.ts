@@ -6,7 +6,9 @@ import {
   SyncRequest,
   CreateFolderRequest,
   UploadFileRequest,
-  CheckFileRequest
+  CheckFileRequest,
+  RenameResult,
+  RenameRequest
 } from '@/types/google-drive';
 
 class GoogleDriveService {
@@ -15,7 +17,7 @@ class GoogleDriveService {
     if (!token) {
       throw new Error('No Google access token found. Please authenticate first.');
     }
-    
+
     return {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json'
@@ -53,7 +55,7 @@ class GoogleDriveService {
       const response = await axios.post('/api/google-drive/folder', request, {
         headers: this.getAuthHeaders()
       });
-      
+
       return response.data.folder;
     } catch (error) {
       console.error('Error creating folder in Google Drive:', error);
@@ -75,7 +77,7 @@ class GoogleDriveService {
       const response = await axios.post('/api/google-drive/upload', request, {
         headers: this.getAuthHeaders()
       });
-      
+
       return response.data.file;
     } catch (error) {
       console.error('Error uploading file to Google Drive:', error);
@@ -106,7 +108,7 @@ class GoogleDriveService {
       const response = await axios.get(`/api/google-drive/check?${params.toString()}`, {
         headers: this.getAuthHeaders()
       });
-      
+
       return {
         exists: response.data.exists,
         file: response.data.file
@@ -180,6 +182,29 @@ class GoogleDriveService {
     // Clear stored token
     this.clearAccessToken();
     console.log('Signed out from Google Drive');
+  }
+
+  /**
+   * Rename files in Google Drive folder based on YouTube IDs
+   */
+  async renameYoutubeFiles(request: RenameRequest): Promise<RenameResult> {
+    try {
+      const response = await axios.post('/api/google-drive/rename-youtube-files', request, {
+        headers: this.getAuthHeaders(),
+        timeout: 3600000 // 1 hour for large folder processing
+      });
+
+      return response.data.result;
+    } catch (error) {
+      console.error('Error renaming files in Google Drive:', error);
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 401) {
+          throw new Error('Authentication failed. Please re-authenticate with Google.');
+        }
+        throw new Error(error.response?.data?.message || 'Failed to rename files');
+      }
+      throw new Error('Failed to rename files');
+    }
   }
 }
 
