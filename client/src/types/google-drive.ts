@@ -64,3 +64,14 @@ export interface GoogleDriveApiResponse<T> {
   exists?: boolean;
   error?: string;
 }
+
+export interface RenameResult {
+  success: boolean;
+  renamedFiles: { original: string; new: string }[];
+  skippedFiles: string[];
+  errors: string[];
+}
+
+export interface RenameRequest {
+  folderUrl: string;
+}

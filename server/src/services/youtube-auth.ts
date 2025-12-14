@@ -14,8 +14,8 @@ const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/a
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.force-ssl',
   'https://www.googleapis.com/auth/youtube.readonly',
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.metadata.readonly',
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/drive.metadata',
   'https://www.googleapis.com/auth/userinfo.profile',
   'https://www.googleapis.com/auth/userinfo.email'
 ];
@@ -36,7 +36,7 @@ export const createOAuth2Client = (): OAuth2Client => {
   if (!CLIENT_ID || !CLIENT_SECRET) {
     throw new Error('Google OAuth credentials not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env file');
   }
-  
+
   return new google.auth.OAuth2(
     CLIENT_ID,
     CLIENT_SECRET,
@@ -49,7 +49,7 @@ export const createOAuth2Client = (): OAuth2Client => {
  */
 export const getAuthUrl = (): string => {
   const oauth2Client = createOAuth2Client();
-  
+
   return oauth2Client.generateAuthUrl({
     access_type: 'offline', // This will return a refresh token
     scope: SCOPES,
@@ -66,18 +66,18 @@ export const getAuthUrl = (): string => {
  */
 export const exchangeCodeForTokens = async (code: string): Promise<{ tokens: TokenData, userId: string }> => {
   const oauth2Client = createOAuth2Client();
-  
+
   try {
     // Exchange code for tokens
     const { tokens } = await oauth2Client.getToken(code);
-    
+
     // Set tokens in client for immediate use
     oauth2Client.setCredentials(tokens);
-    
+
     // Get user info to identify the token
     const userInfo = await getUserInfo(oauth2Client);
     const userId = userInfo.id;
-    
+
     // Store tokens for this user
     if (tokens.access_token && tokens.expiry_date) {
       tokenStore[userId] = {
@@ -86,14 +86,14 @@ export const exchangeCodeForTokens = async (code: string): Promise<{ tokens: Tok
         expiry_date: tokens.expiry_date
       };
     }
-    
-    return { 
+
+    return {
       tokens: {
         access_token: tokens.access_token || '',
         refresh_token: tokens.refresh_token || undefined,
         expiry_date: tokens.expiry_date || 0
-      }, 
-      userId 
+      },
+      userId
     };
   } catch (error) {
     console.error('Error exchanging code for tokens:', error);
@@ -134,32 +134,32 @@ const getUserInfo = async (oauth2Client: OAuth2Client) => {
  */
 export const getAuthenticatedClient = async (userId: string): Promise<OAuth2Client | null> => {
   const tokens = tokenStore[userId];
-  
+
   if (!tokens) {
     console.log(`No tokens found for user ${userId}`);
     return null;
   }
-  
+
   const oauth2Client = createOAuth2Client();
   oauth2Client.setCredentials({
     access_token: tokens.access_token,
     refresh_token: tokens.refresh_token,
     expiry_date: tokens.expiry_date
   });
-  
+
   // Check if token needs refreshing
   if (tokens.expiry_date < Date.now()) {
     try {
       console.log(`Refreshing expired token for user ${userId}`);
       const { credentials } = await oauth2Client.refreshAccessToken();
-      
+
       // Update stored tokens
       tokenStore[userId] = {
         access_token: credentials.access_token || '',
         refresh_token: credentials.refresh_token || tokens.refresh_token || undefined, // Handle null and preserve existing token
         expiry_date: credentials.expiry_date || 0
       };
-      
+
       // Update client credentials
       oauth2Client.setCredentials(credentials);
     } catch (error) {
@@ -168,7 +168,7 @@ export const getAuthenticatedClient = async (userId: string): Promise<OAuth2Clie
       return null;
     }
   }
-  
+
   return oauth2Client;
 };
 
@@ -183,23 +183,23 @@ export const validateClientToken = async (accessToken: string): Promise<{ userId
     // Create a client with the token
     const oauth2Client = new google.auth.OAuth2();
     oauth2Client.setCredentials({ access_token: accessToken });
-    
+
     // Try to get user info to verify the token works
     const userInfo = await getUserInfo(oauth2Client);
-    
+
     if (userInfo && userInfo.id) {
       // Save this token for future use
       tokenStore[userInfo.id] = {
         access_token: accessToken,
         expiry_date: Date.now() + 3600000 // Assume 1 hour validity
       };
-      
+
       return {
         userId: userInfo.id,
         email: userInfo.email || undefined
       };
     }
-    
+
     return null;
   } catch (error) {
     console.error('Error validating client token:', error);
@@ -218,15 +218,15 @@ export const getClientWithAccessToken = async (accessToken: string): Promise<OAu
     // Create client with token
     const oauth2Client = new google.auth.OAuth2();
     oauth2Client.setCredentials({ access_token: accessToken });
-    
+
     // Try to get user info to verify the token works
     const userInfo = await getUserInfo(oauth2Client);
-    
+
     if (!userInfo || !userInfo.id) {
       console.error('Invalid access token - failed to get user info');
       return null;
     }
-    
+
     return oauth2Client;
   } catch (error) {
     console.error('Error creating client with access token:', error);
@@ -243,13 +243,13 @@ export const getClientWithAccessToken = async (accessToken: string): Promise<OAu
 export const isAuthenticated = (userId: string): boolean => {
   const token = tokenStore[userId];
   if (!token) return false;
-  
+
   // Check if token has expired
   if (token.expiry_date < Date.now()) {
     // Try to use refresh token later, for now report as not authenticated
     return false;
   }
-  
+
   return true;
 };
 
@@ -260,20 +260,20 @@ export const isAuthenticated = (userId: string): boolean => {
  */
 export const revokeAuthentication = async (userId: string): Promise<void> => {
   const tokens = tokenStore[userId];
-  
+
   if (tokens && tokens.access_token) {
     const oauth2Client = createOAuth2Client();
     oauth2Client.setCredentials({
       access_token: tokens.access_token
     });
-    
+
     try {
       await oauth2Client.revokeToken(tokens.access_token);
     } catch (error) {
       console.error('Error revoking token:', error);
     }
   }
-  
+
   // Remove from token store
   delete tokenStore[userId];
 }; 
