@@ -13,7 +13,8 @@ async function processVideo() {
     chunkSize,
     chunkOverlap,
     userId,
-    accessToken
+    accessToken,
+    cookiesBrowser
   } = workerData;
   
   try {
@@ -21,10 +22,16 @@ async function processVideo() {
     await dbService.initialize();
     
     // Send progress updates to main thread
-    const progressCallback = (stage, message, progress) => {
+    const progressCallback = (stage, message, progress, currentChunk, totalChunks) => {
       parentPort.postMessage({
         type: 'progress',
-        data: { stage, message, progress }
+        data: { 
+          stage, 
+          message, 
+          progress,
+          currentChunk,
+          totalChunks
+        }
       });
     };
     
@@ -47,7 +54,8 @@ async function processVideo() {
       chunkOverlap,
       userId,
       accessToken,
-      progressCallback
+      progressCallback,
+      cookiesBrowser
     );
     
     // Store chunks in database
@@ -56,7 +64,8 @@ async function processVideo() {
       data: { 
         stage: 'chunk_storage', 
         message: `Storing ${chunks.length} chunks`, 
-        progress: 90 
+        progress: 90,
+        totalChunks: chunks.length
       }
     });
     

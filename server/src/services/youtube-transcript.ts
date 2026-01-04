@@ -7,6 +7,13 @@ import { enhanceContent, EnhancementType } from './content-enhancement';
 import { DocumentChunk } from './chunking';
 import { google } from 'googleapis';
 import { getAuthenticatedClient } from './youtube-auth';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+
+const execAsync = promisify(exec);
 
 // Configuration for scraping behavior
 const SCRAPING_CONFIG = {
@@ -241,25 +248,51 @@ const parseSrtToText = (srtData: string): string => {
   // Split by double newline which typically separates entries in SRT
   const entries = srtData.split(/\n\n|\r\n\r\n/).filter(Boolean);
 
-  // Process each entry
-  const lines = entries.map(entry => {
+  // Process each entry into an object first
+  const validatedLines = entries.map(entry => {
     const parts = entry.split(/\n|\r\n/).filter(Boolean);
-    if (parts.length < 3) return ''; // Skip invalid entries
+    if (parts.length < 3) return null;
 
     // Parse timestamp (second line)
     const timestamps = parts[1].split(' --> ')[0];
     const time = timestamps.split(':');
+    if (time.length < 3) return null;
+
     const minutes = time[1];
     const seconds = time[2].split(',')[0];
     const formattedTime = `[${minutes}:${seconds}]`;
 
     // Get text (third line and beyond)
-    const text = parts.slice(2).join(' ');
+    const text = parts.slice(2).join(' ').trim();
 
-    return `${formattedTime} ${text}`;
-  });
+    if (!text) return null;
 
-  return lines.join('\n');
+    return { formattedTime, text };
+  }).filter((item): item is { formattedTime: string; text: string } => item !== null);
+
+  // Deduplication Logic for Scrolling Captions
+  // YouTube auto-captions often print the same line multiple times as it "scrolls"
+  // e.g. "Hello", "Hello world", "Hello world today"
+  const cleanedLines: string[] = [];
+
+  for (let i = 0; i < validatedLines.length; i++) {
+    const current = validatedLines[i];
+    const next = validatedLines[i + 1];
+
+    // 1. Skip if identical to next line (prefer keeping the later one)
+    if (next && current.text === next.text) {
+      continue;
+    }
+
+    // 2. Skip if current is a strict prefix of next (scrolling caption build-up)
+    if (next && next.text.startsWith(current.text)) {
+      continue;
+    }
+
+    cleanedLines.push(`${current.formattedTime} ${current.text}`);
+  }
+
+  return cleanedLines.join('\n');
 };
 
 // Get auto-generated transcript specifically from YouTube
@@ -477,8 +510,10 @@ export const processYoutubeTranscript = async (
   chunkOverlap: number = 500,
   userId?: string,
   accessToken?: string,
-  progressCallback?: ProgressCallback
+  progressCallback?: ProgressCallback,
+  cookiesBrowser?: string
 ): Promise<any[]> => {
+  console.log(`processYoutubeTranscript called with cookiesBrowser: "${cookiesBrowser}"`);
   try {
     // Get video details
     const videoDetails = await getVideoDetails(videoId);
@@ -505,78 +540,111 @@ export const processYoutubeTranscript = async (
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       transcript = await scrapeTranscriptFromYouTube(videoId);
+
+      // Validate scraped content isn't an error message
+      if (transcript.includes("We're sorry, YouTube is currently blocking us") ||
+        transcript.includes("Google automatically detects requests")) {
+        throw new Error("Scraped content contains blocking message");
+      }
+
       console.log(`Successfully retrieved transcript via web scraping with length: ${transcript.length} characters`);
       updateProgress('transcript_fetch', 'Successfully retrieved transcript via web scraping', 60);
     } catch (error: any) {
       const errorMsg = `Web scraping (primary method) failed: ${error.message}`;
-      console.log(errorMsg + '. Falling back to API methods');
+      console.log(errorMsg + '. Falling back to yt-dlp');
       errors.push(errorMsg);
-      updateProgress('transcript_fetch', 'Web scraping failed, trying API methods', 55);
+      updateProgress('transcript_fetch', 'Web scraping failed, trying yt-dlp', 55);
 
-      // If web scraping fails, proceed with API methods
-      // Attempt to get the transcript using API methods
-      if (userId) {
-        // Try OAuth if a userId is provided
-        try {
-          console.log('Attempting to get transcript using OAuth authentication');
-          updateProgress('transcript_fetch', 'Attempting to get transcript using OAuth authentication', 57);
-          transcript = await getYouTubeTranscriptWithOAuth(videoId, userId);
-          console.log('Successfully retrieved transcript via OAuth');
-          updateProgress('transcript_fetch', 'Successfully retrieved transcript via OAuth', 60);
-        } catch (error: any) {
-          const errorMsg = `OAuth method failed: ${error.message}`;
-          console.log(errorMsg + '. Trying next method');
-          errors.push(errorMsg);
-          updateProgress('transcript_fetch', 'OAuth method failed, trying next method', 57);
-        }
+      // Try yt-dlp as the first robust fallback
+      try {
+        console.log(`Attempting to get transcript using yt-dlp with cookies: "${cookiesBrowser}"`);
+        updateProgress('transcript_fetch', 'Attempting to get transcript using yt-dlp', 56);
+
+        // We can pass language preference if we want, defaulting to 'vi' as per other methods
+        transcript = await getTranscriptWithYtDlp(videoId, 'vi', cookiesBrowser);
+        console.log('Successfully retrieved transcript via yt-dlp');
+        updateProgress('transcript_fetch', 'Successfully retrieved transcript via yt-dlp', 60);
+      } catch (ytDlpError: any) {
+        const errorMsg = `yt-dlp method failed: ${ytDlpError.message}`;
+        console.log(errorMsg + '. Falling back to API methods');
+        errors.push(errorMsg);
+        updateProgress('transcript_fetch', 'yt-dlp failed, trying API methods', 56);
       }
 
-      // Try direct access token if provided and previous methods failed
-      if (!transcript && accessToken) {
-        try {
-          console.log('Attempting to get transcript using direct access token');
-          updateProgress('transcript_fetch', 'Attempting to get transcript using direct access token', 58);
-          transcript = await getTranscriptWithDirectToken(videoId, accessToken);
-          console.log('Successfully retrieved transcript via direct token');
-          updateProgress('transcript_fetch', 'Successfully retrieved transcript via direct token', 60);
-        } catch (error: any) {
-          const errorMsg = `Direct token method failed: ${error.message}`;
-          console.log(errorMsg + '. Trying next method');
-          errors.push(errorMsg);
-          updateProgress('transcript_fetch', 'Direct token method failed, trying next method', 58);
-        }
-      }
-
-      // If we still don't have a transcript, try API list method
-      if (!transcript && accessToken) {
-        try {
-          console.log('Attempting to get transcript using API list method');
-          updateProgress('transcript_fetch', 'Attempting to get transcript using API list method', 59);
-          transcript = await getTranscriptWithApiList(videoId, accessToken);
-          console.log('Successfully retrieved transcript via API list method');
-          updateProgress('transcript_fetch', 'Successfully retrieved transcript via API list method', 60);
-        } catch (error: any) {
-          const errorMsg = `API list method failed: ${error.message}`;
-          console.log(errorMsg + '. Trying next method');
-          errors.push(errorMsg);
-          updateProgress('transcript_fetch', 'API list method failed, trying next method', 59);
-        }
-      }
-
-      // Try public API approach with youtube-transcript-api
+      // If yt-dlp also failed, proceed with API methods
       if (!transcript) {
-        try {
-          console.log('Attempting to get transcript using YouTube transcript API');
-          updateProgress('transcript_fetch', 'Attempting to get transcript using YouTube transcript API', 60);
-          const transcriptItems = await getAutoGeneratedTranscript(videoId);
-          transcript = transcriptItems.map(item => `[${Math.floor(item.offset / 60000)}:${Math.floor((item.offset % 60000) / 1000)}] ${item.text}`).join('\n');
-          console.log(`Successfully retrieved transcript with ${transcriptItems.length} items using YouTube transcript API`);
-          updateProgress('transcript_fetch', `Successfully retrieved transcript with ${transcriptItems.length} items`, 65);
-        } catch (error: any) {
-          const errorMsg = `YouTube transcript API failed: ${error.message}`;
-          console.log(errorMsg);
-          errors.push(errorMsg);
-          updateProgress('transcript_fetch', 'YouTube transcript API failed', 60);
+
+        // Attempt to get the transcript using API methods
+        if (userId) {
+          // Try OAuth if a userId is provided
+          try {
+            console.log('Attempting to get transcript using OAuth authentication');
+            updateProgress('transcript_fetch', 'Attempting to get transcript using OAuth authentication', 57);
+            transcript = await getYouTubeTranscriptWithOAuth(videoId, userId);
+            console.log('Successfully retrieved transcript via OAuth');
+            updateProgress('transcript_fetch', 'Successfully retrieved transcript via OAuth', 60);
+          } catch (error: any) {
+            const errorMsg = `OAuth method failed: ${error.message}`;
+            console.log(errorMsg + '. Trying next method');
+            errors.push(errorMsg);
+            updateProgress('transcript_fetch', 'OAuth method failed, trying next method', 57);
+          }
+        }
+
+        // Try direct access token if provided and previous methods failed
+        if (!transcript && accessToken) {
+          try {
+            console.log('Attempting to get transcript using direct access token');
+            updateProgress('transcript_fetch', 'Attempting to get transcript using direct access token', 58);
+            transcript = await getTranscriptWithDirectToken(videoId, accessToken);
+            console.log('Successfully retrieved transcript via direct token');
+            updateProgress('transcript_fetch', 'Successfully retrieved transcript via direct token', 60);
+          } catch (error: any) {
+            const errorMsg = `Direct token method failed: ${error.message}`;
+            console.log(errorMsg + '. Trying next method');
+            errors.push(errorMsg);
+            updateProgress('transcript_fetch', 'Direct token method failed, trying next method', 58);
+          }
+        }
+
+        // If we still don't have a transcript, try API list method
+        if (!transcript && accessToken) {
+          try {
+            console.log('Attempting to get transcript using API list method');
+            updateProgress('transcript_fetch', 'Attempting to get transcript using API list method', 59);
+            transcript = await getTranscriptWithApiList(videoId, accessToken);
+            console.log('Successfully retrieved transcript via API list method');
+            updateProgress('transcript_fetch', 'Successfully retrieved transcript via API list method', 60);
+          } catch (error: any) {
+            const errorMsg = `API list method failed: ${error.message}`;
+            console.log(errorMsg + '. Trying next method');
+            errors.push(errorMsg);
+            updateProgress('transcript_fetch', 'API list method failed, trying next method', 59);
+          }
+        }
+
+        // Try public API approach with youtube-transcript-api
+        if (!transcript) {
+          try {
+            console.log('Attempting to get transcript using YouTube transcript API');
+            updateProgress('transcript_fetch', 'Attempting to get transcript using YouTube transcript API', 60);
+            const transcriptItems = await getAutoGeneratedTranscript(videoId);
+
+            // Check for blocking message in items
+            const fullText = transcriptItems.map(i => i.text).join(' ');
+            if (fullText.includes("We're sorry, YouTube is currently blocking us")) {
+              throw new Error("Rate limited/Blocked by YouTube");
+            }
+
+            transcript = transcriptItems.map(item => `[${Math.floor(item.offset / 60000)}:${Math.floor((item.offset % 60000) / 1000)}] ${item.text}`).join('\n');
+            console.log(`Successfully retrieved transcript with ${transcriptItems.length} items using YouTube transcript API`);
+            updateProgress('transcript_fetch', `Successfully retrieved transcript with ${transcriptItems.length} items`, 65);
+          } catch (error: any) {
+            const errorMsg = `YouTube transcript API failed: ${error.message}`;
+            console.log(errorMsg);
+            errors.push(errorMsg);
+            updateProgress('transcript_fetch', 'YouTube transcript API failed', 60);
+          }
         }
       }
 
@@ -612,7 +680,7 @@ export const processYoutubeTranscript = async (
     updateProgress('transcript_process', `Split transcript into ${chunks.length} chunks`, 80);
 
     // Verify that no chunk exceeds the embedding size limit
-    const EMBEDDING_MAX_SIZE = 7500; // Safe limit for embedding API
+    const EMBEDDING_MAX_SIZE = 30000; // Increased limit - embedding service handles larger text by averaging
     const oversizedChunks = chunks.filter(chunk => chunk.length > EMBEDDING_MAX_SIZE);
 
     if (oversizedChunks.length > 0) {
@@ -821,7 +889,8 @@ const splitTextIntoChunks = (
   chunkOverlap: number
 ): string[] => {
   // Maximum size for a single chunk to prevent embedding service from needing to re-chunk
-  const EMBEDDING_MAX_SIZE = 9000; // Conservative limit below the 10000 limit in embedding.ts
+  // Updated to 30000 to allow for larger chunks as requested by user (embedding service handles large text by averaging)
+  const EMBEDDING_MAX_SIZE = 30000;
   const effectiveChunkSize = Math.min(chunkSize, EMBEDDING_MAX_SIZE);
 
   // If text is short enough, just return it as a single chunk
@@ -1479,6 +1548,107 @@ export const scrapeTranscriptFromYouTube = async (
 
   return performScrape();
 };
+
+/**
+ * Get transcript using yt-dlp command line tool
+ * This is a robust method that often works when others fail
+ */
+export const getTranscriptWithYtDlp = async (
+  videoId: string,
+  languageCode: string = 'vi',
+  cookiesBrowser?: string
+): Promise<string> => {
+  const tempDir = path.join(os.tmpdir(), `yt-dlp-${Date.now()}-${Math.random().toString(36).substring(7)}`);
+
+  try {
+    console.log(`Attempting to get transcript using yt-dlp for video ID: ${videoId}`);
+
+    // Create temp directory
+    await fs.promises.mkdir(tempDir, { recursive: true });
+
+    const outputTemplate = path.join(tempDir, 'transcript');
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+    // Construct command
+    // --write-sub: Write subtitle file
+    // --write-auto-sub: Write automatically generated subtitle file (YouTube only)
+    // --sub-lang: Languages to download (avoiding 'all' to prevent 429 Rate Limit)
+    // --skip-download: Do not download the video
+    // --convert-subs srt: Convert subtitles to SRT format
+    let command = `yt-dlp --write-sub --write-auto-sub --sub-lang "${languageCode}" --convert-subs srt --skip-download --output "${outputTemplate}" "${videoUrl}"`;
+
+    // Add cookies from browser if configured
+    // This helps avoid 429 Too Many Requests errors
+    // Prefer passed argument, fallback to env var
+    const cookiesToUse = cookiesBrowser || process.env.YOUTUBE_DL_COOKIES_BROWSER;
+
+    if (cookiesToUse) {
+      command += ` --cookies-from-browser "${cookiesToUse}"`;
+      console.log(`Using cookies from browser: ${cookiesToUse}`);
+    }
+
+    console.log(`Executing yt-dlp command: ${command}`);
+
+    try {
+      const { stdout, stderr } = await execAsync(command);
+      console.log('yt-dlp stdout:', stdout);
+      if (stderr) console.log('yt-dlp stderr:', stderr);
+    } catch (execError: any) {
+      console.error('yt-dlp execution error:', execError);
+      if (execError.stdout) console.log('yt-dlp error stdout:', execError.stdout);
+      if (execError.stderr) console.log('yt-dlp error stderr:', execError.stderr);
+      throw execError;
+    }
+
+    // Find the generated file
+    const files = await fs.promises.readdir(tempDir);
+    const srtFiles = files.filter(f => f.endsWith('.srt'));
+
+    if (srtFiles.length === 0) {
+      // Check if there are other subtitle formats that weren't converted
+      const anySubFiles = files.filter(f => f.includes('.vtt') || f.includes('.ttml'));
+      if (anySubFiles.length > 0) {
+        throw new Error(`Subtitles downloaded but conversion to SRT failed. Found: ${anySubFiles.join(', ')}`);
+      }
+      throw new Error('No subtitle files downloaded by yt-dlp');
+    }
+
+    console.log(`Found ${srtFiles.length} subtitle files: ${srtFiles.join(', ')}`);
+
+    // Prioritize the requested language
+    // yt-dlp naming: transcript.vi.srt, transcript.en.srt, etc.
+    let targetFile = srtFiles.find(f => f.includes(`.${languageCode}.`));
+
+    if (!targetFile) {
+      // Fallback to English
+      targetFile = srtFiles.find(f => f.includes('.en.'));
+    }
+
+    if (!targetFile) {
+      // Fallback to any file
+      targetFile = srtFiles[0];
+    }
+
+    console.log(`Using subtitle file: ${targetFile}`);
+    const filePath = path.join(tempDir, targetFile);
+    const content = await fs.promises.readFile(filePath, 'utf8');
+
+    // Parse the SRT content
+    return parseSrtToText(content);
+
+  } catch (error: any) {
+    console.error('Error in getTranscriptWithYtDlp:', error.message);
+    throw new Error(`yt-dlp failed: ${error.message}`);
+  } finally {
+    // Cleanup temp directory
+    try {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.error('Failed to cleanup temp directory:', cleanupError);
+    }
+  }
+};
+
 
 /**
  * Extract transcript from YouTube's ytInitialPlayerResponse object
