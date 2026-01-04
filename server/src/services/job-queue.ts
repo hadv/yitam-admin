@@ -24,6 +24,7 @@ interface JobData {
   accessToken?: string;
   chunkSize?: number;
   chunkOverlap?: number;
+  cookiesBrowser?: string;
   status: JobStatus;
   progress: number;
   result?: any;
@@ -134,24 +135,24 @@ class YoutubeJobManager {
   constructor(maxConcurrentJobs = 2) {
     this.maxConcurrentJobs = maxConcurrentJobs;
     this.workerScriptPath = path.join(__dirname, 'youtube-worker.js');
-    
+
     // Make sure worker script exists, if not create it
     this.ensureWorkerScript();
-    
+
     // Process any pending jobs on startup
     setImmediate(() => this.processNextJobs());
   }
 
   private ensureWorkerScript() {
     const workerDir = path.dirname(this.workerScriptPath);
-    
+
     if (!fs.existsSync(workerDir)) {
       fs.mkdirSync(workerDir, { recursive: true });
     }
-    
-    // Create worker script if it doesn't exist
-    if (!fs.existsSync(this.workerScriptPath)) {
-      const workerScript = `
+
+    // Create worker script (force overwrite to ensure latest version)
+    // if (!fs.existsSync(this.workerScriptPath)) {
+    const workerScript = `
 const { parentPort, workerData } = require('worker_threads');
 const { processYoutubeTranscript, getVideoDetails } = require('./youtube-transcript');
 const { DatabaseService } = require('../core/database-service');
@@ -166,7 +167,8 @@ async function processVideo() {
     chunkSize,
     chunkOverlap,
     userId,
-    accessToken
+    accessToken,
+    cookiesBrowser
   } = workerData;
   
   try {
@@ -206,7 +208,8 @@ async function processVideo() {
       chunkOverlap,
       userId,
       accessToken,
-      progressCallback
+      progressCallback,
+      cookiesBrowser
     );
     
     // Store chunks in database
@@ -261,24 +264,23 @@ dbService.initialize()
     });
   });
       `;
-      
-      fs.writeFileSync(this.workerScriptPath, workerScript, 'utf8');
-      console.log(`Created worker script at ${this.workerScriptPath}`);
-    }
+
+    fs.writeFileSync(this.workerScriptPath, workerScript, 'utf8');
+    console.log(`Created worker script at ${this.workerScriptPath}`);
   }
 
   private async processNextJobs() {
     try {
       // Get all pending jobs
       const pendingJobs = jobStore.getPendingJobs();
-      
+
       // Check how many jobs we can start
       const availableSlots = this.maxConcurrentJobs - this.activeWorkers.size;
-      
+
       if (availableSlots > 0 && pendingJobs.length > 0) {
         // Start as many jobs as we can
         const jobsToStart = pendingJobs.slice(0, availableSlots);
-        
+
         for (const job of jobsToStart) {
           this.startJob(job);
         }
@@ -286,7 +288,7 @@ dbService.initialize()
     } catch (error) {
       console.error('Error processing next jobs:', error);
     }
-    
+
     // Schedule next check
     setTimeout(() => this.processNextJobs(), 5000);
   }
@@ -294,15 +296,16 @@ dbService.initialize()
   private startJob(job: JobData) {
     try {
       // Update job status
+      console.log(`Starting job ${job.id} with cookiesBrowser: ${job.cookiesBrowser}`);
       jobStore.updateJob(job.id, {
         status: JobStatus.ACTIVE,
         startedAt: new Date()
       });
-      
+
       // Initialize progress tracking
       progressTracker.initializeProgressTracking(job.videoId, job.socketId);
       progressTracker.updateTranscriptFetch(job.videoId, 'Starting YouTube video processing in worker thread', 10);
-      
+
       // Create worker thread
       const worker = new Worker(this.workerScriptPath, {
         workerData: {
@@ -311,26 +314,27 @@ dbService.initialize()
           chunkSize: job.chunkSize || 4000,
           chunkOverlap: job.chunkOverlap || 500,
           userId: job.userId,
-          accessToken: job.accessToken
+          accessToken: job.accessToken,
+          cookiesBrowser: job.cookiesBrowser // Pass cookies to worker
         }
       });
-      
+
       // Store active worker
       this.activeWorkers.set(job.id, worker);
-      
+
       // Handle messages from worker
       worker.on('message', (message) => {
         switch (message.type) {
           case 'initialized':
             console.log(`Worker initialized for job ${job.id}`);
             break;
-            
+
           case 'progress':
             const { stage, message: progressMessage, progress } = message.data;
-            
+
             // Update job progress
             jobStore.updateJob(job.id, { progress: progress || 0 });
-            
+
             // Update progress tracker
             switch (stage) {
               case 'transcript_fetch':
@@ -342,8 +346,8 @@ dbService.initialize()
               case 'chunk_creation':
                 if (typeof message.data.currentChunk === 'number' && typeof message.data.totalChunks === 'number') {
                   progressTracker.updateChunkCreation(
-                    job.videoId, 
-                    message.data.currentChunk, 
+                    job.videoId,
+                    message.data.currentChunk,
                     message.data.totalChunks
                   );
                 } else if (progressMessage && progressMessage.includes('/')) {
@@ -359,8 +363,8 @@ dbService.initialize()
               case 'embedding_generation':
                 if (typeof message.data.currentChunk === 'number' && typeof message.data.totalChunks === 'number') {
                   progressTracker.updateEmbeddingGeneration(
-                    job.videoId, 
-                    message.data.currentChunk, 
+                    job.videoId,
+                    message.data.currentChunk,
                     message.data.totalChunks
                   );
                 } else if (progressMessage && progressMessage.includes('/')) {
@@ -378,7 +382,7 @@ dbService.initialize()
                 break;
             }
             break;
-            
+
           case 'complete':
             // Update job as completed
             jobStore.updateJob(job.id, {
@@ -387,16 +391,16 @@ dbService.initialize()
               result: message.data,
               completedAt: new Date()
             });
-            
+
             // Complete progress tracking
             progressTracker.completeProcessing(job.videoId, message.data.totalChunks);
-            
+
             // Remove worker from active list
             this.activeWorkers.delete(job.id);
-            
+
             console.log(`Job ${job.id} completed successfully`);
             break;
-            
+
           case 'error':
             // Update job as failed
             jobStore.updateJob(job.id, {
@@ -404,41 +408,41 @@ dbService.initialize()
               error: message.data.message,
               completedAt: new Date()
             });
-            
+
             // Report error via progress tracker
             progressTracker.reportError(job.videoId, message.data.message);
-            
+
             // Remove worker from active list
             this.activeWorkers.delete(job.id);
-            
+
             console.error(`Job ${job.id} failed:`, message.data.message);
             break;
         }
       });
-      
+
       // Handle worker errors
       worker.on('error', (error) => {
         console.error(`Worker error for job ${job.id}:`, error);
-        
+
         // Update job as failed
         jobStore.updateJob(job.id, {
           status: JobStatus.FAILED,
           error: error.message,
           completedAt: new Date()
         });
-        
+
         // Report error via progress tracker
         progressTracker.reportError(job.videoId, `Worker thread error: ${error.message}`);
-        
+
         // Remove worker from active list
         this.activeWorkers.delete(job.id);
       });
-      
+
       // Handle worker exit
       worker.on('exit', (code) => {
         if (code !== 0) {
           console.error(`Worker for job ${job.id} exited with code ${code}`);
-          
+
           // If job hasn't been marked as completed or failed, mark as failed
           const currentJob = jobStore.getJob(job.id);
           if (currentJob && currentJob.status === JobStatus.ACTIVE) {
@@ -447,27 +451,27 @@ dbService.initialize()
               error: `Worker exited with code ${code}`,
               completedAt: new Date()
             });
-            
+
             // Report error via progress tracker
             progressTracker.reportError(job.videoId, `Worker thread exited unexpectedly with code ${code}`);
           }
         }
-        
+
         // Remove worker from active list
         this.activeWorkers.delete(job.id);
       });
-      
+
       console.log(`Started job ${job.id} in worker thread`);
     } catch (error: unknown) {
       console.error(`Error starting job ${job.id}:`, error);
-      
+
       // Update job as failed
       jobStore.updateJob(job.id, {
         status: JobStatus.FAILED,
         error: error instanceof Error ? error.message : String(error),
         completedAt: new Date()
       });
-      
+
       // Report error via progress tracker
       progressTracker.reportError(job.videoId, `Failed to start worker: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -487,6 +491,7 @@ export const addYoutubeProcessingJob = async (data: {
   accessToken?: string;
   chunkSize?: number;
   chunkOverlap?: number;
+  cookiesBrowser?: string;
 }) => {
   // Add job to store
   const job = jobStore.addJob(data);
@@ -497,11 +502,11 @@ export const addYoutubeProcessingJob = async (data: {
 // Get job status
 export const getJobStatus = async (jobId: string) => {
   const job = jobStore.getJob(jobId);
-  
+
   if (!job) {
     return { exists: false };
   }
-  
+
   return {
     exists: true,
     state: job.status,

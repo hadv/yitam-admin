@@ -68,6 +68,19 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   const [downloadResult, setDownloadResult] = useState<any>(null);
   const [actionMode, setActionMode] = useState<'transcript' | 'download' | 'yt-dlp'>('transcript');
 
+  // Browser cookies selection
+  const [cookiesBrowser, setCookiesBrowser] = useState<string>('');
+  const availableBrowsers = [
+    { value: '', label: 'None (Default)' },
+    { value: 'chrome', label: 'Google Chrome' },
+    { value: 'firefox', label: 'Mozilla Firefox' },
+    { value: 'safari', label: 'Safari' },
+    { value: 'edge', label: 'Microsoft Edge' },
+    { value: 'opera', label: 'Opera' },
+    { value: 'brave', label: 'Brave' },
+    { value: 'vivaldi', label: 'Vivaldi' }
+  ];
+
   // Initialize socket connection on component mount
   useEffect(() => {
     // Connect to socket
@@ -76,7 +89,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       const connected = await socketService.connect();
       console.log('Socket connection established:', connected);
     };
-    
+
     connectSocket();
 
     // Cleanup on component unmount
@@ -91,18 +104,18 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
   // Set up progress listener when videoId changes
   useEffect(() => {
     if (!videoId) return;
-    
+
     console.log('Setting up progress listener for videoId:', videoId);
-    
+
     // Ensure we're connected to the socket
     const setupListener = async () => {
       const connected = await socketService.connect();
-      
+
       if (!connected) {
         console.error('Failed to connect to socket server for progress updates');
         return;
       }
-      
+
       // Register progress listener for this videoId
       socketService.registerProgressListener(videoId, (update: ProgressUpdate) => {
         console.log(`Progress update for ${videoId}:`, update);
@@ -147,30 +160,30 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
               setIsProcessing(false);
               setProcessingMessage('Processing completed successfully!');
               setTimeout(() => setProcessingMessage(null), 3000); // Clear message after 3 seconds
-            
-            // Store the processing result
-            setProcessingResult({
-              videoTitle: update.message.includes('Created') 
-                ? update.message.replace('Processing completed successfully. Created ', '').replace(' chunks.', '')
-                : 'YouTube Video',
-              totalChunks: update.totalItems || 0,
-              videoId: update.videoId
-            });
-            
-            onUploadSuccess();
-            break;
-          case ProgressStage.ERROR:
-            setIsProcessing(false);
-            setError(update.message);
-            setProcessingMessage(null);
-            break;
+
+              // Store the processing result
+              setProcessingResult({
+                videoTitle: update.message.includes('Created')
+                  ? update.message.replace('Processing completed successfully. Created ', '').replace(' chunks.', '')
+                  : 'YouTube Video',
+                totalChunks: update.totalItems || 0,
+                videoId: update.videoId
+              });
+
+              onUploadSuccess();
+              break;
+            case ProgressStage.ERROR:
+              setIsProcessing(false);
+              setError(update.message);
+              setProcessingMessage(null);
+              break;
           }
         }
       });
-      
+
       // Explicitly join room for this video
       socketService.joinVideoRoom(videoId);
-      
+
       // If we don't receive any updates within 5 seconds, request the latest progress
       const noUpdateTimer = setTimeout(() => {
         console.log('No progress updates received, requesting latest progress');
@@ -179,10 +192,10 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
           socketService.requestLatestProgress(videoId);
         }
       }, 5000);
-      
+
       return () => clearTimeout(noUpdateTimer);
     };
-    
+
     setupListener();
 
     return () => {
@@ -196,7 +209,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     try {
       const response = await axios.get(`/api/youtube/job/${jobId}`);
       console.log('Job status:', response.data);
-      
+
       // Update UI based on job status
       if (response.data.status === 'completed') {
         // Job completed successfully
@@ -204,7 +217,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         setTimeout(() => {
           setIsProcessing(false);
           setProcessingMessage(null);
-          
+
           // If we have a videoId, trigger onUploadSuccess
           if (response.data.videoId) {
             onUploadSuccess();
@@ -218,7 +231,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       } else {
         // Job is still in progress, update progress message
         setProcessingMessage(`Processing in queue (status: ${response.data.status})...`);
-        
+
         // Check again in 5 seconds
         setTimeout(() => {
           checkJobStatus(jobId);
@@ -235,25 +248,25 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     const CLIENT_ID = '1027650180838-6ora2sdrjre213ujv9hjah4m8mu3v8ju.apps.googleusercontent.com';
     // YouTube-specific scopes needed for transcript access
     const SCOPES = 'email profile https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube.readonly';
-    
+
     const initializeGoogleAuth = () => {
       if (!window.google) {
         setTimeout(initializeGoogleAuth, 100);
         return;
       }
-      
+
       try {
         // Check if we have a saved token in local storage (for persistence)
         const savedToken = localStorage.getItem('youtube_access_token');
         const tokenExpiry = localStorage.getItem('youtube_token_expiry');
         const currentTime = new Date().getTime();
-        
+
         // Check if token exists and hasn't expired
         if (savedToken && tokenExpiry && parseInt(tokenExpiry) > currentTime) {
           setAccessToken(savedToken);
           setIsAuthenticated(true);
           setCheckingAuth(false);
-          
+
           // Verify token with server immediately
           verifyTokenWithServer(savedToken);
         } else if (savedToken) {
@@ -264,7 +277,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         } else {
           setCheckingAuth(false);
         }
-        
+
         // Initialize token client
         tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
           client_id: CLIENT_ID,
@@ -276,20 +289,20 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
               setIsAuthenticated(false);
               return;
             }
-            
+
             if (response.access_token) {
               console.log('Received access token successfully');
-              
+
               // Calculate expiry (typically 1 hour from now)
               const expiryTime = new Date().getTime() + (response.expires_in || 3600) * 1000;
-              
+
               // Save the token with expiry
               setAccessToken(response.access_token);
               localStorage.setItem('youtube_access_token', response.access_token);
               localStorage.setItem('youtube_token_expiry', expiryTime.toString());
               setIsAuthenticated(true);
               setError(null);
-              
+
               // Verify token with server
               verifyTokenWithServer(response.access_token);
             }
@@ -300,33 +313,33 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         setCheckingAuth(false);
       }
     };
-    
+
     // Verify token with server
     const verifyTokenWithServer = (token: string) => {
-      axios.post('/api/auth/google/token', { 
-        access_token: token 
+      axios.post('/api/auth/google/token', {
+        access_token: token
       })
-      .then(response => {
-        console.log('Token verification successful:', response.data);
-        // Ensure we update state to indicate successful authentication
-        setIsAuthenticated(true);
-      })
-      .catch(err => {
-        console.error('Error sending token to server:', err);
-        if (err.response) {
-          console.error('Server response:', err.response.data);
-        }
-        // If server validation fails, reset the state
-        setIsAuthenticated(false);
-        localStorage.removeItem('youtube_access_token');
-        localStorage.removeItem('youtube_token_expiry');
-        setError('Server failed to validate your authentication. Please try again.');
-      });
+        .then(response => {
+          console.log('Token verification successful:', response.data);
+          // Ensure we update state to indicate successful authentication
+          setIsAuthenticated(true);
+        })
+        .catch(err => {
+          console.error('Error sending token to server:', err);
+          if (err.response) {
+            console.error('Server response:', err.response.data);
+          }
+          // If server validation fails, reset the state
+          setIsAuthenticated(false);
+          localStorage.removeItem('youtube_access_token');
+          localStorage.removeItem('youtube_token_expiry');
+          setError('Server failed to validate your authentication. Please try again.');
+        });
     };
-    
+
     initializeGoogleAuth();
   }, []);
-  
+
   const handleAuthenticate = () => {
     if (tokenClientRef.current) {
       // Request a token with prompt
@@ -335,33 +348,33 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       setError('Google authentication is not initialized yet. Please try again in a moment.');
     }
   };
-  
+
   const handleSignOut = () => {
     // Clear token and state
     setAccessToken(null);
     setIsAuthenticated(false);
     localStorage.removeItem('youtube_access_token');
     localStorage.removeItem('youtube_token_expiry');
-    
+
     // Sign out from server
     axios.post('/api/auth/logout').catch(err => {
       console.error('Error signing out from server:', err);
     });
   };
-  
+
   const handleDomainChange = (domain: string) => {
-    setSelectedDomains(prev => 
-      prev.includes(domain) 
-        ? prev.filter(d => d !== domain) 
+    setSelectedDomains(prev =>
+      prev.includes(domain)
+        ? prev.filter(d => d !== domain)
         : [...prev, domain]
     );
   };
-  
+
   const isValidYoutubeUrl = (url: string): boolean => {
     const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})(\S*)?$/;
     return youtubeRegex.test(url);
   };
-  
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -397,52 +410,53 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     // Extract YouTube ID from URL to use for progress tracking
     const matches = youtubeUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
     const extractedVideoId = matches && matches[1];
-    
+
     if (!extractedVideoId) {
       setError('Could not extract valid YouTube ID from URL');
       setIsProcessing(false);
       return;
     }
-    
+
     // Set the video ID which will trigger the useEffect for socket listeners
     setVideoId(extractedVideoId);
-    
+
     try {
       // Add token to the request if authenticated
-      const headers = accessToken ? { 
-        Authorization: `Bearer ${accessToken}` 
+      const headers = accessToken ? {
+        Authorization: `Bearer ${accessToken}`
       } : undefined;
-      
+
       // Add socket ID to the request for tracking
       const socketId = socketService.getSocketId();
       console.log('Using socket ID for tracking:', socketId);
-      
+
       // Start the job to process the video
       const response = await axios.post('/api/youtube/process', {
         youtubeUrl,
         domains: selectedDomains,
-        socketId
+        socketId,
+        cookiesFromBrowser: cookiesBrowser // Pass selected browser cookies
       }, { headers });
-      
+
       // If this video was already processed, update the UI
       if (response.data.alreadyProcessed) {
         console.log('Video was already processed:', response.data);
         setProcessingMessage(null);
         setIsProcessing(false);
-        
+
         // Store the processing result
         setProcessingResult({
           videoTitle: response.data.videoTitle || 'YouTube Video',
           totalChunks: response.data.totalChunks || 0,
           videoId: response.data.videoId
         });
-        
+
         onUploadSuccess();
       } else {
         // Job has been queued, the video ID is in the response
         console.log('Processing job queued:', response.data);
         setProcessingMessage(`Processing job queued (Job ID: ${response.data.jobId})`);
-        
+
         // Start checking job status
         if (response.data.jobId) {
           setTimeout(() => {
@@ -450,13 +464,13 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
           }, 2000);
         }
       }
-      
+
       setYoutubeUrl('');
       setSelectedDomains([]);
     } catch (err) {
       setIsProcessing(false);
       setProcessingMessage(null);
-      
+
       if (axios.isAxiosError(err) && err.response) {
         // Check if the error is due to authentication
         if (err.response.status === 401) {
@@ -622,28 +636,28 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
                 style={{ width: `${Math.max(1, progress)}%` }}
               ></div>
             </div>
-            
+
             {/* Progress text */}
             <p className="text-sm text-gray-500">
               {progressData ? `${progress}% Complete` : 'Initializing...'}
               {currentItem > 0 && totalItems > 0 && ` (${currentItem}/${totalItems})`}
             </p>
-            
+
             {/* Display selected domains */}
             {processingDomains.length > 0 && (
               <div className="mt-2 text-sm text-gray-600">
                 <p>Selected domains: {processingDomains.join(', ')}</p>
               </div>
             )}
-            
+
             {/* Socket connection status with refresh button */}
             <div className="flex items-center justify-center mt-2 text-xs text-gray-400">
               <p>
-                {socketService.isConnected() 
-                  ? `✓ Socket connected (ID: ${socketService.getSocketId()})` 
+                {socketService.isConnected()
+                  ? `✓ Socket connected (ID: ${socketService.getSocketId()})`
                   : '⚠ Socket disconnected'}
               </p>
-              <button 
+              <button
                 onClick={refreshProgress}
                 className="ml-2 text-blue-500 hover:text-blue-700 focus:outline-none"
                 title="Refresh progress"
@@ -662,13 +676,13 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     <div className="bg-white shadow rounded-lg overflow-hidden">
       <div className="p-4">
         <h3 className="text-lg font-medium text-gray-900 mb-4">Process YouTube Video</h3>
-        
+
         <div className="mb-4 bg-blue-50 border border-blue-400 text-blue-700 px-4 py-3 rounded text-sm">
           <p className="font-medium">About YouTube Transcripts</p>
           <p className="mt-1">While authentication helps access some YouTube captions, certain videos may have restricted transcripts. The system will attempt multiple methods to extract content, including direct webpage extraction if the API fails.</p>
           <p className="mt-1 font-medium">Note: Extracting transcripts via web scraping can take several minutes for longer videos.</p>
         </div>
-        
+
         {processingMessage && (
           <div className="mb-4 bg-yellow-50 border border-yellow-400 text-yellow-700 px-4 py-3 rounded">
             <div className="flex items-center">
@@ -681,7 +695,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             <p className="mt-2 text-sm">Please don't close this window. This operation can take longer for videos with web-based extraction.</p>
           </div>
         )}
-        
+
         {error && (
           <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
             {error}
@@ -708,7 +722,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             )}
           </div>
         )}
-        
+
         {processingResult && (
           <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
             <p><strong>Successfully processed:</strong> {processingResult.videoTitle}</p>
@@ -762,7 +776,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             </button>
           </div>
         )}
-        
+
         {!checkingAuth && isAuthenticated && (
           <div className="mb-4 bg-green-50 border border-green-400 text-green-700 px-4 py-3 rounded flex justify-between items-center">
             <p>✓ YouTube authenticated (improved transcript access)</p>
@@ -775,7 +789,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             </button>
           </div>
         )}
-        
+
         <form onSubmit={handleSubmit}>
           <div className="mb-4">
             <label htmlFor="youtubeUrl" className="block text-sm font-medium text-gray-700 mb-1">
@@ -856,32 +870,58 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             </p>
           </div>
 
+          {/* Browser Cookies Selection - only show for transcript mode */}
+          {actionMode === 'transcript' && (
+            <div className="mb-4">
+              <label htmlFor="browser-cookies" className="block text-sm font-medium text-gray-700 mb-2">
+                Use Browser Cookies (Optional)
+              </label>
+              <select
+                id="browser-cookies"
+                name="browser-cookies"
+                className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
+                value={cookiesBrowser}
+                onChange={(e) => setCookiesBrowser(e.target.value)}
+                disabled={isProcessing}
+              >
+                {availableBrowsers.map((browser) => (
+                  <option key={browser.value} value={browser.value}>
+                    {browser.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500">
+                Select a browser to use its cookies for bypassing rate limits (requires cookies to be available on server)
+              </p>
+            </div>
+          )}
+
           {/* Knowledge Domains - only show for transcript mode */}
           {actionMode === 'transcript' && (
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Select Knowledge Domains
               </label>
-            <div className="mt-1 grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
-              {availableDomains.map((domain) => (
-                <div key={domain} className="flex items-center">
-                  <input
-                    id={`domain-${domain}`}
-                    name="domains"
-                    type="checkbox"
-                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    checked={selectedDomains.includes(domain)}
-                    onChange={() => handleDomainChange(domain)}
-                    disabled={isProcessing}
-                  />
-                  <label
-                    htmlFor={`domain-${domain}`}
-                    className="ml-2 block text-sm text-gray-700"
-                  >
-                    {domain}
-                  </label>
-                </div>
-              ))}
+              <div className="mt-1 grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+                {availableDomains.map((domain) => (
+                  <div key={domain} className="flex items-center">
+                    <input
+                      id={`domain-${domain}`}
+                      name="domains"
+                      type="checkbox"
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      checked={selectedDomains.includes(domain)}
+                      onChange={() => handleDomainChange(domain)}
+                      disabled={isProcessing}
+                    />
+                    <label
+                      htmlFor={`domain-${domain}`}
+                      className="ml-2 block text-sm text-gray-700"
+                    >
+                      {domain}
+                    </label>
+                  </div>
+                ))}
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 Select relevant knowledge domains for better embedding
@@ -899,9 +939,8 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
               {actionMode === 'transcript' ? (
                 <button
                   type="submit"
-                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
-                    isProcessing || isDownloading ? 'opacity-50 cursor-not-allowed' : ''
-                  }`}
+                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${isProcessing || isDownloading ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
                   disabled={isProcessing || isDownloading}
                 >
                   {isProcessing ? 'Processing...' : 'Process Transcript'}
@@ -910,9 +949,8 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
                 <button
                   type="button"
                   onClick={handleDownload}
-                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${
-                    isDownloading || isProcessing ? 'opacity-50 cursor-not-allowed' : ''
-                  }`}
+                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${isDownloading || isProcessing ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
                   disabled={isDownloading || isProcessing}
                 >
                   {isDownloading ? 'Downloading...' : 'Download Video'}
@@ -928,7 +966,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
             <YtDlpDownloader onUploadSuccess={onUploadSuccess} />
           </div>
         )}
-        
+
         {/* Processing spinner */}
         {renderProcessingState()}
       </div>
