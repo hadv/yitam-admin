@@ -103,12 +103,13 @@ export const getYtDlpVideoInfo = async (
       '--no-check-certificates',
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      '--add-header', 'Sec-Fetch-Mode:navigate'
+      '--add-header', 'Sec-Fetch-Mode:navigate',
+      '--extractor-args', 'youtube:player-client=ios,web'
     ];
 
     // Add cookies from browser if specified
     if (cookiesFromBrowser) {
-      args.push('--cookies-from-browser', `${cookiesFromBrowser}:Profile 5`);
+      args.push('--cookies-from-browser', `${cookiesFromBrowser}:Profile 9`);
     }
     // Otherwise, add cookies file if provided
     else if (cookiesFile && fs.existsSync(cookiesFile)) {
@@ -184,8 +185,8 @@ export const getYtDlpVideoInfo = async (
           uploadDate: info.upload_date || '',
           isLive: info.is_live || false,
           isMemberOnly: info.availability === 'subscriber_only' ||
-                       info.availability === 'premium_only' ||
-                       (info.live_status === 'is_upcoming' && info.availability !== 'public'),
+            info.availability === 'premium_only' ||
+            (info.live_status === 'is_upcoming' && info.availability !== 'public'),
           availability: info.availability || 'unknown'
         };
 
@@ -376,7 +377,8 @@ const attemptDownloadWithFormat = async (
       '--no-check-certificates',         // Skip SSL certificate validation (sometimes helps)
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      '--add-header', 'Sec-Fetch-Mode:navigate'
+      '--add-header', 'Sec-Fetch-Mode:navigate',
+      '--extractor-args', 'youtube:player-client=ios,web'
     ];
 
     // Add quality/format options
@@ -394,7 +396,7 @@ const attemptDownloadWithFormat = async (
     // Add cookies from browser if specified
     if (options.cookiesFromBrowser) {
       // Use the exact format that works in command line (without extra quotes)
-      args.push('--cookies-from-browser', `${options.cookiesFromBrowser}:Profile 5`);
+      args.push('--cookies-from-browser', `${options.cookiesFromBrowser}:Profile 9`);
     }
     // Otherwise, add cookies file if provided
     else if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
@@ -421,87 +423,87 @@ const attemptDownloadWithFormat = async (
       const output = data.toString();
       console.log('yt-dlp output:', output);
 
-        // Parse progress information with multiple regex patterns for robustness
-        const progressPatterns = [
-          // Full pattern: [download]  17.8% of   11.21MiB at    4.06MiB/s ETA 00:02
-          /\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\d+\.?\d*\w+)\s+at\s+(\S+)\s+ETA\s+(\S+)/,
-          // Simpler pattern: [download]  17.8% of   11.21MiB at    4.06MiB/s
-          /\[download\]\s+(\d+\.?\d*)%\s+of\s+(\S+)\s+at\s+(\S+)/,
-          // Basic pattern: [download]  17.8%
-          /\[download\]\s+(\d+\.?\d*)%/
-        ];
+      // Parse progress information with multiple regex patterns for robustness
+      const progressPatterns = [
+        // Full pattern: [download]  17.8% of   11.21MiB at    4.06MiB/s ETA 00:02
+        /\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\d+\.?\d*\w+)\s+at\s+(\S+)\s+ETA\s+(\S+)/,
+        // Simpler pattern: [download]  17.8% of   11.21MiB at    4.06MiB/s
+        /\[download\]\s+(\d+\.?\d*)%\s+of\s+(\S+)\s+at\s+(\S+)/,
+        // Basic pattern: [download]  17.8%
+        /\[download\]\s+(\d+\.?\d*)%/
+      ];
 
-        let progressMatch = null;
-        let patternUsed = -1;
+      let progressMatch = null;
+      let patternUsed = -1;
 
-        for (let i = 0; i < progressPatterns.length; i++) {
-          progressMatch = output.match(progressPatterns[i]);
-          if (progressMatch) {
-            patternUsed = i;
-            break;
-          }
+      for (let i = 0; i < progressPatterns.length; i++) {
+        progressMatch = output.match(progressPatterns[i]);
+        if (progressMatch) {
+          patternUsed = i;
+          break;
         }
+      }
 
-        if (progressMatch && progressCallback) {
-          const progress = parseFloat(progressMatch[1]);
-          const size = progressMatch[2] || 'Unknown';
-          const speed = progressMatch[3] || 'Unknown';
-          const eta = progressMatch[4] || 'Unknown';
+      if (progressMatch && progressCallback) {
+        const progress = parseFloat(progressMatch[1]);
+        const size = progressMatch[2] || 'Unknown';
+        const speed = progressMatch[3] || 'Unknown';
+        const eta = progressMatch[4] || 'Unknown';
 
-          console.log(`📊 yt-dlp progress: ${progress}% (pattern ${patternUsed})`);
+        console.log(`📊 yt-dlp progress: ${progress}% (pattern ${patternUsed})`);
 
+        progressCallback({
+          videoId,
+          progress,
+          downloadedBytes: 0, // yt-dlp doesn't provide exact bytes easily
+          totalBytes: 0,
+          speed,
+          eta,
+          status: 'downloading'
+        });
+      }
+
+      // Check for completion - handle both "100%" and "100.0%"
+      if (output.includes('[download] 100%') || output.includes('[download] 100.0%')) {
+        console.log('🎉 yt-dlp download completed (100%)');
+        if (progressCallback) {
           progressCallback({
             videoId,
-            progress,
-            downloadedBytes: 0, // yt-dlp doesn't provide exact bytes easily
+            progress: 100,
+            downloadedBytes: 0,
             totalBytes: 0,
-            speed,
-            eta,
-            status: 'downloading'
+            speed: '0B/s',
+            eta: '00:00',
+            status: 'complete'
           });
         }
+      }
 
-        // Check for completion - handle both "100%" and "100.0%"
-        if (output.includes('[download] 100%') || output.includes('[download] 100.0%')) {
-          console.log('🎉 yt-dlp download completed (100%)');
-          if (progressCallback) {
-            progressCallback({
-              videoId,
-              progress: 100,
-              downloadedBytes: 0,
-              totalBytes: 0,
-              speed: '0B/s',
-              eta: '00:00',
-              status: 'complete'
-            });
-          }
-        }
+      // Extract final file path
+      const fileMatch = output.match(/\[download\] Destination: (.+)/);
+      if (fileMatch) {
+        finalFilePath = fileMatch[1].trim();
+        console.log(`📁 Detected destination file: ${finalFilePath}`);
+      }
 
-        // Extract final file path
-        const fileMatch = output.match(/\[download\] Destination: (.+)/);
-        if (fileMatch) {
-          finalFilePath = fileMatch[1].trim();
-          console.log(`📁 Detected destination file: ${finalFilePath}`);
-        }
+      const mergeMatch = output.match(/\[Merger\] Merging formats into "(.+)"/);
+      if (mergeMatch) {
+        finalFilePath = mergeMatch[1].trim();
+        console.log(`🔗 Detected merged file: ${finalFilePath}`);
+      }
 
-        const mergeMatch = output.match(/\[Merger\] Merging formats into "(.+)"/);
-        if (mergeMatch) {
-          finalFilePath = mergeMatch[1].trim();
-          console.log(`🔗 Detected merged file: ${finalFilePath}`);
-        }
+      // Also check for ffmpeg merge messages
+      const ffmpegMatch = output.match(/\[ffmpeg\] Merging formats into "(.+)"/);
+      if (ffmpegMatch) {
+        finalFilePath = ffmpegMatch[1].trim();
+        console.log(`🎬 Detected ffmpeg merged file: ${finalFilePath}`);
+      }
+    });
 
-        // Also check for ffmpeg merge messages
-        const ffmpegMatch = output.match(/\[ffmpeg\] Merging formats into "(.+)"/);
-        if (ffmpegMatch) {
-          finalFilePath = ffmpegMatch[1].trim();
-          console.log(`🎬 Detected ffmpeg merged file: ${finalFilePath}`);
-        }
-      });
-
-      ytdlp.stderr.on('data', (data) => {
-        errorOutput += data.toString();
-        console.error('yt-dlp error:', data.toString());
-      });
+    ytdlp.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+      console.error('yt-dlp error:', data.toString());
+    });
 
     ytdlp.on('close', (code) => {
       if (code !== 0) {
@@ -612,7 +614,7 @@ export const saveCookiesFile = async (
   fileName: string = 'youtube_cookies.txt'
 ): Promise<string> => {
   const cookiesPath = path.join(COOKIES_DIR, fileName);
-  
+
   try {
     await fs.promises.writeFile(cookiesPath, cookiesContent, 'utf8');
     console.log(`Cookies saved to: ${cookiesPath}`);
@@ -640,7 +642,7 @@ export const listCookiesFiles = (): string[] => {
  */
 export const deleteCookiesFile = async (fileName: string): Promise<void> => {
   const cookiesPath = path.join(COOKIES_DIR, fileName);
-  
+
   try {
     await fs.promises.unlink(cookiesPath);
     console.log(`Cookies file deleted: ${cookiesPath}`);
