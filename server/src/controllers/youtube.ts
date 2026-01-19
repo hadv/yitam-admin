@@ -19,6 +19,7 @@ import {
   saveCookiesFile,
   listCookiesFiles,
   deleteCookiesFile,
+  getBrowserProfiles,
   YtDlpDownloadOptions
 } from '../services/yt-dlp-downloader';
 import { enhanceVideoMetadata, EnhancementOptions } from '../services/video-metadata-enhancer';
@@ -622,7 +623,7 @@ export const checkYtDlpStatus = async (req: Request, res: Response) => {
 // Download YouTube video using yt-dlp (for member-only content)
 export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response) => {
   try {
-    const { youtubeUrl, options = {}, cookiesFileName, cookiesFromBrowser } = req.body;
+    const { youtubeUrl, options = {}, cookiesFileName, cookiesFromBrowser, browserProfile } = req.body;
     const socketId = req.body.socketId;
 
     if (!youtubeUrl) {
@@ -658,7 +659,8 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
       extractAudio: options.extractAudio,
       audioFormat: options.audioFormat,
       cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined,
-      cookiesFromBrowser: cookiesFromBrowser
+      cookiesFromBrowser: cookiesFromBrowser,
+      browserProfile: browserProfile
     };
 
     // Download the video with progress callback
@@ -710,7 +712,7 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
 // Download YouTube video with enhanced metadata using yt-dlp
 export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res: Response) => {
   try {
-    const { youtubeUrl, options = {}, cookiesFileName, cookiesFromBrowser, enhancementOptions = {}, useAudioOnly = false } = req.body;
+    const { youtubeUrl, options = {}, cookiesFileName, cookiesFromBrowser, browserProfile, enhancementOptions = {}, useAudioOnly = false } = req.body;
     const socketId = req.body.socketId;
 
     if (!youtubeUrl) {
@@ -746,7 +748,8 @@ export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res
       extractAudio: options.extractAudio,
       audioFormat: options.audioFormat,
       cookiesFile: cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined,
-      cookiesFromBrowser: cookiesFromBrowser
+      cookiesFromBrowser: cookiesFromBrowser,
+      browserProfile: browserProfile
     };
 
     // Step 1: Download the video with progress callback
@@ -914,7 +917,7 @@ export const generateEnhancedMetadata = async (req: Request, res: Response) => {
 // Get video information using yt-dlp
 export const getYoutubeVideoInfoWithYtDlp = async (req: Request, res: Response) => {
   try {
-    const { youtubeUrl, cookiesFileName, cookiesFromBrowser } = req.body;
+    const { youtubeUrl, cookiesFileName, cookiesFromBrowser, browserProfile } = req.body;
     console.log('🔍 yt-dlp info request received:', { youtubeUrl, cookiesFileName });
 
     if (!youtubeUrl) {
@@ -930,7 +933,7 @@ export const getYoutubeVideoInfoWithYtDlp = async (req: Request, res: Response) 
     }
 
     const cookiesFile = cookiesFileName ? path.join(process.cwd(), 'cookies', cookiesFileName) : undefined;
-    const videoInfo = await getYtDlpVideoInfo(youtubeUrl, cookiesFile, cookiesFromBrowser);
+    const videoInfo = await getYtDlpVideoInfo(youtubeUrl, cookiesFile, cookiesFromBrowser, browserProfile);
 
     return res.status(200).json({
       message: 'Video information retrieved successfully with yt-dlp',
@@ -1008,6 +1011,30 @@ export const getCookiesFilesList = async (req: Request, res: Response) => {
     console.error('Error getting cookies files list:', error);
     return res.status(500).json({
       message: 'Failed to get cookies files list',
+      error: error.message || 'Unknown error'
+    });
+  }
+};
+
+// Get list of browser profiles
+export const getBrowserProfilesList = async (req: Request, res: Response) => {
+  try {
+    const { browser } = req.query;
+
+    if (!browser || typeof browser !== 'string') {
+      return res.status(400).json({ message: 'Browser name is required as a query parameter' });
+    }
+
+    const profiles = await getBrowserProfiles(browser);
+
+    return res.status(200).json({
+      message: `Found ${profiles.length} profiles for ${browser}`,
+      profiles
+    });
+  } catch (error: any) {
+    console.error('Error getting browser profiles list:', error);
+    return res.status(500).json({
+      message: 'Failed to get browser profiles list',
       error: error.message || 'Unknown error'
     });
   }
