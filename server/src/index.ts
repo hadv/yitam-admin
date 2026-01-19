@@ -12,7 +12,7 @@ import authRoutes from './routes/auth';
 import fileManagerRoutes from './routes/file-manager';
 import migrationRoutes from './routes/migration';
 import googleDriveRoutes from './routes/google-drive';
-import { DatabaseService } from './core/database-service';
+import { dbService } from './core/database-service';
 
 // Load environment variables
 dotenv.config();
@@ -43,25 +43,25 @@ const io = new Server(httpServer, {
 // Socket.io connection handler
 io.on('connection', (socket) => {
   console.log('New client connected', socket.id);
-  
+
   // Handle joining a specific video room for progress updates
   socket.on('join-video-room', (data: { videoId: string }) => {
     if (data.videoId) {
       socket.join(`video-${data.videoId}`);
       console.log(`Socket ${socket.id} joined room for video ${data.videoId}`);
-      
+
       // Send an immediate connection confirmation to the client
-      socket.emit('room-joined', { 
+      socket.emit('room-joined', {
         videoId: data.videoId,
-        message: `Successfully joined room for video ${data.videoId}` 
+        message: `Successfully joined room for video ${data.videoId}`
       });
-      
+
       // Import the progress tracker when needed to avoid circular dependencies
       const { progressTracker } = require('./services/progress-tracker');
-      
+
       // Try to resend the latest update for this video
       const resent = progressTracker.resendLatestUpdate(data.videoId);
-      
+
       // If no updates to resend, send a test progress update to verify communication
       if (!resent) {
         io.to(`video-${data.videoId}`).emit('progress-update', {
@@ -75,18 +75,18 @@ io.on('connection', (socket) => {
       console.error('Socket tried to join a room without providing videoId', socket.id);
     }
   });
-  
+
   // Handle client requesting the latest progress for a video
   socket.on('request-latest-progress', (data: { videoId: string }) => {
     if (data.videoId) {
       console.log(`Socket ${socket.id} requested latest progress for video ${data.videoId}`);
-      
+
       // Import the progress tracker when needed to avoid circular dependencies
       const { progressTracker } = require('./services/progress-tracker');
-      
+
       // Try to resend the latest update for this video
       const resent = progressTracker.resendLatestUpdate(data.videoId);
-      
+
       if (!resent) {
         socket.emit('progress-update', {
           videoId: data.videoId,
@@ -97,11 +97,11 @@ io.on('connection', (socket) => {
       }
     }
   });
-  
+
   socket.on('error', (error) => {
     console.error('Socket error:', socket.id, error);
   });
-  
+
   socket.on('disconnect', (reason) => {
     console.log('Client disconnected', socket.id, 'Reason:', reason);
   });
@@ -111,7 +111,6 @@ io.on('connection', (socket) => {
 export { io };
 
 // Initialize database service
-const dbService = new DatabaseService();
 dbService.initialize().then(() => {
   // Ensure uploads directory exists
   const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -124,10 +123,10 @@ dbService.initialize().then(() => {
 
   // Middleware
   app.use(cors({
-    origin: function(origin, callback) {
+    origin: function (origin, callback) {
       // Allow requests with no origin (like mobile apps or curl requests)
-      if(!origin) return callback(null, true);
-      
+      if (!origin) return callback(null, true);
+
       const allowedOrigins = [
         'http://localhost:5173',
         'http://localhost:5174',
@@ -136,11 +135,11 @@ dbService.initialize().then(() => {
         'http://127.0.0.1:5173',
         'http://127.0.0.1:5174'
       ];
-      
+
       console.log('CORS Request from origin:', origin);
-      
+
       // Check if the origin is allowed
-      if(allowedOrigins.indexOf(origin) !== -1 || !origin) {
+      if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
         callback(null, true);
       } else {
         console.log('CORS blocked for origin:', origin);
@@ -152,7 +151,7 @@ dbService.initialize().then(() => {
     allowedHeaders: ['Content-Type', 'Authorization']
   }));
   app.use(express.json());
-  
+
   // Session middleware for auth
   app.use(session({
     secret: process.env.SESSION_SECRET || 'youtube-oauth-secret',

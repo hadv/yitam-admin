@@ -1,6 +1,6 @@
 import { createEmbedding } from './embedding';
 import { DocumentChunk } from './chunking';
-import { DatabaseService } from '../core/database-service';
+import { dbService } from '../core/database-service';
 import { enhanceContent, EnhancementType } from './content-enhancement';
 
 export interface AudioTranscriptProcessingOptions {
@@ -44,18 +44,17 @@ export const processAudioTranscript = async (
 
   // Use enhanced transcript if available, otherwise use raw audio transcript
   const transcriptToProcess = enhancedTranscript || audioTranscript;
-  
+
   if (!transcriptToProcess || transcriptToProcess.trim().length === 0) {
     throw new Error('No transcript content available for processing');
   }
 
-  // Initialize database service
-  const dbService = new DatabaseService();
-  await dbService.initialize();
+  // Use the singleton instance of the database service
+  // dbService is now imported from core
 
   // Check if audio transcript already exists in database
   const existingTranscript = await dbService.doesTranscriptExist(videoId);
-  
+
   if (existingTranscript) {
     console.log(`⚠️ Audio transcript already exists for video ${videoId}, skipping embedding`);
     return {
@@ -70,7 +69,7 @@ export const processAudioTranscript = async (
   // Split transcript into chunks
   console.log(`📄 Splitting audio transcript into chunks (size: ${chunkSize}, overlap: ${chunkOverlap})`);
   const chunks = splitAudioTranscriptIntoChunks(transcriptToProcess, chunkSize, chunkOverlap);
-  
+
   if (chunks.length === 0) {
     throw new Error('Failed to create chunks from audio transcript');
   }
@@ -165,19 +164,19 @@ function splitAudioTranscriptIntoChunks(
 
   const chunks: string[] = [];
   const sentences = transcript.split(/[.!?]+/).filter(s => s.trim().length > 0);
-  
+
   if (sentences.length === 0) {
     return [transcript];
   }
 
   let currentChunk = '';
-  
+
   for (const sentence of sentences) {
     const trimmedSentence = sentence.trim();
     if (!trimmedSentence) continue;
 
     const potentialChunk = currentChunk + (currentChunk ? '. ' : '') + trimmedSentence;
-    
+
     if (potentialChunk.length <= chunkSize) {
       currentChunk = potentialChunk;
     } else {
@@ -185,7 +184,7 @@ function splitAudioTranscriptIntoChunks(
       if (currentChunk) {
         chunks.push(currentChunk + '.');
       }
-      
+
       // Handle overlap by including last part of previous chunk
       if (chunkOverlap > 0 && chunks.length > 0) {
         const lastChunk = chunks[chunks.length - 1];
@@ -196,11 +195,11 @@ function splitAudioTranscriptIntoChunks(
       }
     }
   }
-  
+
   // Add the last chunk if it has content
   if (currentChunk.trim()) {
     chunks.push(currentChunk + '.');
   }
-  
+
   return chunks.filter(chunk => chunk.trim().length > 0);
 }

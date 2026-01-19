@@ -1,4 +1,4 @@
-import { DatabaseService } from '../core/database-service';
+import { DatabaseService, dbService } from '../core/database-service';
 import { createEmbedding } from './embedding';
 
 /**
@@ -37,7 +37,7 @@ export class TranscriptCorrectionService {
   private dbService: DatabaseService;
 
   constructor() {
-    this.dbService = new DatabaseService();
+    this.dbService = dbService;
   }
 
   /**
@@ -53,11 +53,11 @@ export class TranscriptCorrectionService {
     for (const rule of rules) {
       const flags = rule.caseSensitive ? 'g' : 'gi';
       const regex = new RegExp(rule.incorrect, flags);
-      
+
       // Count occurrences
       const matches = text.match(regex);
       const count = matches ? matches.length : 0;
-      
+
       if (count > 0) {
         correctedText = correctedText.replace(regex, rule.correct);
         replacements.set(`${rule.incorrect} → ${rule.correct}`, count);
@@ -239,27 +239,27 @@ export class TranscriptCorrectionService {
     // Create filter for YouTube transcripts
     const filter = videoId
       ? {
-          must: [
-            {
-              key: 'id',
-              match: {
-                text: `youtube_${videoId}`,
-                exact: false
-              }
+        must: [
+          {
+            key: 'id',
+            match: {
+              text: `youtube_${videoId}`,
+              exact: false
             }
-          ]
-        }
+          }
+        ]
+      }
       : {
-          must: [
-            {
-              key: 'id',
-              match: {
-                text: 'youtube_',
-                exact: false
-              }
+        must: [
+          {
+            key: 'id',
+            match: {
+              text: 'youtube_',
+              exact: false
             }
-          ]
-        };
+          }
+        ]
+      };
 
     return this.correctAllTranscripts(correctionRules, filter, dryRun);
   }

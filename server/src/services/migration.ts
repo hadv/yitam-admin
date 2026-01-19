@@ -1,5 +1,5 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
-import { DatabaseService, SearchResult } from '../core/database-service';
+import { DatabaseService, dbService, SearchResult } from '../core/database-service';
 import { createEmbedding, TaskType } from './embedding';
 import { DocumentChunk } from './chunking';
 import dotenv from 'dotenv';
@@ -36,11 +36,11 @@ export class MigrationService {
   private dbService: DatabaseService;
 
   constructor() {
-    this.qdrantClient = new QdrantClient({ 
+    this.qdrantClient = new QdrantClient({
       url: QDRANT_URL,
       apiKey: QDRANT_API_KEY
     });
-    this.dbService = new DatabaseService();
+    this.dbService = dbService;
   }
 
   /**
@@ -253,9 +253,9 @@ export class MigrationService {
       } else {
         // Strategy 2: Simple recreation (data loss)
         console.log('🗑️  Recreating collection (existing data will be lost)...');
-        
+
         await this.recreateCollection();
-        
+
         return {
           success: true,
           message: 'Collection recreated with new vector dimensions (existing data was removed)',
@@ -280,7 +280,7 @@ export class MigrationService {
    */
   private async createBackupCollection(backupName: string, vectorSize: number): Promise<void> {
     console.log(`📋 Creating backup collection: ${backupName}`);
-    
+
     await this.qdrantClient.createCollection(backupName, {
       vectors: {
         size: vectorSize,
@@ -337,11 +337,11 @@ export class MigrationService {
    */
   private async copyDocumentsToBackup(documents: any[], backupCollectionName: string): Promise<void> {
     console.log(`💾 Copying ${documents.length} documents to backup...`);
-    
+
     const batchSize = 50;
     for (let i = 0; i < documents.length; i += batchSize) {
       const batch = documents.slice(i, i + batchSize);
-      
+
       await this.qdrantClient.upsert(backupCollectionName, {
         wait: true,
         points: batch
@@ -354,26 +354,26 @@ export class MigrationService {
    */
   private async reEmbedDocuments(documents: any[], batchSize: number, errors: string[]): Promise<number> {
     console.log('🔄 Recreating collection with new dimensions...');
-    
+
     // Delete and recreate the main collection
     await this.recreateCollection();
-    
+
     console.log('🧠 Re-embedding documents with new model...');
     let processed = 0;
-    
+
     for (let i = 0; i < documents.length; i += batchSize) {
       const batch = documents.slice(i, i + batchSize);
-      
+
       try {
         const reEmbeddedBatch = await Promise.all(
           batch.map(async (doc) => {
             try {
               const payload = doc.payload as any;
               const content = payload.content || '';
-              
+
               // Generate new embedding
               const newEmbedding = await createEmbedding(content, TaskType.RETRIEVAL_DOCUMENT);
-              
+
               return {
                 id: doc.id,
                 vector: newEmbedding,
@@ -388,7 +388,7 @@ export class MigrationService {
 
         // Filter out failed embeddings
         const validDocuments = reEmbeddedBatch.filter(doc => doc !== null);
-        
+
         if (validDocuments.length > 0) {
           await this.qdrantClient.upsert(COLLECTION_NAME, {
             wait: true,
@@ -398,7 +398,7 @@ export class MigrationService {
         }
 
         console.log(`   Processed ${Math.min(i + batchSize, documents.length)}/${documents.length} documents`);
-        
+
       } catch (error) {
         errors.push(`Failed to process batch ${i}-${i + batchSize}: ${error}`);
       }
@@ -734,7 +734,7 @@ export class MigrationService {
   async rollbackMigration(backupCollectionName: string): Promise<MigrationResult> {
     try {
       console.log(`🔄 Rolling back migration from backup: ${backupCollectionName}`);
-      
+
       // Check if backup exists
       const collections = await this.qdrantClient.getCollections();
       const backupExists = collections.collections?.some(
