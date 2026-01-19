@@ -31,42 +31,65 @@ export interface SearchResult {
 
 // Database service class
 export class DatabaseService {
+  private static instance: DatabaseService;
   private qdrantClient: QdrantClient;
   private fallbackService: FallbackService;
-  
+  private isInitialized = false;
+  private initializationPromise: Promise<void> | null = null;
+
   constructor() {
-    this.qdrantClient = new QdrantClient({ 
+    this.qdrantClient = new QdrantClient({
       url: QDRANT_URL,
       apiKey: QDRANT_API_KEY
     });
     this.fallbackService = new FallbackService('Qdrant');
-    console.log(`Initializing database service with Qdrant at ${QDRANT_URL}`);
+    console.log(`Initializing database service instance with Qdrant at ${QDRANT_URL}`);
   }
-  
+
+  public static getInstance(): DatabaseService {
+    if (!DatabaseService.instance) {
+      DatabaseService.instance = new DatabaseService();
+    }
+    return DatabaseService.instance;
+  }
+
   // Initialize Qdrant and create collections if they don't exist
   public async initialize(): Promise<void> {
-    try {
-      // Check if collections exist
-      const collections = await this.qdrantClient.getCollections();
+    if (this.isInitialized) return;
 
-      // Check if the knowledge base collection exists
-      const collectionExists = collections.collections?.some(
-        (collection) => collection.name === COLLECTION_NAME
-      );
-
-      if (!collectionExists) {
-        console.log(`Creating Qdrant collection: ${COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
-        await this.createCollection();
-      } else {
-        // Collection exists, check if vector dimensions match
-        await this.validateCollectionSchema();
-      }
-
-      this.fallbackService.resetWarningFlag('initialize');
-      console.log('Qdrant initialized successfully');
-    } catch (error) {
-      this.fallbackService.handleError('initialize', error);
+    if (this.initializationPromise) {
+      return this.initializationPromise;
     }
+
+    this.initializationPromise = (async () => {
+      try {
+        // Check if collections exist
+        const collections = await this.qdrantClient.getCollections();
+
+        // Check if the knowledge base collection exists
+        const collectionExists = collections.collections?.some(
+          (collection) => collection.name === COLLECTION_NAME
+        );
+
+        if (!collectionExists) {
+          console.log(`Creating Qdrant collection: ${COLLECTION_NAME} with vector size: ${VECTOR_SIZE}`);
+          await this.createCollection();
+        } else {
+          // Collection exists, check if vector dimensions match
+          await this.validateCollectionSchema();
+        }
+
+        this.fallbackService.resetWarningFlag('initialize');
+        console.log('Qdrant initialized successfully');
+        this.isInitialized = true;
+      } catch (error) {
+        this.fallbackService.handleError('initialize', error);
+      } finally {
+        this.initializationPromise = null;
+      }
+    })();
+
+    return this.initializationPromise;
   }
 
   // Create a new collection with current configuration
@@ -117,7 +140,7 @@ export class DatabaseService {
       // Don't throw here - let the service continue with fallback if needed
     }
   }
-  
+
   // Add documents to knowledge base
   public async addDocumentChunks(documents: DocumentChunk[]): Promise<void> {
     return this.fallbackService.withFallback(
@@ -131,7 +154,7 @@ export class DatabaseService {
       // Qdrant function
       async () => {
         if (documents.length === 0) return;
-        
+
         // Prepare points for bulk insertion
         const points = documents.map(doc => {
           return {
@@ -149,7 +172,7 @@ export class DatabaseService {
             }
           };
         });
-        
+
         // Insert documents
         await this.qdrantClient.upsert(COLLECTION_NAME, {
           wait: true,
@@ -163,20 +186,20 @@ export class DatabaseService {
   // Helper function to calculate cosine similarity for in-memory fallback
   private cosineSimilarity(a: number[], b: number[]): number {
     if (a.length !== b.length) return 0;
-    
+
     let dotProduct = 0;
     let aMagnitude = 0;
     let bMagnitude = 0;
-    
+
     for (let i = 0; i < a.length; i++) {
       dotProduct += a[i] * b[i];
       aMagnitude += a[i] * a[i];
       bMagnitude += b[i] * b[i];
     }
-    
+
     aMagnitude = Math.sqrt(aMagnitude);
     bMagnitude = Math.sqrt(bMagnitude);
-    
+
     if (aMagnitude === 0 || bMagnitude === 0) return 0;
     return dotProduct / (aMagnitude * bMagnitude);
   }
@@ -213,10 +236,10 @@ export class DatabaseService {
           limit: limit,
           with_payload: true
         });
-        
+
         return results.map(hit => {
           const payload = hit.payload as any;
-          
+
           return {
             id: payload.id,
             documentName: payload.documentName,
@@ -237,7 +260,7 @@ export class DatabaseService {
   // Check if a transcript already exists for a specific videoId
   public async doesTranscriptExist(videoId: string): Promise<boolean> {
     const idPattern = `youtube_${videoId}`;
-    
+
     return this.fallbackService.withFallback(
       'doesTranscriptExist',
       // Fallback function
@@ -263,14 +286,14 @@ export class DatabaseService {
             }
           ]
         };
-        
+
         try {
           // Try with count first as it's more efficient
           const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
           return countResponse.count > 0;
         } catch (error) {
           console.error('Error checking transcript existence with count:', error);
-          
+
           // Alternative approach if count with text matching doesn't work
           try {
             // Use scroll to check if any documents match
@@ -279,18 +302,18 @@ export class DatabaseService {
               limit: 1,
               with_payload: true
             });
-            
+
             return results.points.length > 0;
           } catch (scrollFilterError) {
             console.error('Error with filter scroll check:', scrollFilterError);
-            
+
             // Last resort: get first few results and check client-side
             try {
               const allResults = await this.qdrantClient.scroll(COLLECTION_NAME, {
                 limit: 100, // Reasonable limit to check
                 with_payload: true
               });
-              
+
               // Check if any document ID starts with the pattern
               return allResults.points.some(point => {
                 const payload = point.payload as any;
@@ -310,7 +333,7 @@ export class DatabaseService {
   // Delete YouTube video transcript chunks
   public async deleteYoutubeTranscriptChunks(videoId: string): Promise<number> {
     const idPattern = `youtube_${videoId}`;
-    
+
     return this.fallbackService.withFallback(
       'deleteYoutubeTranscriptChunks',
       // Fallback function
@@ -340,57 +363,57 @@ export class DatabaseService {
               }
             ]
           };
-          
+
           // First, count how many chunks will be deleted
           const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
           const count = countResponse.count;
-          
+
           if (count === 0) {
             return 0;
           }
-          
+
           // Then delete the chunks
           await this.qdrantClient.delete(COLLECTION_NAME, {
             filter,
             wait: true
           });
-          
+
           return count;
         } catch (error) {
           console.error(`Error deleting YouTube video chunks: ${error}`);
-          
+
           // Fallback approach if text matching doesn't work
           try {
             // First get all chunks that match our criteria
             let chunksToDelete: string[] = [];
             let nextPageOffset: string | undefined;
             const limit = 100;
-            
+
             do {
               const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
                 with_payload: true,
                 limit,
                 offset: nextPageOffset,
               });
-              
+
               response.points.forEach(point => {
                 const payload = point.payload as any;
                 if (payload.id && payload.id.startsWith(idPattern)) {
                   chunksToDelete.push(String(point.id));
                 }
               });
-              
+
               nextPageOffset = response.next_page_offset as string | undefined;
             } while (nextPageOffset);
-            
+
             if (chunksToDelete.length === 0) {
               return 0;
             }
-            
+
             // Delete in batches to avoid request size limits
             const batchSize = 100;
             let deletedCount = 0;
-            
+
             for (let i = 0; i < chunksToDelete.length; i += batchSize) {
               const batch = chunksToDelete.slice(i, i + batchSize);
               await this.qdrantClient.delete(COLLECTION_NAME, {
@@ -399,7 +422,7 @@ export class DatabaseService {
               });
               deletedCount += batch.length;
             }
-            
+
             return deletedCount;
           } catch (fallbackError) {
             console.error('Error with fallback deletion approach:', fallbackError);
@@ -414,7 +437,7 @@ export class DatabaseService {
   // Count YouTube video transcript chunks without deleting them
   public async countYoutubeTranscriptChunks(videoId: string): Promise<number> {
     const idPattern = `youtube_${videoId}`;
-    
+
     return this.fallbackService.withFallback(
       'countYoutubeTranscriptChunks',
       // Fallback function
@@ -443,36 +466,36 @@ export class DatabaseService {
               }
             ]
           };
-          
+
           // Count how many chunks exist
           const countResponse = await this.qdrantClient.count(COLLECTION_NAME, { filter });
           return countResponse.count;
         } catch (error) {
           console.error(`Error counting YouTube video chunks: ${error}`);
-          
+
           // Fallback to client-side filtering if text matching doesn't work
           try {
             let count = 0;
             let nextPageOffset: string | undefined;
             const limit = 100;
-            
+
             do {
               const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
                 with_payload: true,
                 limit,
                 offset: nextPageOffset,
               });
-              
+
               response.points.forEach(point => {
                 const payload = point.payload as any;
                 if (payload.id && payload.id.startsWith(idPattern)) {
                   count++;
                 }
               });
-              
+
               nextPageOffset = response.next_page_offset as string | undefined;
             } while (nextPageOffset);
-            
+
             return count;
           } catch (scrollError) {
             console.error('Error with fallback scroll count:', scrollError);
@@ -487,7 +510,7 @@ export class DatabaseService {
   // Get domains for a YouTube video
   public async getYoutubeVideoDomains(videoId: string): Promise<string[]> {
     const idPattern = `youtube_${videoId}`;
-    
+
     return this.fallbackService.withFallback(
       'getYoutubeVideoDomains',
       // Fallback function
@@ -516,37 +539,37 @@ export class DatabaseService {
               }
             ]
           };
-          
+
           // Get the first chunk to extract domains
           const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
             filter,
             with_payload: { include: ['domains'] },
             limit: 1
           });
-          
+
           if (response.points.length > 0) {
             const payload = response.points[0].payload as any;
             return payload.domains || ['default'];
           }
-          
+
           return ['default'];
         } catch (error) {
           console.error(`Error getting YouTube video domains: ${error}`);
-          
+
           // Fallback to client-side filtering if text matching doesn't work
           try {
             const domains = new Set<string>();
             let found = false;
             let nextPageOffset: string | undefined;
             const limit = 100;
-            
+
             do {
               const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
                 with_payload: { include: ['id', 'domains'] },
                 limit,
                 offset: nextPageOffset,
               });
-              
+
               for (const point of response.points) {
                 const payload = point.payload as any;
                 if (payload.id && payload.id.startsWith(idPattern)) {
@@ -556,15 +579,15 @@ export class DatabaseService {
                   found = true;
                 }
               }
-              
+
               // If we found at least one matching chunk, we can stop early
               if (found && domains.size > 0) {
                 break;
               }
-              
+
               nextPageOffset = response.next_page_offset as string | undefined;
             } while (nextPageOffset);
-            
+
             return Array.from(domains);
           } catch (scrollError) {
             console.error('Error with fallback scroll for domains:', scrollError);
@@ -583,14 +606,14 @@ export class DatabaseService {
       // Fallback function
       () => {
         const documentNames = new Set<string>();
-        
+
         // Collect unique document names from in-memory storage
         Array.from(inMemoryDocuments.values()).forEach(item => {
           if (item.document.documentName) {
             documentNames.add(item.document.documentName);
           }
         });
-        
+
         return Array.from(documentNames);
       },
       // Qdrant function
@@ -599,28 +622,28 @@ export class DatabaseService {
           // We need to scroll through all documents to get unique document names
           // Note: This is not the most efficient solution for large collections
           // In a production environment, consider using a separate index or database
-          
+
           const documentNames = new Set<string>();
           let nextPageOffset: string | undefined;
           const limit = 100;
-          
+
           do {
             const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
               with_payload: { include: ['documentName'] },
               limit,
               offset: nextPageOffset,
             });
-            
+
             response.points.forEach(point => {
               const payload = point.payload as any;
               if (payload.documentName) {
                 documentNames.add(payload.documentName);
               }
             });
-            
+
             nextPageOffset = response.next_page_offset as string | undefined;
           } while (nextPageOffset);
-          
+
           return Array.from(documentNames);
         } catch (error) {
           console.error('Error getting unique document names:', error);
@@ -630,7 +653,7 @@ export class DatabaseService {
       this.fallbackService.isFallbackActive()
     );
   }
-  
+
   // Get all chunks for a specific document name
   public async getChunksByDocumentName(documentName: string): Promise<SearchResult[]> {
     return this.fallbackService.withFallback(
@@ -661,19 +684,19 @@ export class DatabaseService {
           must: [
             {
               key: 'documentName',
-              match: { 
+              match: {
                 value: documentName
               }
             }
           ]
         };
-        
+
         try {
           // Use scroll to get all chunks
           const chunks: SearchResult[] = [];
           let nextPageOffset: string | undefined;
           const limit = 100;
-          
+
           do {
             const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
               filter,
@@ -681,10 +704,10 @@ export class DatabaseService {
               limit,
               offset: nextPageOffset,
             });
-            
+
             const resultsPage = response.points.map(point => {
               const payload = point.payload as any;
-              
+
               return {
                 id: payload.id,
                 documentName: payload.documentName,
@@ -697,11 +720,11 @@ export class DatabaseService {
                 score: 1.0 // Not relevant for this query but needed for type
               };
             });
-            
+
             chunks.push(...resultsPage);
             nextPageOffset = response.next_page_offset as string | undefined;
           } while (nextPageOffset);
-          
+
           return chunks;
         } catch (error) {
           console.error(`Error getting chunks for document ${documentName}:`, error);
@@ -1053,3 +1076,5 @@ export class DatabaseService {
     );
   }
 }
+// Export a singleton instance
+export const dbService = DatabaseService.getInstance();

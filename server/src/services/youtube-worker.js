@@ -1,10 +1,7 @@
 
 const { parentPort, workerData } = require('worker_threads');
 const { processYoutubeTranscript, getVideoDetails } = require('./youtube-transcript');
-const { DatabaseService } = require('../core/database-service');
-
-// Create database service instance
-const dbService = new DatabaseService();
+const { dbService } = require('../core/database-service');
 
 async function processVideo() {
   const {
@@ -18,8 +15,7 @@ async function processVideo() {
   } = workerData;
   
   try {
-    // Initialize database
-    await dbService.initialize();
+    // Database is initialized at the bottom of the script
     
     // Send progress updates to main thread
     const progressCallback = (stage, message, progress, currentChunk, totalChunks) => {

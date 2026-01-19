@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { extractYouTubeId, getVideoDetails } from '../services/youtube-transcript';
-import { DatabaseService } from '../core/database-service';
+import { dbService } from '../core/database-service';
 import { isAuthenticated } from '../services/youtube-auth';
 import { progressTracker } from '../services/progress-tracker';
 import { addYoutubeProcessingJob, getJobStatus } from '../services/job-queue';
@@ -26,8 +26,8 @@ import { enhanceVideoMetadata, EnhancementOptions } from '../services/video-meta
 import path from 'path';
 import multer from 'multer';
 
-// Create a singleton instance of the database service
-const dbService = new DatabaseService();
+// Use the singleton instance of the database service
+// dbService is now imported from core
 
 // Configure multer for cookies file upload
 const cookiesUpload = multer({
