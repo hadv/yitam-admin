@@ -33,6 +33,7 @@ export interface YtDlpDownloadOptions {
   audioOnly?: boolean;
   cookiesFile?: string; // Path to browser cookies file
   cookiesFromBrowser?: string; // Browser to extract cookies from: 'chrome', 'firefox', 'safari', 'edge'
+  browserProfile?: string; // Optional browser profile name (e.g., 'Default', 'Profile 1')
   outputTemplate?: string;
   extractAudio?: boolean;
   audioFormat?: 'mp3' | 'aac' | 'flac' | 'wav';
@@ -81,10 +82,11 @@ export const checkYtDlpInstallation = async (): Promise<boolean> => {
 export const getYtDlpVideoInfo = async (
   youtubeUrl: string,
   cookiesFile?: string,
-  cookiesFromBrowser?: string
+  cookiesFromBrowser?: string,
+  browserProfile?: string
 ): Promise<YtDlpVideoInfo> => {
   return new Promise((resolve, reject) => {
-    console.log('🔍 getYtDlpVideoInfo called with:', { youtubeUrl, cookiesFile, cookiesFromBrowser });
+    console.log('🔍 getYtDlpVideoInfo called with:', { youtubeUrl, cookiesFile, cookiesFromBrowser, browserProfile });
 
     const videoId = extractYouTubeId(youtubeUrl);
     if (!videoId) {
@@ -104,12 +106,13 @@ export const getYtDlpVideoInfo = async (
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       '--add-header', 'Sec-Fetch-Mode:navigate',
-      '--extractor-args', 'youtube:player-client=ios,web'
+      '--extractor-args', 'youtube:player_client=web'
     ];
 
     // Add cookies from browser if specified
     if (cookiesFromBrowser) {
-      args.push('--cookies-from-browser', `${cookiesFromBrowser}:Profile 9`);
+      const auth = browserProfile ? `${cookiesFromBrowser}:${browserProfile}` : cookiesFromBrowser;
+      args.push('--cookies-from-browser', auth);
     }
     // Otherwise, add cookies file if provided
     else if (cookiesFile && fs.existsSync(cookiesFile)) {
@@ -378,7 +381,7 @@ const attemptDownloadWithFormat = async (
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       '--add-header', 'Sec-Fetch-Mode:navigate',
-      '--extractor-args', 'youtube:player-client=ios,web'
+      '--extractor-args', 'youtube:player_client=web'
     ];
 
     // Add quality/format options
@@ -395,8 +398,9 @@ const attemptDownloadWithFormat = async (
 
     // Add cookies from browser if specified
     if (options.cookiesFromBrowser) {
-      // Use the exact format that works in command line (without extra quotes)
-      args.push('--cookies-from-browser', `${options.cookiesFromBrowser}:Profile 9`);
+      // Use the specified browser for cookies
+      const auth = options.browserProfile ? `${options.cookiesFromBrowser}:${options.browserProfile}` : options.cookiesFromBrowser;
+      args.push('--cookies-from-browser', auth);
     }
     // Otherwise, add cookies file if provided
     else if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
@@ -649,4 +653,51 @@ export const deleteCookiesFile = async (fileName: string): Promise<void> => {
   } catch (error) {
     throw new Error(`Failed to delete cookies file: ${error}`);
   }
+};
+
+/**
+ * List available Chrome profiles on macOS
+ */
+const listChromeProfiles = async (): Promise<{ name: string; email: string }[]> => {
+  const chromePath = path.join(process.env.HOME || '', 'Library/Application Support/Google/Chrome');
+  if (!fs.existsSync(chromePath)) return [];
+
+  try {
+    const files = await fs.promises.readdir(chromePath);
+    const profiles = files.filter(f => f === 'Default' || f.startsWith('Profile '));
+    const results: { name: string; email: string }[] = [];
+
+    for (const profile of profiles) {
+      const prefsPath = path.join(chromePath, profile, 'Preferences');
+      if (fs.existsSync(prefsPath)) {
+        try {
+          const content = await fs.promises.readFile(prefsPath, 'utf8');
+          const prefs = JSON.parse(content);
+          // Look for email in different possible locations in Preferences JSON
+          const email = prefs.account_info?.[0]?.email ||
+            prefs.profile?.name ||
+            prefs.google?.services?.last_username ||
+            '';
+          results.push({ name: profile, email });
+        } catch (e) {
+          results.push({ name: profile, email: '' });
+        }
+      }
+    }
+    return results;
+  } catch (error) {
+    console.error('Error listing Chrome profiles:', error);
+    return [];
+  }
+};
+
+/**
+ * Get available profiles for a browser
+ */
+export const getBrowserProfiles = async (browser: string): Promise<{ name: string; email: string }[]> => {
+  if (browser === 'chrome' && process.platform === 'darwin') {
+    return listChromeProfiles();
+  }
+  // For now, return empty for other browsers
+  return [];
 };

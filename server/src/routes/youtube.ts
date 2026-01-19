@@ -18,6 +18,7 @@ import {
   getYoutubeVideoInfoWithYtDlp,
   uploadCookiesFile,
   getCookiesFilesList,
+  getBrowserProfilesList,
   deleteCookiesFileController
 } from '../controllers/youtube';
 import {
@@ -149,6 +150,9 @@ router.post('/cookies/upload', uploadCookiesFile);
 
 // Route for getting list of cookies files
 router.get('/cookies', getCookiesFilesList);
+
+// Route for getting list of browser profiles
+router.get('/yt-dlp/profiles', getBrowserProfilesList);
 
 // Route for deleting cookies file
 router.delete('/cookies/:fileName', deleteCookiesFileController);

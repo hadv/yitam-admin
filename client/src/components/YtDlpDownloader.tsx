@@ -94,7 +94,10 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   const [cookiesUploadMessage, setCookiesUploadMessage] = useState('');
   const [cookiesFromBrowser, setCookiesFromBrowser] = useState('chrome');
   const [cookieMethod, setCookieMethod] = useState<'file' | 'browser'>('browser');
-  
+  const [browserProfiles, setBrowserProfiles] = useState<{ name: string, email: string }[]>([]);
+  const [selectedBrowserProfile, setSelectedBrowserProfile] = useState<string>('');
+  const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
+
   // Download options
   const [downloadOptions, setDownloadOptions] = useState({
     quality: 'auto', // Default to yt-dlp's automatic format selection (usually MKV)
@@ -107,6 +110,33 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
     checkYtDlpStatus();
     loadCookiesFiles();
   }, []);
+
+  useEffect(() => {
+    if (cookieMethod === 'browser' && cookiesFromBrowser) {
+      loadBrowserProfiles();
+    }
+  }, [cookieMethod, cookiesFromBrowser]);
+
+  const loadBrowserProfiles = async () => {
+    setIsLoadingProfiles(true);
+    try {
+      const response = await axios.get(`/api/youtube/yt-dlp/profiles?browser=${cookiesFromBrowser}`);
+      setBrowserProfiles(response.data.profiles);
+      // Automatically select Profile 9 if it exists as it's often the desired one
+      if (response.data.profiles.some((p: any) => p.name === 'Profile 9')) {
+        setSelectedBrowserProfile('Profile 9');
+      } else if (response.data.profiles.length > 0) {
+        setSelectedBrowserProfile(response.data.profiles[0].name);
+      } else {
+        setSelectedBrowserProfile('');
+      }
+    } catch (error) {
+      console.error('Error loading browser profiles:', error);
+      setBrowserProfiles([]);
+    } finally {
+      setIsLoadingProfiles(false);
+    }
+  };
 
   const checkYtDlpStatus = async () => {
     try {
@@ -152,7 +182,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
       setCookiesUploadMessage('Cookies file uploaded successfully!');
       setSelectedCookiesFile(response.data.fileName);
       await loadCookiesFiles();
-      
+
       // Clear the file input
       event.target.value = '';
     } catch (error: any) {
@@ -188,7 +218,8 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
       const response = await axios.post('/api/youtube/yt-dlp/info', {
         youtubeUrl,
         cookiesFileName: cookieMethod === 'file' ? selectedCookiesFile || undefined : undefined,
-        cookiesFromBrowser: cookieMethod === 'browser' ? cookiesFromBrowser : undefined
+        cookiesFromBrowser: cookieMethod === 'browser' ? cookiesFromBrowser : undefined,
+        browserProfile: cookieMethod === 'browser' ? selectedBrowserProfile || undefined : undefined
       });
 
       setVideoInfo(response.data.videoInfo);
@@ -288,6 +319,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
         socketId,
         cookiesFileName: cookieMethod === 'file' ? selectedCookiesFile || undefined : undefined,
         cookiesFromBrowser: cookieMethod === 'browser' ? cookiesFromBrowser : undefined,
+        browserProfile: cookieMethod === 'browser' ? selectedBrowserProfile || undefined : undefined,
         options: downloadOptions,
         useAudioOnly: useAudioOnly
       };
@@ -367,7 +399,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
-    
+
     if (hours > 0) {
       return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
@@ -449,92 +481,123 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
 
         {/* Browser Selection (when using live cookies) */}
         {cookieMethod === 'browser' && (
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Select Browser
-            </label>
-            <select
-              value={cookiesFromBrowser}
-              onChange={(e) => setCookiesFromBrowser(e.target.value)}
-              className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-            >
-              <option value="chrome">Google Chrome</option>
-              <option value="firefox">Mozilla Firefox</option>
-              <option value="safari">Safari</option>
-              <option value="edge">Microsoft Edge</option>
-            </select>
-            <p className="mt-1 text-xs text-gray-500">
-              Make sure you're logged into YouTube in the selected browser
+          <>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Select Browser
+              </label>
+              <select
+                value={cookiesFromBrowser}
+                onChange={(e) => setCookiesFromBrowser(e.target.value)}
+                className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="chrome">Google Chrome</option>
+                <option value="firefox">Mozilla Firefox</option>
+                <option value="safari">Safari</option>
+                <option value="edge">Microsoft Edge</option>
+              </select>
+            </div>
+
+            {/* Profile Selection */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Select Browser Profile
+              </label>
+              <div className="flex items-center space-x-2">
+                <select
+                  value={selectedBrowserProfile}
+                  onChange={(e) => setSelectedBrowserProfile(e.target.value)}
+                  className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                  disabled={isLoadingProfiles}
+                >
+                  <option value="">Default Profile</option>
+                  {browserProfiles.map((profile) => (
+                    <option key={profile.name} value={profile.name}>
+                      {profile.name} {profile.email ? `(${profile.email})` : ''}
+                    </option>
+                  ))}
+                </select>
+                {isLoadingProfiles && (
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                Logged in as: <strong>{browserProfiles.find(p => p.name === selectedBrowserProfile)?.email || 'Unknown'}</strong>
+              </p>
+            </div>
+
+            <p className="mb-4 text-xs text-gray-500">
+              Make sure you're logged into YouTube in the selected browser and profile
             </p>
-          </div>
+          </>
         )}
 
         {/* Upload Cookies (when using file method) */}
         {cookieMethod === 'file' && (
-        <>
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Upload Browser Cookies File (.txt)
-          </label>
-          <div className="flex items-center space-x-2">
-            <input
-              type="file"
-              accept=".txt"
-              onChange={handleCookiesUpload}
-              disabled={isUploadingCookies}
-              className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-            />
-            {isUploadingCookies && (
-              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
-            )}
-          </div>
-          {cookiesUploadMessage && (
-            <p className={`mt-2 text-sm ${cookiesUploadMessage.includes('successfully') ? 'text-green-600' : 'text-red-600'}`}>
-              {cookiesUploadMessage}
-            </p>
-          )}
-        </div>
-
-        {/* Select Cookies File */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Select Cookies File
-          </label>
-          <select
-            value={selectedCookiesFile}
-            onChange={(e) => setSelectedCookiesFile(e.target.value)}
-            className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-          >
-            <option value="">No cookies (public videos only)</option>
-            {cookiesFiles.map((file) => (
-              <option key={file.fileName} value={file.fileName}>
-                {file.fileName}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Cookies Files List */}
-        {cookiesFiles.length > 0 && (
-          <div>
-            <h4 className="text-sm font-medium text-gray-700 mb-2">Available Cookies Files</h4>
-            <div className="space-y-2">
-              {cookiesFiles.map((file) => (
-                <div key={file.fileName} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                  <span className="text-sm text-gray-700">{file.fileName}</span>
-                  <button
-                    onClick={() => deleteCookiesFile(file.fileName)}
-                    className="text-red-600 hover:text-red-800"
-                    title="Delete cookies file"
-                  >
-                    <FiTrash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              ))}
+          <>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Upload Browser Cookies File (.txt)
+              </label>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="file"
+                  accept=".txt"
+                  onChange={handleCookiesUpload}
+                  disabled={isUploadingCookies}
+                  className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                />
+                {isUploadingCookies && (
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                )}
+              </div>
+              {cookiesUploadMessage && (
+                <p className={`mt-2 text-sm ${cookiesUploadMessage.includes('successfully') ? 'text-green-600' : 'text-red-600'}`}>
+                  {cookiesUploadMessage}
+                </p>
+              )}
             </div>
-          </div>
-        )}
-        </>
+
+            {/* Select Cookies File */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Select Cookies File
+              </label>
+              <select
+                value={selectedCookiesFile}
+                onChange={(e) => setSelectedCookiesFile(e.target.value)}
+                className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">No cookies (public videos only)</option>
+                {cookiesFiles.map((file) => (
+                  <option key={file.fileName} value={file.fileName}>
+                    {file.fileName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Cookies Files List */}
+            {cookiesFiles.length > 0 && (
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-2">Available Cookies Files</h4>
+                <div className="space-y-2">
+                  {cookiesFiles.map((file) => (
+                    <div key={file.fileName} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                      <span className="text-sm text-gray-700">{file.fileName}</span>
+                      <button
+                        onClick={() => deleteCookiesFile(file.fileName)}
+                        className="text-red-600 hover:text-red-800"
+                        title="Delete cookies file"
+                      >
+                        <FiTrash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -901,12 +964,12 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
               )}
               {useEnhancedMetadata
                 ? (useAudioOnly
-                   ? 'Download with AUDIO-ONLY Enhancement'
-                   : (forceAudioTranscription
-                      ? 'Download with Force Audio Transcription'
-                      : (useAudioTranscription
-                         ? 'Download with Enhanced Metadata + Audio'
-                         : 'Download with Enhanced Metadata')))
+                  ? 'Download with AUDIO-ONLY Enhancement'
+                  : (forceAudioTranscription
+                    ? 'Download with Force Audio Transcription'
+                    : (useAudioTranscription
+                      ? 'Download with Enhanced Metadata + Audio'
+                      : 'Download with Enhanced Metadata')))
                 : 'Download with yt-dlp'}
             </button>
           </div>
@@ -1113,7 +1176,7 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                           </span>
                           <span className="bg-blue-200 px-2 py-1 rounded">
                             Quality: {downloadResult.enhancedMetadata.confidence > 0.8 ? 'High' :
-                                     downloadResult.enhancedMetadata.confidence > 0.6 ? 'Medium' : 'Low'}
+                              downloadResult.enhancedMetadata.confidence > 0.6 ? 'Medium' : 'Low'}
                           </span>
                         </div>
                       </div>
@@ -1122,21 +1185,19 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                       <div className="mt-2 flex space-x-1 border-b border-gray-200">
                         <button
                           onClick={() => setActiveTranscriptTab('enhanced')}
-                          className={`px-3 py-1 text-xs font-medium rounded-t ${
-                            activeTranscriptTab === 'enhanced'
-                              ? 'bg-blue-100 text-blue-700 border-b-2 border-blue-500'
-                              : 'text-gray-600 hover:text-gray-800'
-                          }`}
+                          className={`px-3 py-1 text-xs font-medium rounded-t ${activeTranscriptTab === 'enhanced'
+                            ? 'bg-blue-100 text-blue-700 border-b-2 border-blue-500'
+                            : 'text-gray-600 hover:text-gray-800'
+                            }`}
                         >
                           🔧 Enhanced (Recommended)
                         </button>
                         <button
                           onClick={() => setActiveTranscriptTab('raw')}
-                          className={`px-3 py-1 text-xs font-medium rounded-t ${
-                            activeTranscriptTab === 'raw'
-                              ? 'bg-gray-100 text-gray-700 border-b-2 border-gray-500'
-                              : 'text-gray-600 hover:text-gray-800'
-                          }`}
+                          className={`px-3 py-1 text-xs font-medium rounded-t ${activeTranscriptTab === 'raw'
+                            ? 'bg-gray-100 text-gray-700 border-b-2 border-gray-500'
+                            : 'text-gray-600 hover:text-gray-800'
+                            }`}
                         >
                           📝 Raw (Original)
                         </button>
