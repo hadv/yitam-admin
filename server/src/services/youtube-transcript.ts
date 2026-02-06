@@ -1575,7 +1575,7 @@ export const getTranscriptWithYtDlp = async (
     // --sub-lang: Languages to download (avoiding 'all' to prevent 429 Rate Limit)
     // --skip-download: Do not download the video
     // --convert-subs srt: Convert subtitles to SRT format
-    let command = `yt-dlp --write-sub --write-auto-sub --sub-lang "${languageCode}" --convert-subs srt --skip-download --output "${outputTemplate}" "${videoUrl}"`;
+    let command = `yt-dlp --remote-components ejs:github --write-sub --write-auto-sub --sub-lang "${languageCode}" --convert-subs srt --skip-download --output "${outputTemplate}" "${videoUrl}"`;
 
     // Add cookies from browser if configured
     // This helps avoid 429 Too Many Requests errors
