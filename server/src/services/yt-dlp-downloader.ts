@@ -106,7 +106,7 @@ export const getYtDlpVideoInfo = async (
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       '--add-header', 'Sec-Fetch-Mode:navigate',
-      '--extractor-args', 'youtube:player_client=web'
+      '--remote-components', 'ejs:github'
     ];
 
     // Add cookies from browser if specified
@@ -381,7 +381,7 @@ const attemptDownloadWithFormat = async (
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       '--add-header', 'Sec-Fetch-Mode:navigate',
-      '--extractor-args', 'youtube:player_client=web'
+      '--remote-components', 'ejs:github'
     ];
 
     // Add quality/format options
