@@ -99,13 +99,9 @@ export const getYtDlpVideoInfo = async (
       '--no-download',
       '--no-playlist',
       youtubeUrl,
-      // Anti-bot bypass options to fix 403 Forbidden errors
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      // Anti-bot bypass options
       '--extractor-retries', '5',
       '--no-check-certificates',
-      '--add-header', 'Accept-Language:en-US,en;q=0.9',
-      '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      '--add-header', 'Sec-Fetch-Mode:navigate',
       '--remote-components', 'ejs:github'
     ];
 
@@ -372,15 +368,11 @@ const attemptDownloadWithFormat = async (
       '--no-playlist',
       '-o', outputTemplate,
       youtubeUrl,
-      // Anti-bot bypass options to fix 403 Forbidden errors
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      // Anti-bot bypass options
       '--extractor-retries', '5',        // Retry extraction up to 5 times
       '--fragment-retries', '5',         // Retry fragment downloads up to 5 times
       '--retry-sleep', '3',              // Sleep 3 seconds between retries
       '--no-check-certificates',         // Skip SSL certificate validation (sometimes helps)
-      '--add-header', 'Accept-Language:en-US,en;q=0.9',
-      '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      '--add-header', 'Sec-Fetch-Mode:navigate',
       '--remote-components', 'ejs:github'
     ];
 
