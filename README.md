@@ -21,6 +21,7 @@ This project is ready for deployment with Docker Compose. All necessary componen
 - **Vector Database**: Qdrant with FastEmbed API
 - **Embeddings**: Server-side embedding generation with Qdrant's FastEmbed
 - **Deployment**: Docker, Docker Compose
+- **Video Downloader**: yt-dlp (v2026.03.17)
 
 ## Project Structure
 
@@ -47,6 +48,7 @@ document-vector-storage/
 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
 - [Node.js](https://nodejs.org/) (v14 or higher) and npm (for development)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (v2026.03.17)
 
 ### Development Setup
 
