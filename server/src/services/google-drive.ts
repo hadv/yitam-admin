@@ -475,17 +475,17 @@ export const renameFilesInDrive = async (
       let videoId: string | null = null;
       let extension: string | null = null;
 
-      // Try matching suffix first (more specific to likely current state)
-      const suffixMatch = file.name.match(suffixRegex);
-      if (suffixMatch) {
-        videoId = suffixMatch[1];
-        extension = suffixMatch[2];
+      // Try matching prefix first (yt-dlp uses ID_Title.ext format)
+      const prefixMatch = file.name.match(prefixRegex);
+      if (prefixMatch) {
+        videoId = prefixMatch[1];
+        extension = prefixMatch[3];
       } else {
-        // Try matching prefix logic
-        const prefixMatch = file.name.match(prefixRegex);
-        if (prefixMatch) {
-          videoId = prefixMatch[1];
-          extension = prefixMatch[3];
+        // Try matching suffix logic as fallback
+        const suffixMatch = file.name.match(suffixRegex);
+        if (suffixMatch) {
+          videoId = suffixMatch[1];
+          extension = suffixMatch[2];
         }
       }
 
