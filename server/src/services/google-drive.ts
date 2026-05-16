@@ -466,26 +466,40 @@ export const renameFilesInDrive = async (
     // 3. Identify YouTube files and extract IDs
     const matchedFiles: { file: any; videoId: string; extension: string; originalName: string }[] = [];
 
-    // Regex for ID at Start: 11 chars + something + ext
-    const prefixRegex = /^([a-zA-Z0-9_-]{11})(.*)(\.[a-zA-Z0-9]+)$/;
-    // Regex for ID at End: something + _ + 11 chars + ext
-    const suffixRegex = /.*_([a-zA-Z0-9_-]{11})(\.[a-zA-Z0-9]+)$/;
+    // Regex for exact match: just ID.ext
+    const exactRegex = /^([a-zA-Z0-9_-]{11})(\.[a-zA-Z0-9]+)$/;
+    // Regex for ID in brackets: Title [ID].ext
+    const bracketRegex = /\[([a-zA-Z0-9_-]{11})\]/;
+    // Regex for ID at Start: 11 chars + separator + something + ext
+    const prefixRegex = /^([a-zA-Z0-9_-]{11})[_ \-\[(]+(.*)(\.[a-zA-Z0-9]+)$/;
+    // Regex for ID at End: something + separator + 11 chars + optional closing bracket + ext
+    const suffixRegex = /.*[_ \-\[(]([a-zA-Z0-9_-]{11})[\])]?(\.[a-zA-Z0-9]+)$/;
 
     for (const file of files) {
       let videoId: string | null = null;
       let extension: string | null = null;
 
-      // Try matching suffix first (more specific to likely current state)
-      const suffixMatch = file.name.match(suffixRegex);
-      if (suffixMatch) {
-        videoId = suffixMatch[1];
-        extension = suffixMatch[2];
-      } else {
-        // Try matching prefix logic
-        const prefixMatch = file.name.match(prefixRegex);
-        if (prefixMatch) {
-          videoId = prefixMatch[1];
-          extension = prefixMatch[3];
+      // Extract extension
+      const extMatch = file.name.match(/(\.[a-zA-Z0-9]+)$/);
+      extension = extMatch ? extMatch[1] : null;
+
+      if (extension) {
+        // 1. Try exact match
+        const exactMatch = file.name.match(exactRegex);
+        if (exactMatch) {
+          videoId = exactMatch[1];
+        }
+        // 2. Try bracket match
+        else if (file.name.match(bracketRegex)) {
+          videoId = file.name.match(bracketRegex)![1];
+        }
+        // 3. Try prefix match
+        else if (file.name.match(prefixRegex)) {
+          videoId = file.name.match(prefixRegex)![1];
+        }
+        // 4. Try suffix match
+        else if (file.name.match(suffixRegex)) {
+          videoId = file.name.match(suffixRegex)![1];
         }
       }
 
