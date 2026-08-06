@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.*
+uploads
+downloads
+temp
+data
+*.log
+.DS_Store
