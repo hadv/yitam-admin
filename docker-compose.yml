@@ -1,15 +1,11 @@
-version: '3.8'
-
 services:
   qdrant:
-    image: qdrant/qdrant
+    image: qdrant/qdrant:v1.19.0
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - ./qdrant_storage:/qdrant/storage
-    environment:
-      - QDRANT_ENABLE_FASTEMBED=true
     restart: always
 
   server:
@@ -21,9 +17,14 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_COLLECTION_NAME=documents
-      - VECTOR_SIZE=384
+      # Point at the local qdrant service by default; override to target Qdrant Cloud.
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - COLLECTION_NAME=${COLLECTION_NAME:-knowledge_base}
+      # Must match the Gemini embedding model's output size and the existing
+      # collection's vector size. Changing this on a populated collection breaks upserts.
+      - GEMINI_VECTOR_SIZE=${GEMINI_VECTOR_SIZE:-768}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     depends_on:
       - qdrant
     volumes:
