@@ -231,13 +231,13 @@ export class DatabaseService {
       },
       // Qdrant function
       async () => {
-        const results = await this.qdrantClient.search(COLLECTION_NAME, {
-          vector: queryVector,
+        const results = await this.qdrantClient.query(COLLECTION_NAME, {
+          query: queryVector,
           limit: limit,
           with_payload: true
         });
 
-        return results.map(hit => {
+        return results.points.map(hit => {
           const payload = hit.payload as any;
 
           return {

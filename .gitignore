@@ -43,6 +43,12 @@ server/downloads/
 # Qdrant storage
 qdrant_storage/
 
+# Collection dumps from `npm run backup export` — these contain document
+# content and vectors, so they must never be committed.
+backups/
+*.jsonl
+*.meta.json
+
 # Data directories
 /server/data/
 

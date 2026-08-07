@@ -4,12 +4,16 @@
   "description": "Server for document processing and vector storage",
   "type": "commonjs",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn -r tsconfig-paths/register src/index.ts",
     "dev:debug": "ts-node -r tsconfig-paths/register --inspect src/index.ts",
-    "migrate": "ts-node -r tsconfig-paths/register src/scripts/migrate.ts"
+    "migrate": "ts-node -r tsconfig-paths/register src/scripts/migrate.ts",
+    "backup": "ts-node -r tsconfig-paths/register src/scripts/backup.ts"
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
@@ -17,7 +21,7 @@
     "@google-cloud/vision": "^4.3.3",
     "@google/genai": "^1.11.0",
     "@google/generative-ai": "^0.2.1",
-    "@qdrant/js-client-rest": "^1.6.0",
+    "@qdrant/js-client-rest": "^1.19.0",
     "axios": "^1.9.0",
     "cheerio": "^1.0.0",
     "cors": "^2.8.5",
