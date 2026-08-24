@@ -66,11 +66,24 @@ export const processYoutubeVideo = async (req: Request, res: Response) => {
     const transcriptExists = await dbService.doesTranscriptExist(videoId);
 
     if (transcriptExists) {
+      // Report what is already stored so the client can show the real numbers
+      // instead of falling back to "YouTube Video" / 0 chunks
+      const [totalChunks, videoTitle, domains] = await Promise.all([
+        dbService.countYoutubeTranscriptChunks(videoId),
+        dbService.getYoutubeVideoDocumentName(videoId),
+        dbService.getYoutubeVideoDomains(videoId)
+      ]);
+
+      console.log(`Video ${videoId} already transcribed: ${totalChunks} chunks stored`);
+
       return res.status(200).json({
         message: 'This video has already been transcribed',
         videoId,
         videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
-        alreadyProcessed: true
+        alreadyProcessed: true,
+        videoTitle: videoTitle || `YouTube Video: ${videoId}`,
+        totalChunks,
+        domains
       });
     }
 
