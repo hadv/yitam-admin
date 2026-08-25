@@ -42,6 +42,8 @@ interface ProcessingResult {
   videoTitle: string;
   totalChunks: number;
   videoId: string;
+  alreadyProcessed?: boolean;
+  domains?: string[];
 }
 
 const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
@@ -448,7 +450,9 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         setProcessingResult({
           videoTitle: response.data.videoTitle || 'YouTube Video',
           totalChunks: response.data.totalChunks || 0,
-          videoId: response.data.videoId
+          videoId: response.data.videoId,
+          alreadyProcessed: true,
+          domains: response.data.domains
         });
 
         onUploadSuccess();
@@ -724,9 +728,30 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         )}
 
         {processingResult && (
-          <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
-            <p><strong>Successfully processed:</strong> {processingResult.videoTitle}</p>
-            <p className="text-sm">Created {processingResult.totalChunks} chunks for vector embedding</p>
+          <div
+            className={`mb-4 border px-4 py-3 rounded ${
+              processingResult.alreadyProcessed
+                ? 'bg-blue-100 border-blue-400 text-blue-700'
+                : 'bg-green-100 border-green-400 text-green-700'
+            }`}
+          >
+            {processingResult.alreadyProcessed ? (
+              <>
+                <p><strong>Already processed:</strong> {processingResult.videoTitle}</p>
+                <p className="text-sm">
+                  This video is already in the vector database with {processingResult.totalChunks} chunks
+                  {processingResult.domains && processingResult.domains.length > 0
+                    ? ` (domains: ${processingResult.domains.join(', ')})`
+                    : ''}
+                  . Nothing was re-processed — delete the existing chunks first to re-extract the transcript.
+                </p>
+              </>
+            ) : (
+              <>
+                <p><strong>Successfully processed:</strong> {processingResult.videoTitle}</p>
+                <p className="text-sm">Created {processingResult.totalChunks} chunks for vector embedding</p>
+              </>
+            )}
             <a
               href={`https://www.youtube.com/watch?v=${processingResult.videoId}`}
               target="_blank"

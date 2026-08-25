@@ -599,6 +599,51 @@ export class DatabaseService {
     );
   }
 
+  // Get the stored document name (video title) for a YouTube video
+  public async getYoutubeVideoDocumentName(videoId: string): Promise<string | null> {
+    const idPattern = `youtube_${videoId}`;
+
+    return this.fallbackService.withFallback(
+      'getYoutubeVideoDocumentName',
+      // Fallback function
+      () => {
+        const match = Array.from(inMemoryDocuments.values())
+          .find(item => item.document && item.document.id.startsWith(idPattern));
+
+        return match?.document.documentName || null;
+      },
+      // Qdrant function
+      async () => {
+        const filter = {
+          must: [
+            {
+              key: 'id',
+              match: {
+                text: idPattern,
+                exact: false // Using non-exact match to find IDs that start with this pattern
+              }
+            }
+          ]
+        };
+
+        // Every chunk of a video carries the same documentName, so one point is enough
+        const response = await this.qdrantClient.scroll(COLLECTION_NAME, {
+          filter,
+          with_payload: { include: ['documentName'] },
+          limit: 1
+        });
+
+        if (response.points.length === 0) {
+          return null;
+        }
+
+        const payload = response.points[0].payload as any;
+        return payload.documentName || null;
+      },
+      this.fallbackService.isFallbackActive()
+    );
+  }
+
   // Get all unique document names in the database
   public async getUniqueDocumentNames(): Promise<string[]> {
     return this.fallbackService.withFallback(
