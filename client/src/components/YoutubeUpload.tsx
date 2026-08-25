@@ -83,6 +83,22 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
     { value: 'vivaldi', label: 'Vivaldi' }
   ];
 
+  // Mirror the in-flight flags and the success callback into refs. The progress
+  // listener is registered once per videoId, so it has to read these when an
+  // update arrives rather than use the values captured at registration time.
+  // Declared above the listener effect so React runs this sync first on a commit.
+  const isProcessingRef = useRef(isProcessing);
+  const isDownloadingRef = useRef(isDownloading);
+  const actionModeRef = useRef(actionMode);
+  const onUploadSuccessRef = useRef(onUploadSuccess);
+
+  useEffect(() => {
+    isProcessingRef.current = isProcessing;
+    isDownloadingRef.current = isDownloading;
+    actionModeRef.current = actionMode;
+    onUploadSuccessRef.current = onUploadSuccess;
+  }, [isProcessing, isDownloading, actionMode, onUploadSuccess]);
+
   // Initialize socket connection on component mount
   useEffect(() => {
     // Connect to socket
@@ -109,6 +125,8 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
 
     console.log('Setting up progress listener for videoId:', videoId);
 
+    let noUpdateTimer: ReturnType<typeof setTimeout> | undefined;
+
     // Ensure we're connected to the socket
     const setupListener = async () => {
       const connected = await socketService.connect();
@@ -121,10 +139,21 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       // Register progress listener for this videoId
       socketService.registerProgressListener(videoId, (update: ProgressUpdate) => {
         console.log(`Progress update for ${videoId}:`, update);
+
+        // Only a run this component started says anything about the video.
+        // Joining the room or asking for the latest progress can replay an
+        // update for a video that is not being processed right now - notably
+        // after the server answers "already processed" - and acting on one of
+        // those puts the spinner back up with nothing left to take it down.
+        if (!isProcessingRef.current && !isDownloadingRef.current) {
+          console.log('Ignoring progress update received outside an active run');
+          return;
+        }
+
         setProgressData(update);
 
         // Handle different action modes
-        if (actionMode === 'download') {
+        if (actionModeRef.current === 'download') {
           // Update download progress
           setDownloadProgress(update.progress || 0);
           setDownloadMessage(update.message);
@@ -172,7 +201,7 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
                 videoId: update.videoId
               });
 
-              onUploadSuccess();
+              onUploadSuccessRef.current();
               break;
             case ProgressStage.ERROR:
               setIsProcessing(false);
@@ -187,24 +216,25 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
       socketService.joinVideoRoom(videoId);
 
       // If we don't receive any updates within 5 seconds, request the latest progress
-      const noUpdateTimer = setTimeout(() => {
+      noUpdateTimer = setTimeout(() => {
         console.log('No progress updates received, requesting latest progress');
         if (socketService.isConnected()) {
           // Request the latest progress
           socketService.requestLatestProgress(videoId);
         }
       }, 5000);
-
-      return () => clearTimeout(noUpdateTimer);
     };
 
     setupListener();
 
     return () => {
       console.log('Cleaning up progress listener for videoId:', videoId);
+      if (noUpdateTimer) {
+        clearTimeout(noUpdateTimer);
+      }
       socketService.unregisterProgressListener(videoId);
     };
-  }, [videoId, onUploadSuccess]);
+  }, [videoId]);
 
   // Add function to check job status
   const checkJobStatus = async (jobId: string) => {
@@ -445,6 +475,10 @@ const YoutubeUpload = ({ onUploadSuccess }: YoutubeUploadProps) => {
         console.log('Video was already processed:', response.data);
         setProcessingMessage(null);
         setIsProcessing(false);
+        // Nothing was queued, so there is no progress to follow. Dropping the
+        // videoId unregisters the listener, which leaves nothing that could
+        // raise the processing spinner again for this submission.
+        setVideoId(null);
 
         // Store the processing result
         setProcessingResult({
