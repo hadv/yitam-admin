@@ -59,17 +59,14 @@ io.on('connection', (socket) => {
       // Import the progress tracker when needed to avoid circular dependencies
       const { progressTracker } = require('./services/progress-tracker');
 
-      // Try to resend the latest update for this video
-      const resent = progressTracker.resendLatestUpdate(data.videoId);
-
-      // If no updates to resend, send a test progress update to verify communication
-      if (!resent) {
-        io.to(`video-${data.videoId}`).emit('progress-update', {
-          videoId: data.videoId,
-          stage: 'initializing',
-          message: 'WebSocket connection established successfully',
-          progress: 1
-        });
+      // Try to resend the latest update for this video. When nothing is stored
+      // stay silent: joining a room says nothing about whether the video is
+      // being processed, and the synthetic `initializing` update that used to
+      // be sent here made the client raise its processing spinner for videos
+      // that were never queued - such as one the API just reported as already
+      // processed. The `room-joined` event above is the connection confirmation.
+      if (!progressTracker.resendLatestUpdate(data.videoId)) {
+        console.log(`No stored progress for video ${data.videoId}, nothing to resend`);
       }
     } else {
       console.error('Socket tried to join a room without providing videoId', socket.id);
@@ -84,15 +81,14 @@ io.on('connection', (socket) => {
       // Import the progress tracker when needed to avoid circular dependencies
       const { progressTracker } = require('./services/progress-tracker');
 
-      // Try to resend the latest update for this video
-      const resent = progressTracker.resendLatestUpdate(data.videoId);
-
-      if (!resent) {
-        socket.emit('progress-update', {
+      // Try to resend the latest update for this video. "Nothing stored" is
+      // reported on its own event rather than as a progress-update with an
+      // unknown stage, which the client would otherwise fold into its progress
+      // display and read as 0% of an active run.
+      if (!progressTracker.resendLatestUpdate(data.videoId)) {
+        socket.emit('progress-unavailable', {
           videoId: data.videoId,
-          stage: 'unknown',
-          message: 'No recent progress updates available for this video',
-          progress: 0
+          message: 'No recent progress updates available for this video'
         });
       }
     }
