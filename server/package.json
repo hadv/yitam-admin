@@ -13,7 +13,8 @@
     "dev": "ts-node-dev --respawn -r tsconfig-paths/register src/index.ts",
     "dev:debug": "ts-node -r tsconfig-paths/register --inspect src/index.ts",
     "migrate": "ts-node -r tsconfig-paths/register src/scripts/migrate.ts",
-    "backup": "ts-node -r tsconfig-paths/register src/scripts/backup.ts"
+    "backup": "ts-node -r tsconfig-paths/register src/scripts/backup.ts",
+    "compare-stt": "ts-node -r tsconfig-paths/register src/scripts/compare-stt.ts"
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",

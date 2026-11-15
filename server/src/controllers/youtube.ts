@@ -22,7 +22,13 @@ import {
   getBrowserProfiles,
   YtDlpDownloadOptions
 } from '../services/yt-dlp-downloader';
-import { enhanceVideoMetadata, EnhancementOptions } from '../services/video-metadata-enhancer';
+import {
+  enhanceVideoMetadata,
+  EnhancementOptions,
+  TRANSCRIPT_CLEANING_LEVELS,
+  TranscriptCleaningLevel
+} from '../services/video-metadata-enhancer';
+import type { AudioTranscriptionOptions } from '../services/audio-transcription';
 import path from 'path';
 import multer from 'multer';
 
@@ -722,6 +728,48 @@ export const downloadYoutubeVideoWithYtDlp = async (req: Request, res: Response)
   }
 };
 
+const AUDIO_ENGINES = ['auto', 'alibaba', 'chirp', 'v1'] as const;
+const DOMAIN_HINTS = ['tcm', 'none'] as const;
+const MAX_CALLER_PHRASE_HINTS = 500;
+
+function parseCleaningLevel(value: unknown): TranscriptCleaningLevel | undefined {
+  return typeof value === 'string' && (TRANSCRIPT_CLEANING_LEVELS as string[]).includes(value)
+    ? value as TranscriptCleaningLevel
+    : undefined;
+}
+
+/**
+ * Keep only well-typed audioTranscriptionOptions fields from the request body.
+ * Missing / invalid values become undefined, which the enhancer strips so defaults survive.
+ */
+function sanitizeAudioTranscriptionOptions(raw: unknown): Partial<AudioTranscriptionOptions> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const oneOf = <T extends string>(v: unknown, allowed: readonly T[]) =>
+    (typeof v === 'string' && (allowed as readonly string[]).includes(v) ? v as T : undefined);
+  const stringList = (v: unknown, max: number) => {
+    if (!Array.isArray(v)) return undefined;
+    const list = v.filter((x): x is string => typeof x === 'string').map(x => x.trim()).filter(Boolean).slice(0, max);
+    return list.length > 0 ? list : undefined;
+  };
+  return {
+    languageCode: str(o.languageCode),
+    alternativeLanguageCodes: stringList(o.alternativeLanguageCodes, 3),
+    enableAutomaticPunctuation: bool(o.enableAutomaticPunctuation),
+    enableWordTimeOffsets: bool(o.enableWordTimeOffsets),
+    maxAlternatives: num(o.maxAlternatives),
+    profanityFilter: bool(o.profanityFilter),
+    useEnhancedModel: bool(o.useEnhancedModel),
+    audioChannelCount: num(o.audioChannelCount),
+    engine: oneOf(o.engine, AUDIO_ENGINES),
+    domainHints: oneOf(o.domainHints, DOMAIN_HINTS),
+    phraseHints: stringList(o.phraseHints, MAX_CALLER_PHRASE_HINTS)
+  };
+}
+
 // Download YouTube video with enhanced metadata using yt-dlp
 export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res: Response) => {
   try {
@@ -798,10 +846,24 @@ export const downloadYoutubeVideoWithEnhancedMetadata = async (req: Request, res
       languagePreference: enhancementOptions.languagePreference || 'auto',
       useAudioTranscription: enhancementOptions.useAudioTranscription,
       forceAudioTranscription: enhancementOptions.forceAudioTranscription,
-      transcriptCleaningLevel: enhancementOptions.transcriptCleaningLevel,
+      // Omitted / invalid -> undefined so the enhancer picks 'none' for Chinese, 'aggressive' otherwise
+      transcriptCleaningLevel: parseCleaningLevel(enhancementOptions.transcriptCleaningLevel),
       embedAudioTranscript: enhancementOptions.embedAudioTranscript,
       domains: enhancementOptions.domains,
-      audioTranscriptionOptions: enhancementOptions.audioTranscriptionOptions
+      domainCorrection: typeof enhancementOptions.domainCorrection === 'boolean'
+        ? enhancementOptions.domainCorrection
+        : undefined,
+      boardOcr: typeof enhancementOptions.boardOcr === 'boolean'
+        ? enhancementOptions.boardOcr
+        : undefined,
+      // languageCode may be 'auto' or a BCP-47 code; undefined fields are stripped by the enhancer
+      audioTranscriptionOptions: sanitizeAudioTranscriptionOptions(enhancementOptions.audioTranscriptionOptions),
+      targetLanguage: typeof enhancementOptions.targetLanguage === 'string' && enhancementOptions.targetLanguage.trim()
+        ? enhancementOptions.targetLanguage.trim()
+        : undefined,
+      translateTranscript: typeof enhancementOptions.translateTranscript === 'boolean'
+        ? enhancementOptions.translateTranscript
+        : undefined
     };
 
     // Choose enhancement method based on user selection

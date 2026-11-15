@@ -37,15 +37,129 @@ interface EnhancedVideoMetadata {
   confidence: number;
   processingTime: number;
   audioTranscript?: string; // Raw audio transcript text
-  enhancedTranscript?: string; // LLM-enhanced transcript
+  enhancedTranscript?: string; // LLM-cleaned transcript, in the ORIGINAL language
   transcriptWordCount?: number; // Word count for quality assessment
+  originalLanguageCode?: string; // Detected audio language code, e.g. 'cmn-Hans-CN'
+  originalLanguage?: string; // Human name of the original language, e.g. 'Chinese'
+  translatedTranscript?: string; // Vietnamese translation, present only when original != Vietnamese
+  translationLanguage?: string; // 'vi' when translatedTranscript is present
+  translationPartial?: boolean; // true if some translation segments failed
+  correctedTranscript?: string; // Verbatim transcript after deterministic domain-term correction
+  termCorrections?: TermCorrection[]; // Domain-term corrections applied to the raw transcript
+  boardText?: BoardTextItem[]; // Text read from the blackboard/slides (OCR)
+  boardTerms?: string[]; // Domain terms seen on the board (used as STT hints)
+  transcriptionEngine?: TranscriptionEngine;
+  transcriptionModel?: string;
+  boardOcrStatus?: string; // Why no board text is shown (skipped / failed / nothing found)
+  confidenceIsNominal?: boolean; // confidence is a placeholder (Chirp/Alibaba may give no score), not a quality measure
 }
+
+interface TermCorrection {
+  original: string;
+  corrected: string;
+  context: string;
+  reason?: string;
+  source?: 'glossary' | 'board' | 'llm';
+}
+
+interface BoardTextItem {
+  time: number; // seconds of the representative frame
+  text: string;
+  terms: string[];
+}
+
+type TranscriptTab = 'translated' | 'corrected' | 'enhanced' | 'raw';
+
+type TranscriptCleaningLevel = 'none' | 'basic' | 'aggressive';
+// 'auto' = let the server choose (verbatim for Chinese, aggressive otherwise): the field is omitted
+type CleaningLevelChoice = 'auto' | TranscriptCleaningLevel;
+
+type AudioLanguageCode = 'auto' | 'vi-VN' | 'cmn-Hans-CN' | 'cmn-Hant-TW' | 'yue-Hant-HK' | 'en-US';
+
+// Engine that actually produced the transcript (reported by the server)
+type TranscriptionEngine = 'alibaba' | 'chirp' | 'v1';
+
+type SttEngine = 'auto' | TranscriptionEngine;
+
+const AUDIO_LANGUAGE_OPTIONS: { value: AudioLanguageCode; label: string }[] = [
+  { value: 'auto', label: 'Tự động nhận diện (Việt/Trung/Anh)' },
+  { value: 'vi-VN', label: 'Tiếng Việt' },
+  { value: 'cmn-Hans-CN', label: 'Tiếng Trung giản thể (Phổ thông)' },
+  { value: 'cmn-Hant-TW', label: 'Tiếng Trung phồn thể (Đài Loan)' },
+  { value: 'yue-Hant-HK', label: 'Tiếng Quảng Đông' },
+  { value: 'en-US', label: 'Tiếng Anh' },
+];
+
+const STT_ENGINE_OPTIONS: { value: SttEngine; label: string }[] = [
+  { value: 'auto', label: 'Tự động (Alibaba → Chirp 3 → v1 cho tiếng Trung)' },
+  { value: 'alibaba', label: 'Alibaba Qwen/Fun-ASR (khuyên dùng cho tiếng Trung)' },
+  { value: 'chirp', label: 'Google Chirp 3' },
+  { value: 'v1', label: 'Google STT v1 (cũ)' },
+];
+
+const CLEANING_LEVEL_OPTIONS: { value: CleaningLevelChoice; label: string }[] = [
+  { value: 'auto', label: '🤖 Tự động (nguyên văn cho tiếng Trung, Aggressive cho Việt/Anh)' },
+  { value: 'none', label: '📜 Nguyên văn – không làm sạch (khuyên dùng cho tiếng Trung)' },
+  { value: 'basic', label: '📝 Basic (Fix grammar only)' },
+  { value: 'aggressive', label: '🔥 Aggressive (Remove all irrelevant content)' },
+];
+
+const TERM_SOURCE_LABELS: Record<NonNullable<TermCorrection['source']>, string> = {
+  board: 'chữ trên bảng',
+  glossary: 'từ điển Đông y',
+  llm: 'LLM',
+};
+
+// mm:ss (or h:mm:ss) for board-text timestamps
+const formatTimestamp = (seconds: number): string => {
+  const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = m.toString().padStart(2, '0');
+  const ss = s.toString().padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+};
+
+const ENGINE_DISPLAY_NAMES: Record<TranscriptionEngine, string> = {
+  alibaba: 'Alibaba',
+  chirp: 'Chirp',
+  v1: 'STT v1',
+};
+
+const getEngineLabel = (engine?: TranscriptionEngine, model?: string): string | undefined => {
+  if (!engine && !model) return undefined;
+  const name = (engine && ENGINE_DISPLAY_NAMES[engine]) || 'STT';
+  return model ? `${name} · ${model}` : name;
+};
+
+// Vietnamese display name for a detected language (code like 'cmn-hans-cn' or name like 'Chinese')
+const getVietnameseLanguageName = (code?: string, name?: string): string | undefined => {
+  const c = (code || '').toLowerCase();
+  if (c.startsWith('yue')) return 'Tiếng Quảng Đông';
+  if (c.startsWith('cmn') || c.startsWith('zh')) return 'Tiếng Trung';
+  if (c.startsWith('vi')) return 'Tiếng Việt';
+  if (c.startsWith('en')) return 'Tiếng Anh';
+  if (c.startsWith('ja')) return 'Tiếng Nhật';
+  if (c.startsWith('ko')) return 'Tiếng Hàn';
+  if (c.startsWith('fr')) return 'Tiếng Pháp';
+  const n = (name || '').toLowerCase();
+  if (n.includes('cantonese')) return 'Tiếng Quảng Đông';
+  if (n.includes('chinese')) return 'Tiếng Trung';
+  if (n.includes('vietnamese')) return 'Tiếng Việt';
+  if (n.includes('english')) return 'Tiếng Anh';
+  if (n.includes('japanese')) return 'Tiếng Nhật';
+  if (n.includes('korean')) return 'Tiếng Hàn';
+  if (n.includes('french')) return 'Tiếng Pháp';
+  return name || code || undefined;
+};
 
 interface DownloadResult {
   fileName: string;
   filePath: string;
   videoInfo: YtDlpVideoInfo;
   enhancedMetadata?: EnhancedVideoMetadata;
+  requestedCleaningLevel?: TranscriptCleaningLevel; // cleaning level the client asked for
 }
 
 const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
@@ -64,8 +178,14 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
   const [embedAudioTranscript, setEmbedAudioTranscript] = useState(true);
   const [selectedDomains, setSelectedDomains] = useState<string[]>(['youtube', 'audio']);
   const [transcriptCopied, setTranscriptCopied] = useState(false);
-  const [activeTranscriptTab, setActiveTranscriptTab] = useState<'raw' | 'enhanced'>('enhanced');
-  const [transcriptCleaningLevel, setTranscriptCleaningLevel] = useState<'basic' | 'aggressive'>('aggressive');
+  const [activeTranscriptTab, setActiveTranscriptTab] = useState<TranscriptTab | null>(null);
+  const [transcriptCleaningLevel, setTranscriptCleaningLevel] = useState<CleaningLevelChoice>('auto');
+  const [audioLanguageCode, setAudioLanguageCode] = useState<AudioLanguageCode>('auto');
+  const [translateTranscript, setTranslateTranscript] = useState(false);
+  const [sttEngine, setSttEngine] = useState<SttEngine>('auto');
+  const [useTcmDomainHints, setUseTcmDomainHints] = useState(true);
+  const [useDomainCorrection, setUseDomainCorrection] = useState(true);
+  const [copiedSection, setCopiedSection] = useState<'corrections' | 'board' | null>(null);
 
   // Copy transcript to clipboard
   const copyTranscriptToClipboard = async (transcript: string) => {
@@ -77,6 +197,134 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
       console.error('Failed to copy transcript:', err);
     }
   };
+
+  // Copy a results sub-section (term corrections / board text) to clipboard
+  const copySectionToClipboard = async (section: 'corrections' | 'board', text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedSection(section);
+      setTimeout(() => setCopiedSection((prev) => (prev === section ? null : prev)), 2000);
+    } catch (err) {
+      console.error('Failed to copy section:', err);
+    }
+  };
+
+  // Transcript cleaning level select (rendered in both normal and audio-only panels)
+  const renderCleaningLevelSelect = (idPrefix: string) => (
+    <div>
+      <label htmlFor={`${idPrefix}-cleaning-level`} className="block text-xs text-gray-600 mb-1">
+        🧹 Transcript cleaning level:
+      </label>
+      <select
+        id={`${idPrefix}-cleaning-level`}
+        value={transcriptCleaningLevel}
+        onChange={(e) => setTranscriptCleaningLevel(e.target.value as CleaningLevelChoice)}
+        className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+        disabled={isDownloading}
+      >
+        {CLEANING_LEVEL_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
+        ))}
+      </select>
+      {transcriptCleaningLevel === 'auto' && (
+        <p className="mt-1 text-xs text-gray-500">
+          Tiếng Trung: giữ nguyên văn; ngôn ngữ khác: LLM làm sạch (bản gốc vẫn ở tab Raw).
+        </p>
+      )}
+      {(transcriptCleaningLevel === 'basic' || transcriptCleaningLevel === 'aggressive') && (
+        <p className="mt-1 text-xs text-gray-500">
+          LLM sẽ viết lại transcript; bản nguyên văn vẫn được giữ ở tab riêng.
+        </p>
+      )}
+    </div>
+  );
+
+  // Audio language + engine + domain + translation options (rendered in both normal and audio-only panels)
+  const renderAudioLanguageOptions = (idPrefix: string) => (
+    <>
+      <div>
+        <label htmlFor={`${idPrefix}-audio-language`} className="block text-xs text-gray-600 mb-1">
+          🌐 Ngôn ngữ audio:
+        </label>
+        <select
+          id={`${idPrefix}-audio-language`}
+          value={audioLanguageCode}
+          onChange={(e) => setAudioLanguageCode(e.target.value as AudioLanguageCode)}
+          className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+          disabled={isDownloading}
+        >
+          {AUDIO_LANGUAGE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+        <p className="mt-1 text-xs text-gray-500">
+          Audio được chép lời theo đúng ngôn ngữ gốc. Bật tùy chọn bên dưới nếu cần thêm bản dịch tiếng Việt.
+        </p>
+      </div>
+
+      <div>
+        <label htmlFor={`${idPrefix}-stt-engine`} className="block text-xs text-gray-600 mb-1">
+          🎙️ Engine nhận dạng:
+        </label>
+        <select
+          id={`${idPrefix}-stt-engine`}
+          value={sttEngine}
+          onChange={(e) => setSttEngine(e.target.value as SttEngine)}
+          className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+          disabled={isDownloading}
+        >
+          {STT_ENGINE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+        <p className="mt-1 text-xs text-gray-500">
+          Tự động: tiếng Trung dùng thứ tự engine cấu hình trên server (mặc định Alibaba → Chirp 3 → STT v1), bỏ qua engine không khả dụng. Nếu chọn cố định một engine mà engine đó không khả dụng hoặc lỗi, hệ thống chuyển thẳng sang STT v1.
+        </p>
+      </div>
+
+      <label className="flex items-center">
+        <input
+          type="checkbox"
+          checked={useTcmDomainHints}
+          onChange={(e) => setUseTcmDomainHints(e.target.checked)}
+          className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+          disabled={isDownloading}
+        />
+        <span className="ml-2 text-sm text-gray-600">
+          🌿 Gợi ý thuật ngữ Đông y
+        </span>
+      </label>
+
+      <label className="flex items-center">
+        <input
+          type="checkbox"
+          checked={useDomainCorrection}
+          onChange={(e) => setUseDomainCorrection(e.target.checked)}
+          className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+          disabled={isDownloading}
+        />
+        <span className="ml-2 text-sm text-gray-600">
+          🩺 Tự sửa thuật ngữ Đông y nghe nhầm (có liệt kê để kiểm tra)
+        </span>
+      </label>
+      <p className="ml-6 -mt-1 text-xs text-gray-500">
+        Hai tùy chọn Đông y chỉ áp dụng khi audio là tiếng Trung.
+      </p>
+
+      <label className="flex items-center">
+        <input
+          type="checkbox"
+          checked={translateTranscript}
+          onChange={(e) => setTranslateTranscript(e.target.checked)}
+          className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+          disabled={isDownloading}
+        />
+        <span className="ml-2 text-sm text-gray-600">
+          🇻🇳 Dịch transcript sang tiếng Việt
+        </span>
+      </label>
+    </>
+  );
 
   // Handle domain selection
   const handleDomainChange = (domain: string) => {
@@ -335,11 +583,19 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
           languagePreference: 'auto',
           useAudioTranscription: useAudioTranscription,
           forceAudioTranscription: forceAudioTranscription,
-          transcriptCleaningLevel: transcriptCleaningLevel,
+          // Omitted for 'auto' so the server picks by detected language (Chinese -> verbatim)
+          transcriptCleaningLevel: transcriptCleaningLevel === 'auto' ? undefined : transcriptCleaningLevel,
           embedAudioTranscript: embedAudioTranscript,
-          domains: embedAudioTranscript ? selectedDomains : undefined,
+          // Always sent: the domain also drives term correction, translation profile and STT hints
+          domains: selectedDomains,
+          translateTranscript: translateTranscript,
+          targetLanguage: 'vi',
+          domainCorrection: useDomainCorrection,
           audioTranscriptionOptions: {
-            languageCode: 'vi-VN',
+            languageCode: audioLanguageCode,
+            engine: sttEngine,
+            // undefined = server default ('tcm', or 'none' for a Buddhist domain); unticked forces 'none'
+            domainHints: useTcmDomainHints ? undefined : 'none',
             enableAutomaticPunctuation: true,
             useEnhancedModel: true
           }
@@ -364,8 +620,12 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
         fileName: response.data.fileName,
         filePath: response.data.filePath,
         videoInfo: response.data.videoInfo,
-        enhancedMetadata: response.data.enhancedMetadata
+        enhancedMetadata: response.data.enhancedMetadata,
+        requestedCleaningLevel: useEnhancedMetadata && transcriptCleaningLevel !== 'auto' ? transcriptCleaningLevel : undefined
       });
+      // null = use the default tab for this result (see getDefaultTranscriptTab)
+      setActiveTranscriptTab(null);
+      setTranscriptCopied(false);
 
       setYoutubeUrl('');
       setVideoInfo(null);
@@ -415,6 +675,66 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
     }
     return num.toString();
   };
+
+  // Derived transcript view state for the results panel
+  const resultMetadata = downloadResult?.enhancedMetadata;
+  const rawTranscriptText = resultMetadata?.audioTranscript || '';
+  const translatedTranscriptText = resultMetadata?.translatedTranscript || '';
+  const hasTranslatedTranscript = !!translatedTranscriptText;
+  // Corrected verbatim tab only when the term correction actually changed something
+  const correctedTranscriptText = resultMetadata?.correctedTranscript || '';
+  const hasCorrectedTab = !!correctedTranscriptText.trim() && correctedTranscriptText.trim() !== rawTranscriptText.trim();
+  const verbatimTranscriptText = hasCorrectedTab ? correctedTranscriptText : rawTranscriptText;
+  // Enhanced tab only when cleaning produced something different from the verbatim/raw text
+  const enhancedTranscriptText = resultMetadata?.enhancedTranscript || '';
+  const hasEnhancedTab = !!enhancedTranscriptText.trim()
+    && enhancedTranscriptText.trim() !== verbatimTranscriptText.trim()
+    && enhancedTranscriptText.trim() !== rawTranscriptText.trim();
+  const visibleTranscriptTabs: TranscriptTab[] = [
+    ...(hasTranslatedTranscript ? ['translated' as const] : []),
+    ...(hasCorrectedTab ? ['corrected' as const] : []),
+    ...(hasEnhancedTab ? ['enhanced' as const] : []),
+    'raw' as const,
+  ];
+  const cleaningWasRequested = downloadResult?.requestedCleaningLevel !== 'none';
+  const defaultTranscriptTab: TranscriptTab = hasTranslatedTranscript
+    ? 'translated'
+    : hasCorrectedTab
+      ? 'corrected'
+      : hasEnhancedTab && cleaningWasRequested
+        ? 'enhanced'
+        : 'raw';
+  // Fall back to the default when nothing was picked yet or the picked tab is not available
+  const effectiveTranscriptTab: TranscriptTab =
+    activeTranscriptTab && visibleTranscriptTabs.includes(activeTranscriptTab) ? activeTranscriptTab : defaultTranscriptTab;
+  const transcriptTextByTab: Record<TranscriptTab, string> = {
+    translated: translatedTranscriptText,
+    corrected: correctedTranscriptText,
+    enhanced: enhancedTranscriptText,
+    raw: rawTranscriptText,
+  };
+  const activeTranscriptText = transcriptTextByTab[effectiveTranscriptTab];
+  // Mirrors the server: embedding uses translatedTranscript ?? enhancedTranscript ?? audioTranscript
+  const embeddingTranscriptText = (translatedTranscriptText || enhancedTranscriptText || rawTranscriptText).trim();
+  const activeTabIsEmbedded = !!activeTranscriptText.trim() && activeTranscriptText.trim() === embeddingTranscriptText;
+  const termCorrections = Array.isArray(resultMetadata?.termCorrections) ? resultMetadata!.termCorrections! : [];
+  const boardTextItems = Array.isArray(resultMetadata?.boardText)
+    ? resultMetadata!.boardText!.filter((item) => item && typeof item.text === 'string' && item.text.trim())
+    : [];
+  const boardTerms = Array.isArray(resultMetadata?.boardTerms) ? resultMetadata!.boardTerms!.filter(Boolean) : [];
+  const engineLabel = getEngineLabel(resultMetadata?.transcriptionEngine, resultMetadata?.transcriptionModel);
+  const nominalConfidenceLabel = `n/a (${(resultMetadata?.transcriptionEngine && ENGINE_DISPLAY_NAMES[resultMetadata.transcriptionEngine]) || 'Chirp'})`;
+  const termCorrectionsAsText = termCorrections
+    .map((c) => `${c.original} → ${c.corrected}${c.source ? ` [${TERM_SOURCE_LABELS[c.source] || c.source}]` : ''}${c.context ? `\n  ${c.context}` : ''}`)
+    .join('\n');
+  const boardTextAsText = [
+    ...boardTextItems.map((item) => `[${formatTimestamp(item.time)}] ${item.text}`),
+    ...(boardTerms.length > 0 ? ['', `Thuật ngữ: ${boardTerms.join('、')}`] : []),
+  ].join('\n');
+  const originalLanguageLabel = getVietnameseLanguageName(
+    resultMetadata?.originalLanguageCode,
+    resultMetadata?.originalLanguage || resultMetadata?.language
+  );
 
   if (isYtDlpInstalled === null) {
     return (
@@ -799,20 +1119,14 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                       </span>
                     </label>
 
+                    {/* Audio Language & Translation */}
+                    <div className="ml-6 space-y-2">
+                      {renderAudioLanguageOptions('main')}
+                    </div>
+
                     {/* Transcript Cleaning Level */}
                     <div className="ml-6">
-                      <label className="block text-xs text-gray-600 mb-1">
-                        🧹 Transcript cleaning level:
-                      </label>
-                      <select
-                        value={transcriptCleaningLevel}
-                        onChange={(e) => setTranscriptCleaningLevel(e.target.value as 'basic' | 'aggressive')}
-                        className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
-                        disabled={isDownloading}
-                      >
-                        <option value="aggressive">🔥 Aggressive (Remove all irrelevant content)</option>
-                        <option value="basic">📝 Basic (Fix grammar only)</option>
-                      </select>
+                      {renderCleaningLevelSelect('main')}
                     </div>
 
                     {/* Embed Audio Transcript Option */}
@@ -871,20 +1185,10 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
             {/* Audio-Only Cleaning Level */}
             {useEnhancedMetadata && useAudioOnly && (
               <div className="ml-6 space-y-2">
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">
-                    🧹 Transcript cleaning level:
-                  </label>
-                  <select
-                    value={transcriptCleaningLevel}
-                    onChange={(e) => setTranscriptCleaningLevel(e.target.value as 'basic' | 'aggressive')}
-                    className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
-                    disabled={isDownloading}
-                  >
-                    <option value="aggressive">🔥 Aggressive (Remove all irrelevant content)</option>
-                    <option value="basic">📝 Basic (Fix grammar only)</option>
-                  </select>
-                </div>
+                {/* Audio Language & Translation for Audio-Only Mode */}
+                {renderAudioLanguageOptions('audio-only')}
+
+                {renderCleaningLevelSelect('audio-only')}
 
                 {/* Embed Audio Transcript Option for Audio-Only Mode */}
                 <label className="flex items-center">
@@ -1089,11 +1393,32 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                       Source: {downloadResult.enhancedMetadata.enhancementSource}
                     </span>
                     <span className="bg-green-200 px-2 py-1 rounded">
-                      Confidence: {(downloadResult.enhancedMetadata.confidence * 100).toFixed(0)}%
+                      Confidence: {downloadResult.enhancedMetadata.confidenceIsNominal
+                        ? nominalConfidenceLabel
+                        : `${(downloadResult.enhancedMetadata.confidence * 100).toFixed(0)}%`}
                     </span>
                     <span className="bg-green-200 px-2 py-1 rounded">
                       Language: {downloadResult.enhancedMetadata.language}
                     </span>
+                    {(downloadResult.enhancedMetadata.originalLanguageCode || downloadResult.enhancedMetadata.originalLanguage) && (
+                      <span
+                        className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded"
+                        title={downloadResult.enhancedMetadata.originalLanguageCode}
+                      >
+                        🌐 Ngôn ngữ gốc: {getVietnameseLanguageName(
+                          downloadResult.enhancedMetadata.originalLanguageCode,
+                          downloadResult.enhancedMetadata.originalLanguage
+                        )}
+                        {downloadResult.enhancedMetadata.originalLanguageCode && (
+                          <> ({downloadResult.enhancedMetadata.originalLanguageCode})</>
+                        )}
+                      </span>
+                    )}
+                    {downloadResult.enhancedMetadata.translatedTranscript && (
+                      <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                        🇻🇳 Đã dịch sang tiếng Việt
+                      </span>
+                    )}
                   </div>
 
                   {/* Enhanced Title */}
@@ -1171,11 +1496,20 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                       <div className="flex items-center justify-between">
                         <p className="text-sm font-medium text-green-800">Audio Transcript:</p>
                         <div className="flex items-center space-x-2 text-xs text-green-600">
+                          {engineLabel && (
+                            <span
+                              className="bg-indigo-100 text-indigo-800 px-2 py-1 rounded"
+                              title="Engine / model nhận dạng giọng nói"
+                            >
+                              🎙️ {engineLabel}
+                            </span>
+                          )}
                           <span className="bg-green-200 px-2 py-1 rounded">
                             {downloadResult.enhancedMetadata.transcriptWordCount} words
                           </span>
                           <span className="bg-blue-200 px-2 py-1 rounded">
-                            Quality: {downloadResult.enhancedMetadata.confidence > 0.8 ? 'High' :
+                            Quality: {downloadResult.enhancedMetadata.confidenceIsNominal ? nominalConfidenceLabel :
+                              downloadResult.enhancedMetadata.confidence > 0.8 ? 'High' :
                               downloadResult.enhancedMetadata.confidence > 0.6 ? 'Medium' : 'Low'}
                           </span>
                         </div>
@@ -1183,43 +1517,70 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
 
                       {/* Transcript Tabs */}
                       <div className="mt-2 flex space-x-1 border-b border-gray-200">
-                        <button
-                          onClick={() => setActiveTranscriptTab('enhanced')}
-                          className={`px-3 py-1 text-xs font-medium rounded-t ${activeTranscriptTab === 'enhanced'
-                            ? 'bg-blue-100 text-blue-700 border-b-2 border-blue-500'
-                            : 'text-gray-600 hover:text-gray-800'
-                            }`}
-                        >
-                          🔧 Enhanced (Recommended)
-                        </button>
+                        {hasTranslatedTranscript && (
+                          <button
+                            onClick={() => setActiveTranscriptTab('translated')}
+                            className={`px-3 py-1 text-xs font-medium rounded-t ${effectiveTranscriptTab === 'translated'
+                              ? 'bg-green-100 text-green-700 border-b-2 border-green-500'
+                              : 'text-gray-600 hover:text-gray-800'
+                              }`}
+                          >
+                            🇻🇳 Bản dịch tiếng Việt
+                          </button>
+                        )}
+                        {hasCorrectedTab && (
+                          <button
+                            onClick={() => setActiveTranscriptTab('corrected')}
+                            className={`px-3 py-1 text-xs font-medium rounded-t ${effectiveTranscriptTab === 'corrected'
+                              ? 'bg-amber-100 text-amber-800 border-b-2 border-amber-500'
+                              : 'text-gray-600 hover:text-gray-800'
+                              }`}
+                          >
+                            📜 Nguyên văn (đã sửa thuật ngữ)
+                          </button>
+                        )}
+                        {hasEnhancedTab && (
+                          <button
+                            onClick={() => setActiveTranscriptTab('enhanced')}
+                            className={`px-3 py-1 text-xs font-medium rounded-t ${effectiveTranscriptTab === 'enhanced'
+                              ? 'bg-blue-100 text-blue-700 border-b-2 border-blue-500'
+                              : 'text-gray-600 hover:text-gray-800'
+                              }`}
+                          >
+                            🔧 Enhanced (ngôn ngữ gốc)
+                          </button>
+                        )}
                         <button
                           onClick={() => setActiveTranscriptTab('raw')}
-                          className={`px-3 py-1 text-xs font-medium rounded-t ${activeTranscriptTab === 'raw'
+                          className={`px-3 py-1 text-xs font-medium rounded-t ${effectiveTranscriptTab === 'raw'
                             ? 'bg-gray-100 text-gray-700 border-b-2 border-gray-500'
                             : 'text-gray-600 hover:text-gray-800'
                             }`}
                         >
-                          📝 Raw (Original)
+                          📝 Raw (gốc)
                         </button>
                       </div>
+
+                      {/* Partial translation warning */}
+                      {downloadResult.enhancedMetadata.translationPartial && (
+                        <div className="mt-2 p-2 bg-yellow-50 border border-yellow-300 rounded text-xs text-yellow-800">
+                          {hasTranslatedTranscript
+                            ? '⚠️ Bản dịch chưa đầy đủ: một số đoạn dịch thất bại và có thể vẫn giữ nguyên ngôn ngữ gốc hoặc bị thiếu.'
+                            : '⚠️ Không dịch được transcript sang tiếng Việt; đang dùng bản ngôn ngữ gốc cho embedding.'}
+                        </div>
+                      )}
 
                       {/* Transcript Content */}
                       <div className="relative">
                         <div className="mt-2 p-3 bg-gray-50 border border-gray-200 rounded max-h-64 overflow-y-auto">
                           <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
-                            {activeTranscriptTab === 'enhanced'
-                              ? (downloadResult.enhancedMetadata.enhancedTranscript || downloadResult.enhancedMetadata.audioTranscript)
-                              : downloadResult.enhancedMetadata.audioTranscript}
+                            {activeTranscriptText}
                           </p>
                         </div>
 
                         {/* Copy Button */}
                         <button
-                          onClick={() => copyTranscriptToClipboard(
-                            activeTranscriptTab === 'enhanced'
-                              ? (downloadResult.enhancedMetadata?.enhancedTranscript || downloadResult.enhancedMetadata?.audioTranscript || '')
-                              : downloadResult.enhancedMetadata?.audioTranscript || ''
-                          )}
+                          onClick={() => copyTranscriptToClipboard(activeTranscriptText)}
                           className="absolute top-4 right-4 bg-white hover:bg-gray-100 px-2 py-1 rounded text-xs border shadow-sm transition-colors"
                         >
                           {transcriptCopied ? '✅ Copied!' : '📋 Copy'}
@@ -1227,19 +1588,114 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                       </div>
 
                       <div className="mt-2 text-xs text-gray-500">
-                        {activeTranscriptTab === 'enhanced' ? (
+                        {effectiveTranscriptTab === 'translated' ? (
                           <span>
-                            🔧 <strong>Enhanced transcript</strong>: Grammar fixed, slang removed, improved readability.
-                            <strong> Recommended for Qdrant embedding.</strong>
+                            🇻🇳 <strong>Bản dịch tiếng Việt</strong>: Dịch từ {originalLanguageLabel ? originalLanguageLabel.toLowerCase() : 'ngôn ngữ gốc'}.
+                          </span>
+                        ) : effectiveTranscriptTab === 'corrected' ? (
+                          <span>
+                            📜 <strong>Nguyên văn</strong>: Đúng lời giảng theo ngôn ngữ gốc
+                            {originalLanguageLabel ? ` (${originalLanguageLabel})` : ''}, chỉ sửa các thuật ngữ Đông y bị nghe nhầm
+                            {termCorrections.length > 0 ? ` (${termCorrections.length} chỗ, xem danh sách bên dưới)` : ''}.
+                          </span>
+                        ) : effectiveTranscriptTab === 'enhanced' ? (
+                          <span>
+                            🔧 <strong>Enhanced transcript</strong>: Đã được LLM làm sạch, sửa lỗi, giữ nguyên ngôn ngữ gốc
+                            {originalLanguageLabel ? ` (${originalLanguageLabel})` : ''}.
                           </span>
                         ) : (
                           <span>
-                            📝 <strong>Raw transcript</strong>: Direct output from Speech-to-Text API.
-                            May contain errors, slang, and filler words.
+                            📝 <strong>Raw transcript</strong>: Kết quả trực tiếp từ Speech-to-Text theo ngôn ngữ gốc
+                            {originalLanguageLabel ? ` (${originalLanguageLabel})` : ''}. Có thể chứa lỗi nghe nhầm.
                           </span>
                         )}
+                        {activeTabIsEmbedded && <strong> Được dùng để embedding và tìm kiếm.</strong>}
                       </div>
                     </div>
+                  )}
+
+                  {/* Domain-term corrections (for manual review) */}
+                  {termCorrections.length > 0 && (
+                    <details className="border border-amber-200 rounded bg-amber-50">
+                      <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-amber-900 select-none">
+                        🩺 Đã sửa {termCorrections.length} thuật ngữ
+                      </summary>
+                      <div className="px-3 pb-3">
+                        <div className="flex justify-end mb-2">
+                          <button
+                            onClick={() => copySectionToClipboard('corrections', termCorrectionsAsText)}
+                            className="bg-white hover:bg-gray-100 px-2 py-1 rounded text-xs border shadow-sm transition-colors"
+                          >
+                            {copiedSection === 'corrections' ? '✅ Copied!' : '📋 Copy'}
+                          </button>
+                        </div>
+                        <ul className="space-y-2 max-h-64 overflow-y-auto">
+                          {termCorrections.map((c, index) => (
+                            <li key={`${index}-${c.original}-${c.corrected}`} className="text-sm text-gray-800">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="line-through text-red-700">{c.original}</span>
+                                <span className="text-gray-500">→</span>
+                                <span className="font-semibold text-green-800">{c.corrected}</span>
+                                {c.source && (
+                                  <span className="bg-white border border-amber-300 text-amber-800 text-xs px-1.5 py-0.5 rounded">
+                                    {TERM_SOURCE_LABELS[c.source] || c.source}
+                                  </span>
+                                )}
+                              </div>
+                              {c.context && (
+                                <p className="text-xs text-gray-600 mt-0.5 break-words">…{c.context}…</p>
+                              )}
+                              {c.reason && (
+                                <p className="text-xs text-gray-500 italic mt-0.5">{c.reason}</p>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </details>
+                  )}
+
+                  {/* Text read from the blackboard */}
+                  {(boardTextItems.length > 0 || boardTerms.length > 0) && (
+                    <details className="border border-emerald-300 rounded bg-emerald-50">
+                      <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-emerald-900 select-none">
+                        🟩 Chữ trên bảng{boardTextItems.length > 0 ? ` (${boardTextItems.length} khung hình)` : ''}
+                      </summary>
+                      <div className="px-3 pb-3">
+                        <div className="flex justify-end mb-2">
+                          <button
+                            onClick={() => copySectionToClipboard('board', boardTextAsText)}
+                            className="bg-white hover:bg-gray-100 px-2 py-1 rounded text-xs border shadow-sm transition-colors"
+                          >
+                            {copiedSection === 'board' ? '✅ Copied!' : '📋 Copy'}
+                          </button>
+                        </div>
+                        {boardTerms.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mb-2">
+                            {boardTerms.map((term, index) => (
+                              <span key={`${index}-${term}`} className="bg-white border border-emerald-300 text-emerald-900 text-xs px-2 py-0.5 rounded">
+                                {term}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <ul className="space-y-2 max-h-64 overflow-y-auto">
+                          {boardTextItems.map((item, index) => (
+                            <li key={`${index}-${item.time}`} className="text-sm text-gray-800 flex gap-2">
+                              <span className="font-mono text-xs text-emerald-700 pt-0.5 shrink-0">
+                                {formatTimestamp(item.time)}
+                              </span>
+                              <span className="whitespace-pre-wrap break-words">{item.text}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </details>
+                  )}
+                  {boardTextItems.length === 0 && boardTerms.length === 0 && resultMetadata?.boardOcrStatus && (
+                    <p className="text-xs text-gray-600 border border-dashed border-emerald-300 rounded px-3 py-2">
+                      🟩 Chữ trên bảng: không có — {resultMetadata.boardOcrStatus}
+                    </p>
                   )}
                 </div>
               </div>
