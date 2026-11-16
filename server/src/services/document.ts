@@ -4,7 +4,7 @@ import path from 'path';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
 import { ImageAnnotatorClient } from '@google-cloud/vision';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { generateText, isLlmBillingError, isLlmConfigured, llmModelFor, llmUnavailableReason } from './llm-client';
 
 const readFile = util.promisify(fs.readFile);
 
@@ -37,10 +37,9 @@ const setupVisionClient = () => {
   }
 };
 
-// Load Gemini API key
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-if (!GEMINI_API_KEY) {
-  console.warn('GEMINI_API_KEY is not set in environment variables. OCR correction will be skipped.');
+// OCR correction and page-boundary sentence completion use Alibaba Cloud Model Studio (Qwen) via llm-client
+if (!isLlmConfigured('fast')) {
+  console.warn(`OCR correction LLM unavailable (${llmUnavailableReason()}). AI OCR correction will be skipped.`);
 }
 
 // Parse document and extract text content
@@ -876,24 +875,13 @@ export const correctOcrWithLLM = async (text: string): Promise<string> => {
     preProcessedText = preProcessedText.replace(/huyếch/gi, "huyết");
     preProcessedText = preProcessedText.replace(/\b(LỤC VỊ HOÀN|Lục Vị Hoàn) Thuật\b/gi, "$1 Thuyết");
     
-    // Get API key - try to use the AI model
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
-    if (!apiKey) {
-      console.warn('⚠️ No AI API key found for OCR correction. Basic regex corrections applied but full correction unavailable.');
+    // Check the AI model is configured
+    if (!isLlmConfigured('fast')) {
+      console.warn(`⚠️ OCR correction LLM unavailable (${llmUnavailableReason()}). Basic regex corrections applied but full correction unavailable.`);
       return preProcessedText;
     }
 
     try {
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash-lite",
-        generationConfig: {
-          temperature: 0,
-          topP: 0.1,
-          maxOutputTokens: 4096,
-        }
-      });
-      
       // Enhanced prompt for Vietnamese OCR correction with EXACT examples from user
       const prompt = `
 Nhiệm vụ: Sửa lỗi font chữ và ký tự trong văn bản tiếng Việt.
@@ -942,7 +930,8 @@ KEEP the exact same text structure as the original.
 Specifically fix "huy ế t" to "huyết" (NOT "huyếch") and "thuy ế t" to "thuyết" (NOT "thuật").
 Return ONLY the corrected text, preserving original structure exactly as provided.)`;
 
-      // Call API with retry mechanism
+      // Call API; re-ask when known bad corrections remain (llm-client itself retries
+      // 429 / 5xx / network errors / timeouts, so an API error here ends the loop)
       let retryCount = 0;
       const maxRetries = 3;
       let correctedText = preProcessedText;
@@ -950,15 +939,12 @@ Return ONLY the corrected text, preserving original structure exactly as provide
       
       while (retryCount < maxRetries) {
         try {
-          const result = await model.generateContent({
-            contents: [{ role: "user", parts: [{ text: currentPrompt }] }],
-            generationConfig: {
-              temperature: 0.1,
-              maxOutputTokens: 8000,
-            }
+          correctedText = await generateText({
+            task: 'fast',
+            prompt: currentPrompt,
+            temperature: 0.1,
+            maxOutputTokens: 8000,
           });
-          
-          correctedText = result.response.text().trim();
           
           // Check if corrections are properly applied
           const hasHuyech = correctedText.includes("huyếch");
@@ -983,11 +969,10 @@ Return ONLY the corrected text, preserving original structure exactly as provide
           
           break;
         } catch (error) {
-          console.error(`❌ API error (attempt ${retryCount + 1}/${maxRetries}):`, error);
-          retryCount++;
-          
-          // Short delay before retrying
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          console.error(`❌ OCR correction LLM error (${llmModelFor('fast')}${isLlmBillingError(error) ? ', billing' : ''}):`, error);
+          // llm-client already retried temporary failures; use the regex-processed text
+          correctedText = preProcessedText;
+          break;
         }
       }
       
@@ -1288,9 +1273,8 @@ export async function prepareContentForChunking(document: Document): Promise<Doc
   };
 }
 
-// Type definition for genAI static property
+// Type definition for the static API-failure tracking properties
 interface EnsureCompleteSentencesFunction extends Function {
-  genAI: GoogleGenerativeAI | null;
   apiFailureCount: number;
   maxApiFailures: number;
   apiDisabled: boolean;
@@ -1373,12 +1357,21 @@ function sanitizeContentForAPI(text: string): string {
 // Add this simple sleep function to throttle requests
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+let warnedLegacyDisableFlag = false;
+
 async function ensureCompleteSentences(prevPage: DocumentPage | null, currPage: DocumentPage, nextPage: DocumentPage | null): Promise<DocumentPage> {
   // Check if API has been disabled due to too many failures
   const funcWithProps = ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction;
   
-  // Check environment variable to completely disable API usage
-  const skipApiCompletely = process.env.DISABLE_GEMINI_API === 'true' || process.env.DISABLE_AI_APIS === 'true';
+  // Check environment variable to completely disable LLM (Qwen) sentence completion.
+  // DISABLE_AI_APIS is the switch; DISABLE_GEMINI_API is a deprecated alias kept for existing .env
+  // files (generation no longer uses Gemini; it does NOT affect the Gemini embeddings).
+  const legacyDisable = process.env.DISABLE_GEMINI_API === 'true';
+  if (legacyDisable && !warnedLegacyDisableFlag) {
+    warnedLegacyDisableFlag = true;
+    console.warn('⚠️ DISABLE_GEMINI_API=true is deprecated: it now disables Qwen page-boundary sentence completion (not embeddings). Use DISABLE_AI_APIS=true instead.');
+  }
+  const skipApiCompletely = legacyDisable || process.env.DISABLE_AI_APIS === 'true';
   
   if (skipApiCompletely || funcWithProps.apiDisabled) {
     const reason = skipApiCompletely ? 'disabled by environment variable' : 'too many failures';
@@ -1476,10 +1469,9 @@ PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
 `;
 
   try {
-    // Use Gemini to fix the content
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
-    if (!apiKey) {
-      console.warn('⚠️ No AI API key found, using manual fallback for sentence completion');
+    // Use the LLM to fix the content
+    if (!isLlmConfigured('fast')) {
+      console.warn(`⚠️ Sentence-completion LLM unavailable (${llmUnavailableReason()}), using manual fallback for sentence completion`);
       return manuallyFixTruncations(prevPageContent, currentPageContent, nextPageContent, startsWithFragment, endsWithFragment, currPage);
     }
 
@@ -1487,15 +1479,6 @@ PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
     const sanitizedPrompt = sanitizeContentForAPI(finalPrompt);
 
     try {
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash-lite",
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 8000,
-        }
-      });
-
       // Add a throttling delay to avoid overwhelming the API
       await sleep(500); // 500ms delay between API calls
       
@@ -1504,8 +1487,11 @@ PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
       console.log(`⏱️ Setting API timeout of ${timeoutMs/1000} seconds for page ${currPage.pageNumber}`);
       
       let apiTimedOut = false;
+      // Abort the in-flight request (and its retries) once the overall timeout fires
+      const abortController = new AbortController();
       const timeoutId = setTimeout(() => {
         apiTimedOut = true;
+        abortController.abort();
         console.error(`⏱️ API timeout for page ${currPage.pageNumber} after ${timeoutMs/1000} seconds`);
         
         // Track API failures
@@ -1525,12 +1511,15 @@ PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
       const startTime = Date.now();
       
       try {
-        // Make the API call with retry
-        const result = await retryApiCall(async () => {
-          return await model.generateContent({
-            contents: [{ role: "user", parts: [{ text: sanitizedPrompt }] }],
-          });
-        }, 3, 1000); // 3 retries with 1s initial delay
+        // Make the API call (llm-client retries 429 / 5xx / network errors with backoff)
+        const enhancedContent = await generateText({
+          task: 'fast',
+          prompt: sanitizedPrompt,
+          temperature: 0.1,
+          maxOutputTokens: 8000,
+          timeoutMs,
+          signal: abortController.signal,
+        });
         
         // Clear the timeout as the request completed
         clearTimeout(timeoutId);
@@ -1543,10 +1532,6 @@ PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
         
         const elapsedTime = (Date.now() - startTime) / 1000;
         console.log(`✅ API request completed in ${elapsedTime.toFixed(2)} seconds for page ${currPage.pageNumber}`);
-        
-        // Process the result
-        const response = result.response;
-        const enhancedContent = response.text().trim();
         
         // Check if the content was accidentally translated to English
         const wasTranslated = detectTranslationToEnglish(currentPageContent, enhancedContent);
@@ -1595,6 +1580,12 @@ PRESERVE EXACT TEXT STRUCTURE - NO BULLET POINTS OR FORMATTING
           funcWithProps.apiFailureCount = (funcWithProps.apiFailureCount || 0) + 1;
           
           console.error(`❌ API error for page ${currPage.pageNumber}:`, error);
+
+          // A billing error (402 / Arrearage) cannot recover: stop calling the API for the remaining pages
+          if (isLlmBillingError(error)) {
+            console.log('🚫 Disabling API: LLM billing error (account credits / overdue payment)');
+            funcWithProps.apiDisabled = true;
+          }
           
           // Log failure count and potentially disable API
           console.log(`⚠️ API failure count: ${funcWithProps.apiFailureCount}/${funcWithProps.maxApiFailures}`);
@@ -1751,7 +1742,6 @@ function manuallyFixTruncations(
 }
 
 // Add static properties to the function
-(ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).genAI = null;
 (ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).apiFailureCount = 0;
 (ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).maxApiFailures = 5; // After 5 failures, disable API
 (ensureCompleteSentences as unknown as EnsureCompleteSentencesFunction).apiDisabled = false;
@@ -1816,52 +1806,6 @@ const markSentenceBoundaries = (text: string): string => {
   
   return markedText;
 };
-
-// Add this helper function for retrying API calls with exponential backoff
-async function retryApiCall<T>(
-  operation: () => Promise<T>,
-  maxRetries: number = 3,
-  initialDelayMs: number = 1000
-): Promise<T> {
-  let lastError: any;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await operation();
-    } catch (error: any) {
-      lastError = error;
-      
-      // Check if we should retry based on the error
-      const isNetworkError = 
-        error.message?.includes('fetch failed') || 
-        error.message?.includes('network') ||
-        error.message?.includes('timeout') ||
-        error.message?.includes('ECONNRESET');
-      
-      // Don't retry if it's not a network error
-      if (!isNetworkError) {
-        console.log(`❌ Non-retryable error: ${error.message}`);
-        throw error;
-      }
-      
-      // If this was the last retry, throw the error
-      if (attempt === maxRetries) {
-        console.log(`❌ Failed after ${maxRetries} retries`);
-        throw error;
-      }
-      
-      // Calculate exponential backoff delay
-      const delayMs = initialDelayMs * Math.pow(2, attempt - 1);
-      console.log(`⏱️ Retry ${attempt}/${maxRetries} after ${delayMs}ms delay (${error.message})`);
-      
-      // Wait before retrying
-      await sleep(delayMs);
-    }
-  }
-  
-  // This should never happen, but TypeScript requires a return
-  throw lastError;
-}
 
 // Add a simple function to detect if text might have been accidentally translated to English
 function detectTranslationToEnglish(originalText: string, enhancedText: string): boolean {

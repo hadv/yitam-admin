@@ -1,17 +1,16 @@
 import { TaskType } from './embedding';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { createEmbedding } from './embedding';
 import path from 'path';
 import { enhanceContent, EnhancementType } from './content-enhancement';
+import { generateText, isLlmBillingError, isLlmConfigured, llmModelFor, llmUnavailableReason } from './llm-client';
 
 // Load environment variables
 dotenv.config();
 
-// Gemini API key for generating titles and summaries
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-if (!GEMINI_API_KEY) {
-  console.warn('GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.');
+// Titles and summaries are generated with Alibaba Cloud Model Studio (Qwen) via llm-client
+if (!isLlmConfigured('fast')) {
+  console.warn(`Title/summary LLM unavailable (${llmUnavailableReason()}). Set DASHSCOPE_API_KEY in your .env file.`);
 }
 
 // DocumentChunk interface - represents a single chunk of a document
@@ -376,7 +375,7 @@ export async function chunkDocument(
 }
 
 /**
- * Generate titles and summaries for document chunks using Gemini API
+ * Generate titles and summaries for document chunks using the LLM (Qwen via llm-client)
  * 
  * @param chunks Array of document chunks
  * @param config Chunking configuration
@@ -385,14 +384,14 @@ async function generateChunkMetadata(
   chunks: DocumentChunk[],
   config: ChunkingConfig
 ): Promise<void> {
-  // Skip if no API key
-  if (!GEMINI_API_KEY) {
-    console.warn('⚠️ Skipping title/summary generation - GEMINI_API_KEY not set');
+  // Skip if the LLM is not configured
+  if (!isLlmConfigured('fast')) {
+    console.warn(`⚠️ Skipping title/summary generation - ${llmUnavailableReason()}`);
     return;
   }
-
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+  console.log(`Generating chunk titles/summaries with ${llmModelFor('fast')}`);
+  // Set on a billing error (402 / Arrearage): further requests cannot succeed, keep the defaults
+  let billingStopped = false;
   
   // Process chunks in batches to avoid API rate limits
   const batchSize = 3;
@@ -407,6 +406,7 @@ async function generateChunkMetadata(
     
     // Process each chunk in the batch sequentially to avoid overwhelming the API
     for (const chunk of currentBatch) {
+      if (billingStopped) break;
       try {
         // Prepare content sample that emphasizes the beginning and end
         let contentSample = '';
@@ -454,15 +454,12 @@ INSTRUCTIONS:
 RETURN ONLY THE TITLE TEXT WITH NO OTHER COMMENTARY.
 `;
 
-              const titleResult = await model.generateContent({
-                contents: [{ role: "user", parts: [{ text: titlePrompt }] }],
-                generationConfig: {
-                  temperature: 0.2,
-                  maxOutputTokens: 60,
-                }
+              const title = await generateText({
+                task: 'fast',
+                prompt: titlePrompt,
+                temperature: 0.2,
+                maxOutputTokens: 60,
               });
-              
-              const title = titleResult.response.text().trim();
               if (title && title.length > 0) {
                 chunk.title = title;
                 console.log(`Generated title for chunk ${chunk.id}: "${title}"`);
@@ -471,13 +468,14 @@ RETURN ONLY THE TITLE TEXT WITH NO OTHER COMMENTARY.
               }
             } catch (error) {
               console.error(`Error generating title for chunk ${chunk.id}:`, error);
+              if (isLlmBillingError(error)) billingStopped = true;
               // Keep the default title
             }
           }
         }
         
         // Generate summary if needed
-        if (config.generateSummaries) {
+        if (config.generateSummaries && !billingStopped) {
           try {
             // Create a summary prompt that emphasizes complete understanding
             const summaryPrompt = `
@@ -503,15 +501,12 @@ INSTRUCTIONS:
 RETURN ONLY THE SUMMARY WITH NO OTHER COMMENTARY.
 `;
 
-            const summaryResult = await model.generateContent({
-              contents: [{ role: "user", parts: [{ text: summaryPrompt }] }],
-              generationConfig: {
-                temperature: 0.2,
-                maxOutputTokens: 250,
-              }
+            const summary = await generateText({
+              task: 'fast',
+              prompt: summaryPrompt,
+              temperature: 0.2,
+              maxOutputTokens: 250,
             });
-            
-            const summary = summaryResult.response.text().trim();
             if (summary && summary.length > 0) {
               chunk.summary = summary;
               console.log(`Generated summary for chunk ${chunk.id} (${summary.length} chars)`);
@@ -521,6 +516,7 @@ RETURN ONLY THE SUMMARY WITH NO OTHER COMMENTARY.
             }
           } catch (error) {
             console.error(`Error generating summary for chunk ${chunk.id}:`, error);
+            if (isLlmBillingError(error)) billingStopped = true;
             chunk.summary = ""; // Empty summary on error
           }
         }
@@ -533,6 +529,11 @@ RETURN ONLY THE SUMMARY WITH NO OTHER COMMENTARY.
       }
     }
     
+    if (billingStopped) {
+      console.warn('⚠️ Stopping title/summary generation: LLM billing error (account credits / overdue payment); remaining chunks keep their default title and summary');
+      break;
+    }
+
     // Add a small delay between batches to avoid rate limits
     if (batchIndex < batchCount - 1) {
       await new Promise(resolve => setTimeout(resolve, 1500));
