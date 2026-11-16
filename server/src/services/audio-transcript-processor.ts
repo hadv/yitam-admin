@@ -2,6 +2,7 @@ import { createEmbedding } from './embedding';
 import { DocumentChunk } from './chunking';
 import { dbService } from '../core/database-service';
 import { enhanceContent, EnhancementType } from './content-enhancement';
+import { cjkRatio, getLanguageName, getVietnameseLanguageName, joinTextFragments, splitTextIntoSegments } from './language-utils';
 
 export interface AudioTranscriptProcessingOptions {
   chunkSize?: number;
@@ -10,7 +11,17 @@ export interface AudioTranscriptProcessingOptions {
   videoId: string;
   videoTitle: string;
   videoUrl: string;
+  /** Detected language of the audio, e.g. 'cmn-Hans-CN' (recorded in chunk title/summary). */
+  originalLanguageCode?: string;
+  /** True when the text being embedded is a (Vietnamese) translation of the original audio. */
+  isTranslation?: boolean;
 }
+
+/** Chunk sizes (characters). CJK text carries ~2x the tokens per character, so its chunks are smaller. */
+const CHUNK_SIZES = {
+  cjk: { size: 1500, overlap: 200 },
+  other: { size: 4000, overlap: 500 }
+};
 
 export interface AudioTranscriptProcessingResult {
   totalChunks: number;
@@ -21,7 +32,11 @@ export interface AudioTranscriptProcessingResult {
 }
 
 /**
- * Process audio transcript to create embeddings and store in vector database
+ * Process audio transcript to create embeddings and store in vector database.
+ *
+ * @param audioTranscript raw transcript (original language), used only as fallback
+ * @param enhancedTranscript text to embed: the Vietnamese translation when the audio was in
+ *   another language, otherwise the cleaned original-language transcript
  */
 export const processAudioTranscript = async (
   audioTranscript: string,
@@ -30,24 +45,44 @@ export const processAudioTranscript = async (
 ): Promise<AudioTranscriptProcessingResult> => {
   const startTime = Date.now();
   const {
-    chunkSize = 4000,
-    chunkOverlap = 500,
     domains = ['youtube', 'audio'],
     videoId,
     videoTitle,
-    videoUrl
+    videoUrl,
+    originalLanguageCode,
+    isTranslation = false
   } = options;
+
+  // e.g. " (dịch từ tiếng Trung)" so Vietnamese results show where the text came from
+  const translationLabel = isTranslation && originalLanguageCode
+    ? ` (dịch từ ${getVietnameseLanguageName(originalLanguageCode)})`
+    : '';
+  // Language of the text being embedded, so the per-chunk rewrite neither translates nor mislabels it
+  const contentLanguage = isTranslation
+    ? 'Vietnamese'
+    : originalLanguageCode ? getLanguageName(originalLanguageCode) : undefined;
+  const languageNote = originalLanguageCode
+    ? isTranslation
+      ? ` Bản dịch tiếng Việt từ ${getVietnameseLanguageName(originalLanguageCode)} (ngôn ngữ gốc: ${originalLanguageCode}).`
+      : ` Ngôn ngữ gốc: ${originalLanguageCode}.`
+    : '';
 
   console.log(`🎵 Processing audio transcript for embedding: ${videoId}`);
   console.log(`📝 Audio transcript length: ${audioTranscript.length} characters`);
   console.log(`✨ Enhanced transcript length: ${enhancedTranscript?.length || 0} characters`);
 
-  // Use enhanced transcript if available, otherwise use raw audio transcript
-  const transcriptToProcess = enhancedTranscript || audioTranscript;
+  // Use enhanced transcript if available, otherwise use raw audio transcript.
+  // Chunk-level transcription failure markers are noise for search.
+  const stripMarkers = (t?: string) => (t || '').replace(/\[TRANSCRIPTION_FAILED\]/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+  const transcriptToProcess = stripMarkers(enhancedTranscript) || stripMarkers(audioTranscript);
 
   if (!transcriptToProcess || transcriptToProcess.trim().length === 0) {
     throw new Error('No transcript content available for processing');
   }
+
+  const sizes = cjkRatio(transcriptToProcess) >= 0.3 ? CHUNK_SIZES.cjk : CHUNK_SIZES.other;
+  const chunkSize = options.chunkSize ?? sizes.size;
+  const chunkOverlap = options.chunkOverlap ?? sizes.overlap;
 
   // Use the singleton instance of the database service
   // dbService is now imported from core
@@ -91,8 +126,8 @@ export const processAudioTranscript = async (
         documentName: `${videoTitle} (Audio Transcript)`,
         content: chunk,
         embedding: [], // Will be set after enhancement
-        title: `Audio Transcript Part ${i + 1} - ${videoTitle}`,
-        summary: `Part ${i + 1} of audio transcript for video: ${videoTitle}`,
+        title: `Audio Transcript Part ${i + 1} - ${videoTitle}${translationLabel}`,
+        summary: `Part ${i + 1} of audio transcript for video: ${videoTitle}.${languageNote}`,
         sourceFile: videoUrl,
         domains: domains
       };
@@ -104,7 +139,8 @@ export const processAudioTranscript = async (
           console.log(`🎨 Enhancing chunk ${i + 1} content...`);
           const enhancedChunk = await enhanceContent(baseChunk, {
             types: [EnhancementType.FORMATTING, EnhancementType.READABILITY],
-            domain: domains.join(', ')
+            domain: domains.join(', '),
+            language: contentLanguage
           });
 
           // Keep original content but add enhanced content
@@ -151,9 +187,10 @@ export const processAudioTranscript = async (
 };
 
 /**
- * Split audio transcript into chunks
+ * Split audio transcript into chunks on sentence boundaries (handles 。！？ / .!? / newlines),
+ * each chunk prefixed with the tail of the previous one as overlap.
  */
-function splitAudioTranscriptIntoChunks(
+export function splitAudioTranscriptIntoChunks(
   transcript: string,
   chunkSize: number,
   chunkOverlap: number
@@ -162,44 +199,20 @@ function splitAudioTranscriptIntoChunks(
     return [];
   }
 
-  const chunks: string[] = [];
-  const sentences = transcript.split(/[.!?]+/).filter(s => s.trim().length > 0);
-
-  if (sentences.length === 0) {
-    return [transcript];
+  const overlap = Math.max(0, Math.min(chunkOverlap, Math.floor(chunkSize / 2)));
+  const segments = splitTextIntoSegments(transcript, chunkSize - overlap);
+  if (segments.length === 0) {
+    return [transcript.trim()];
   }
 
-  let currentChunk = '';
-
-  for (const sentence of sentences) {
-    const trimmedSentence = sentence.trim();
-    if (!trimmedSentence) continue;
-
-    const potentialChunk = currentChunk + (currentChunk ? '. ' : '') + trimmedSentence;
-
-    if (potentialChunk.length <= chunkSize) {
-      currentChunk = potentialChunk;
-    } else {
-      // Current chunk is full, save it and start new one
-      if (currentChunk) {
-        chunks.push(currentChunk + '.');
-      }
-
-      // Handle overlap by including last part of previous chunk
-      if (chunkOverlap > 0 && chunks.length > 0) {
-        const lastChunk = chunks[chunks.length - 1];
-        const overlapText = lastChunk.slice(-chunkOverlap);
-        currentChunk = overlapText + ' ' + trimmedSentence;
-      } else {
-        currentChunk = trimmedSentence;
-      }
-    }
-  }
-
-  // Add the last chunk if it has content
-  if (currentChunk.trim()) {
-    chunks.push(currentChunk + '.');
-  }
-
-  return chunks.filter(chunk => chunk.trim().length > 0);
+  return segments
+    .map((segment, index) => {
+      if (index === 0 || overlap === 0) return segment;
+      let tail = segments[index - 1].slice(-overlap);
+      // Start the overlap at a word boundary when there is one
+      const firstSpace = tail.search(/\s/);
+      if (firstSpace > 0 && firstSpace < tail.length / 2) tail = tail.slice(firstSpace + 1);
+      return joinTextFragments(tail.trim(), segment);
+    })
+    .filter(chunk => chunk.trim().length > 0);
 }

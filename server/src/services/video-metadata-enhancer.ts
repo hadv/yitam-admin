@@ -8,6 +8,25 @@ import {
   AudioTranscriptionOptions
 } from './audio-transcription';
 import { processAudioTranscript } from './audio-transcript-processor';
+import { extractBoardText, BoardOcrResult, BoardTextItem } from './board-ocr';
+import { correctDomainTerms, TermCorrection } from './term-correction';
+import { getTcmHanVietPairs, scriptForLanguageCode } from './tcm-glossary';
+import {
+  AUTO_LANGUAGE,
+  DEFAULT_TARGET_LANGUAGE,
+  analyzeScripts,
+  countWords,
+  cjkRatio,
+  detectLanguageFromText,
+  getFillerWordsHint,
+  getLanguageName,
+  isChineseLanguage,
+  isSameLanguage,
+  normalizeLanguageCode,
+  splitTextIntoSegments,
+  stripUndefined,
+  toBaseLanguage
+} from './language-utils';
 
 // Load environment variables
 dotenv.config();
@@ -37,14 +56,29 @@ export interface EnhancedVideoMetadata {
 
   // Enhancement metadata
   enhancementSource: 'transcript' | 'metadata' | 'combined';
-  language: string;
+  language: string; // Human name of the ORIGINAL content language, e.g. 'Chinese'
   confidence: number;
   processingTime: number;
 
   // Audio transcript data
-  audioTranscript?: string; // Raw audio transcript text
-  enhancedTranscript?: string; // LLM-enhanced transcript (grammar fixed, cleaned up)
+  audioTranscript?: string; // Raw audio transcript text (original language)
+  enhancedTranscript?: string; // LLM-cleaned transcript, still in the ORIGINAL language
   transcriptWordCount?: number; // Word count for quality assessment
+  originalLanguageCode?: string; // Detected audio language, e.g. 'cmn-Hans-CN'
+  originalLanguage?: string; // Human name of the original language, e.g. 'Chinese'
+  translatedTranscript?: string; // Translation of enhancedTranscript (only when original != target language)
+  translationLanguage?: string; // Target language of translatedTranscript, e.g. 'vi'
+  translationPartial?: boolean; // true if some translation segments failed
+
+  // Chinese (Đông y) lecture pipeline
+  correctedTranscript?: string; // Raw transcript with mis-recognised domain terms fixed (only set when something was fixed)
+  termCorrections?: TermCorrection[]; // What was fixed (present whenever domain-term correction ran, may be empty)
+  boardText?: BoardTextItem[]; // Chinese text read from the blackboard / slides, with frame time
+  boardTerms?: string[]; // Domain terms seen on the board (used as STT phrase hints + correction evidence)
+  boardOcrStatus?: string; // Why no board text is shown (skipped / failed / nothing found); absent when board text was read
+  transcriptionEngine?: 'alibaba' | 'chirp' | 'v1'; // Speech-to-Text engine that produced audioTranscript
+  transcriptionModel?: string; // e.g. 'chirp_3', 'default'
+  confidenceIsNominal?: boolean; // true when confidence is a fixed placeholder (Chirp gives no score): not a quality measure
 }
 
 /**
@@ -71,10 +105,25 @@ export interface EnhancementOptions {
   useAudioTranscription?: boolean; // Enable audio-to-text transcription
   forceAudioTranscription?: boolean; // Force audio transcription even if transcript is available
   audioTranscriptionOptions?: Partial<AudioTranscriptionOptions>;
-  transcriptCleaningLevel?: 'basic' | 'aggressive'; // Level of transcript cleaning
+  /**
+   * 'none' = verbatim (no LLM rewrite; enhancedTranscript = term-corrected raw transcript),
+   * 'basic' | 'aggressive' = LLM cleaning. When omitted: 'none' for Chinese audio, otherwise 'aggressive'.
+   */
+  transcriptCleaningLevel?: TranscriptCleaningLevel;
+  domainCorrection?: boolean; // Fix mis-recognised Đông y terms in Chinese transcripts (default true)
+  boardOcr?: boolean; // Read Chinese text on the blackboard (video frames) for hints + correction (default true)
   embedAudioTranscript?: boolean; // Enable embedding audio transcript into vector database
   domains?: string[]; // Knowledge domains for categorizing the content
+  targetLanguage?: string; // Language for translation + generated metadata of audio transcripts (default 'vi')
+  translateTranscript?: boolean; // Translate the audio transcript into targetLanguage when it differs (default false: keep the original-language transcript only)
 }
+
+export type TranscriptCleaningLevel = 'none' | 'basic' | 'aggressive';
+export const TRANSCRIPT_CLEANING_LEVELS: TranscriptCleaningLevel[] = ['none', 'basic', 'aggressive'];
+/** Used when the caller did not choose a level and the audio is not Chinese (backward compatible). */
+const DEFAULT_CLEANING_LEVEL: TranscriptCleaningLevel = 'aggressive';
+/** Chinese lectures default to a verbatim transcript. */
+const DEFAULT_CHINESE_CLEANING_LEVEL: TranscriptCleaningLevel = 'none';
 
 // Default enhancement options
 const DEFAULT_ENHANCEMENT_OPTIONS: EnhancementOptions = {
@@ -87,13 +136,54 @@ const DEFAULT_ENHANCEMENT_OPTIONS: EnhancementOptions = {
   languagePreference: 'auto',
   useAudioTranscription: true, // Enable by default if available
   forceAudioTranscription: false, // Don't force by default
-  transcriptCleaningLevel: 'aggressive', // Aggressive cleaning by default
+  // transcriptCleaningLevel intentionally has no static default: it depends on the detected language
+  targetLanguage: DEFAULT_TARGET_LANGUAGE,
+  translateTranscript: false,
+  domainCorrection: true,
+  boardOcr: true,
   audioTranscriptionOptions: {
-    languageCode: 'vi-VN',
+    languageCode: AUTO_LANGUAGE, // Detect Vietnamese / Chinese / English
     enableAutomaticPunctuation: true,
     useEnhancedModel: true
   }
 };
+
+// Transcript cleaning / translation are done per segment so long transcripts are never truncated.
+// CJK text carries much more content per character, hence smaller segments.
+const CLEANING_SEGMENT_CHARS = { cjk: 2000, other: 4000 };
+const TRANSLATION_SEGMENT_CHARS = { cjk: 1500, other: 3000 };
+const SEGMENT_MAX_OUTPUT_TOKENS = 8192;
+const SEGMENT_CONCURRENCY = 3;
+const SEGMENT_RETRY_DELAY_MS = 1500;
+// Rate-limit / overload errors (429, 503) need real backoff: a quick retry lands in the same quota window
+const SEGMENT_TRANSIENT_MAX_ATTEMPTS = 6;
+const SEGMENT_TRANSIENT_BASE_DELAY_MS = 4000;
+const SEGMENT_TRANSIENT_MAX_DELAY_MS = 60000;
+// Translate a transcript whose dominant language is the target when this share of it is CJK
+// (e.g. a Chinese master with a Vietnamese interpreter where Vietnamese narrowly won detection)
+const MIXED_CJK_TRANSLATION_THRESHOLD = 0.15;
+const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+
+/**
+ * Merge caller options over defaults. Keys explicitly set to `undefined` (as the
+ * controller does for fields missing in the request) must not clobber defaults,
+ * and audioTranscriptionOptions is merged one level deep.
+ */
+function mergeEnhancementOptions(
+  options: Partial<EnhancementOptions> = {},
+  overrides: Partial<EnhancementOptions> = {}
+): EnhancementOptions {
+  const provided = stripUndefined(options);
+  return {
+    ...DEFAULT_ENHANCEMENT_OPTIONS,
+    ...provided,
+    ...overrides,
+    audioTranscriptionOptions: {
+      ...DEFAULT_ENHANCEMENT_OPTIONS.audioTranscriptionOptions,
+      ...stripUndefined(provided.audioTranscriptionOptions)
+    }
+  };
+}
 
 /**
  * Main function to enhance video metadata using combined approach
@@ -106,10 +196,7 @@ export async function enhanceVideoMetadata(
   options: Partial<EnhancementOptions> = {}
 ): Promise<EnhancedVideoMetadata> {
   const startTime = Date.now();
-  const fullOptions: EnhancementOptions = {
-    ...DEFAULT_ENHANCEMENT_OPTIONS,
-    ...options
-  };
+  const fullOptions = mergeEnhancementOptions(options);
 
   console.log(`🚀 Starting video metadata enhancement for: ${videoInfo.title}`);
   console.log(`🔧 Enhancement options:`, {
@@ -119,7 +206,14 @@ export async function enhanceVideoMetadata(
     audioTranscriptionAvailable: isAudioTranscriptionAvailable()
   });
 
+  // Blackboard OCR needs only the video file + Gemini, not Speech-to-Text: run it up front so
+  // its result reaches the client whichever enhancement path produces the metadata.
+  let ocr: BoardOcrOutcome | undefined;
   try {
+    if (fullOptions.useAudioTranscription && videoFilePath) {
+      ocr = await runBoardOcr(videoFilePath, fullOptions);
+    }
+
     // Step 1: Try audio transcription if enabled and video file is available
     if (fullOptions.useAudioTranscription && videoFilePath && isAudioTranscriptionAvailable()) {
       console.log('🎵 Attempting audio transcription-based enhancement...');
@@ -127,13 +221,15 @@ export async function enhanceVideoMetadata(
         videoInfo,
         videoFilePath,
         fullOptions,
-        youtubeUrl
+        youtubeUrl,
+        ocr
       );
 
       if (audioResult) {
         console.log('✅ Successfully enhanced using audio transcription');
         return {
           ...audioResult,
+          ...boardFields(ocr),
           processingTime: Date.now() - startTime
         } as EnhancedVideoMetadata;
       } else {
@@ -159,6 +255,7 @@ export async function enhanceVideoMetadata(
         console.log('✅ Successfully enhanced using transcript-based approach');
         return {
           ...transcriptResult,
+          ...boardFields(ocr),
           processingTime: Date.now() - startTime
         } as EnhancedVideoMetadata;
       }
@@ -172,6 +269,7 @@ export async function enhanceVideoMetadata(
 
     return {
       ...metadataResult,
+      ...boardFields(ocr),
       processingTime: Date.now() - startTime
     };
 
@@ -179,60 +277,257 @@ export async function enhanceVideoMetadata(
     console.error('❌ Error in video metadata enhancement:', error);
 
     // Return basic enhanced metadata as final fallback
-    return createFallbackMetadata(videoInfo, Date.now() - startTime);
+    return { ...createFallbackMetadata(videoInfo, Date.now() - startTime), ...boardFields(ocr) };
   }
 }
 
+interface BoardOcrOutcome {
+  board?: BoardOcrResult;
+  /** Why no board text is available (skipped / failed / nothing found); undefined when text was read. */
+  status?: string;
+}
+
 /**
- * Try to enhance metadata using audio transcription
+ * Blackboard OCR for possibly-Chinese audio (language 'auto' or Chinese). Never throws; the
+ * reason for skipping or failing is returned as `status` so the client can show it.
+ */
+async function runBoardOcr(videoFilePath: string, options: EnhancementOptions): Promise<BoardOcrOutcome> {
+  const requestedLanguage = options.audioTranscriptionOptions?.languageCode || AUTO_LANGUAGE;
+  const couldBeChinese = requestedLanguage === AUTO_LANGUAGE || isChineseLanguage(requestedLanguage);
+  if (options.boardOcr === false) {
+    console.log('⏭️ Blackboard OCR disabled');
+    return { status: 'disabled' };
+  }
+  if (!couldBeChinese) {
+    console.log(`⏭️ Blackboard OCR not needed for ${requestedLanguage}`);
+    return { status: `not needed for ${requestedLanguage}` };
+  }
+  try {
+    console.log('🖍️ Reading Chinese text on the blackboard...');
+    const board = await extractBoardText(videoFilePath, {
+      languageCode: isChineseLanguage(requestedLanguage) ? requestedLanguage : undefined
+    });
+    if (board.skippedReason) {
+      console.log(`⏭️ Blackboard OCR skipped: ${board.skippedReason}`);
+      return { board, status: board.skippedReason };
+    }
+    console.log(`🖍️ Blackboard OCR: ${board.items.length} text item(s), ${board.terms.length} term(s) from ${board.framesAnalysed} frame(s)`);
+    return {
+      board,
+      status: board.items.length > 0 ? undefined : `no Chinese text found on the board (${board.framesAnalysed} frame(s) analysed)`
+    };
+  } catch (ocrError: any) {
+    const message = ocrError?.message || String(ocrError);
+    console.warn('⚠️ Blackboard OCR failed, continuing without it:', message);
+    return { status: `OCR failed: ${message}` };
+  }
+}
+
+/** Board fields for the response (undefined values are dropped by JSON serialisation). */
+function boardFields(ocr: BoardOcrOutcome | undefined): Partial<EnhancedVideoMetadata> {
+  if (!ocr) return {};
+  return {
+    boardText: ocr.board?.items?.length ? ocr.board.items : undefined,
+    boardTerms: ocr.board?.terms?.length ? ocr.board.terms : undefined,
+    boardOcrStatus: ocr.status
+  };
+}
+
+const TRANSCRIPTION_FAILED_MARKER_RE = /\[TRANSCRIPTION_FAILED\]/g;
+
+/** Text for downstream LLM / embedding use: failure markers removed, spacing tidied. */
+function withoutFailureMarkers(text: string): string {
+  return text.replace(TRANSCRIPTION_FAILED_MARKER_RE, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+type ContentDomain = 'tcm' | 'buddhist' | 'generic';
+const TCM_DOMAIN_RE = /đông y|y học cổ truyền|nội kinh|y tông|hải thượng|lê hữu trác|y quán|âm dương|ngũ hành|khí công|châm cứu|tcm|traditional chinese medicine|中医|中醫/i;
+const BUDDHIST_DOMAIN_RE = /phật|thiền|buddh|thích nhất hạnh|viên minh|佛|禅|禪/i;
+
+/**
+ * Subject domain of the content, from the caller's knowledge domains. Chinese audio
+ * defaults to Đông y (TCM) unless only Buddhist domains were chosen.
+ * languageCode undefined = not known yet (before transcription).
+ */
+function resolveContentDomain(domains: string[] | undefined, languageCode?: string): ContentDomain {
+  const list = (domains || []).map(d => String(d).toLowerCase());
+  if (list.some(d => TCM_DOMAIN_RE.test(d))) return 'tcm';
+  if (list.some(d => BUDDHIST_DOMAIN_RE.test(d))) return 'buddhist';
+  return languageCode === undefined || isChineseLanguage(languageCode) ? 'tcm' : 'generic';
+}
+
+/**
+ * Try to enhance metadata using audio transcription.
+ *
+ * Pipeline: (1) blackboard OCR (video, possibly-Chinese audio) -> (2) Speech-to-Text with
+ * board terms as phrase hints -> (3) Đông y term correction (Chinese) -> (4) optional LLM
+ * cleaning ('none' = verbatim) -> (5) optional translation -> (6) metadata + embedding.
  */
 async function tryAudioTranscriptionBasedEnhancement(
   videoInfo: YtDlpVideoInfo,
   videoFilePath: string,
   options: EnhancementOptions,
-  youtubeUrl?: string
+  youtubeUrl?: string,
+  ocr?: BoardOcrOutcome
 ): Promise<Partial<EnhancedVideoMetadata> | null> {
   try {
     console.log('🎤 Attempting audio transcription-based enhancement...');
     console.log(`📁 Video file path: ${videoFilePath}`);
     console.log(`🔧 Audio transcription options:`, options.audioTranscriptionOptions);
 
-    // Transcribe the video file
-    const transcriptionResult = await transcribeVideoFile(
-      videoFilePath,
-      options.audioTranscriptionOptions
-    );
+    const transcriptionOptions: Partial<AudioTranscriptionOptions> = { ...options.audioTranscriptionOptions };
+    const preDomain = resolveContentDomain(options.domains);
+    if (transcriptionOptions.domainHints === undefined && preDomain === 'buddhist') {
+      transcriptionOptions.domainHints = 'none'; // Đông y hints would only hurt a Buddhist talk
+    }
 
-    if (!transcriptionResult.transcript || transcriptionResult.transcript.trim().length < 100) {
+    // 1. Blackboard OCR (normally already run by the caller): the teacher writes the key terms
+    // on the board - best evidence we have
+    const board = (ocr ?? await runBoardOcr(videoFilePath, options)).board;
+    const boardTerms = board?.terms?.length ? board.terms : undefined;
+
+    // 2. Speech-to-Text; caller hints first, then board terms (the STT layer adds the glossary)
+    const phraseHints = Array.from(new Set(
+      [...(transcriptionOptions.phraseHints || []), ...(boardTerms || [])]
+        .map(h => (typeof h === 'string' ? h.trim() : ''))
+        .filter(Boolean)
+    ));
+    // Background text for engines that take context (Alibaba): caller text, then title / description
+    const contextText = [transcriptionOptions.contextText, videoInfo.title, videoInfo.description?.slice(0, 1500)]
+      .map(part => (typeof part === 'string' ? part.trim() : ''))
+      .filter(Boolean)
+      .join('\n');
+    const transcriptionResult = await transcribeVideoFile(videoFilePath, {
+      ...transcriptionOptions,
+      phraseHints: phraseHints.length > 0 ? phraseHints : undefined,
+      contextText: contextText || undefined
+    });
+
+    // Character threshold is language-agnostic via countWords (CJK characters count as words)
+    const rawTranscript = transcriptionResult.transcript || '';
+    const usableText = withoutFailureMarkers(rawTranscript);
+    if (!usableText || (usableText.length < 100 && countWords(usableText) < 20)) {
       console.log('⚠️ Audio transcription too short or failed, skipping audio-based enhancement');
       return null;
     }
 
-    console.log(`🎵 Audio transcription successful: ${transcriptionResult.wordCount} words, confidence: ${(transcriptionResult.confidence * 100).toFixed(1)}%`);
-
-    // Detect language from transcription result
-    const language = transcriptionResult.languageCode.includes('vi') ? 'Vietnamese' : 'English';
-    console.log(`🌐 Detected language from audio: ${language}`);
-
-    // Enhance the raw transcript with LLM
-    console.log(`🔧 Enhancing raw transcript with LLM (${options.transcriptCleaningLevel || 'aggressive'} mode)...`);
-    const enhancedTranscript = await enhanceTranscriptWithLLM(
-      transcriptionResult.transcript,
-      language,
-      videoInfo,
-      options.transcriptCleaningLevel || 'aggressive'
+    console.log(
+      `🎵 Audio transcription successful: ${transcriptionResult.wordCount} words, confidence: ` +
+      `${(transcriptionResult.confidence * 100).toFixed(1)}%, engine: ${transcriptionResult.engine || 'v1'}` +
+      `${transcriptionResult.model ? ` (${transcriptionResult.model})` : ''}`
     );
 
-    // Generate enhanced metadata using the enhanced transcript (better quality)
-    const enhanced = await generateTranscriptBasedMetadata(
-      videoInfo,
-      enhancedTranscript, // Use enhanced transcript for metadata generation
-      language,
-      options
-    );
+    // Original language as detected by Speech-to-Text (already script-checked there)
+    const originalLanguageCode = normalizeLanguageCode(transcriptionResult.languageCode) || transcriptionResult.languageCode;
+    const language = getLanguageName(originalLanguageCode);
+    const isChinese = isChineseLanguage(originalLanguageCode);
+    const contentDomain = resolveContentDomain(options.domains, originalLanguageCode);
+    const targetLanguage = toBaseLanguage(options.targetLanguage) || DEFAULT_TARGET_LANGUAGE;
+    const targetLanguageName = getLanguageName(targetLanguage);
+    console.log(`🌐 Detected language from audio: ${language} (${originalLanguageCode}); domain: ${contentDomain}; target language: ${targetLanguageName}`);
+
+    // 3. Đông y term correction on the raw Chinese transcript (proposals verified + applied in code)
+    let correctedTranscript: string | undefined;
+    let termCorrections: TermCorrection[] | undefined;
+    if (isChinese && contentDomain === 'tcm' && options.domainCorrection !== false) {
+      const correction = await correctDomainTerms(rawTranscript, {
+        languageCode: originalLanguageCode,
+        domain: 'tcm',
+        boardTerms
+      });
+      termCorrections = correction.corrections;
+      if (correction.applied > 0 && correction.text !== rawTranscript) {
+        correctedTranscript = correction.text;
+      }
+    } else if (isChinese) {
+      console.log(`⏭️ Domain-term correction ${options.domainCorrection === false ? 'disabled' : `skipped (domain: ${contentDomain})`}`);
+    }
+    const verbatimTranscript = correctedTranscript ?? rawTranscript;
+
+    // Translate when the original language differs from the target, or when the target is not
+    // CJK but a substantial share of the transcript is (mixed Chinese + interpreter audio where
+    // the target language narrowly won detection).
+    const translationSourceCode = resolveTranslationSourceCode(originalLanguageCode, targetLanguage, usableText);
+    const needsTranslation = options.translateTranscript === true && !!translationSourceCode;
+    if (translationSourceCode && !isSameLanguage(translationSourceCode, originalLanguageCode)) {
+      console.log(
+        `🌐 Transcript is mainly ${language} but ${(cjkRatio(usableText) * 100).toFixed(0)}% CJK; ` +
+        `the ${getLanguageName(translationSourceCode)} passages will be translated too`
+      );
+    }
+
+    // 4. Cleaning IN THE ORIGINAL LANGUAGE. Chinese defaults to verbatim ('none') unless the
+    // caller explicitly asked for a level. Faithful cleaning when the result will be translated.
+    const cleaningLevel: TranscriptCleaningLevel = options.transcriptCleaningLevel
+      ?? (isChinese ? DEFAULT_CHINESE_CLEANING_LEVEL : DEFAULT_CLEANING_LEVEL);
+    let enhancedTranscript: string;
+    if (cleaningLevel === 'none') {
+      console.log('📜 Cleaning level "none": keeping the verbatim transcript (no LLM rewrite)');
+      enhancedTranscript = verbatimTranscript;
+    } else {
+      console.log(`🔧 Enhancing transcript with LLM (${cleaningLevel} mode${needsTranslation ? ', faithful' : ''}, ${language})...`);
+      enhancedTranscript = await enhanceTranscriptWithLLM(
+        verbatimTranscript,
+        language,
+        videoInfo,
+        cleaningLevel,
+        needsTranslation,
+        isChinese && contentDomain === 'tcm'
+      );
+    }
+    const enhancedForDownstream = withoutFailureMarkers(enhancedTranscript) || usableText;
+
+    // 5. Optional translation (domain-aware)
+    let translatedTranscript: string | undefined;
+    let translationPartial: boolean | undefined;
+    if (needsTranslation && translationSourceCode) {
+      console.log(`🌍 Translating transcript ${getLanguageName(translationSourceCode)} → ${targetLanguageName} (${contentDomain})...`);
+      const translation = await translateTranscriptWithLLM(
+        enhancedForDownstream,
+        translationSourceCode,
+        targetLanguage,
+        videoInfo,
+        resolveContentDomain(options.domains, translationSourceCode)
+      );
+      translatedTranscript = translation.text;
+      translationPartial = translation.partial || undefined;
+      if (translatedTranscript) {
+        console.log(
+          `✅ Translation ${translation.partial ? 'partially ' : ''}completed: ` +
+          `${translation.failedSegments}/${translation.totalSegments} segment(s) failed`
+        );
+      } else {
+        console.warn('⚠️ Translation unavailable; metadata and embedding will use the original-language transcript');
+      }
+    } else if (options.translateTranscript !== true) {
+      console.log('⏭️ Transcript translation disabled');
+    } else {
+      console.log(`⏭️ Original language is already ${targetLanguageName}, no translation needed`);
+    }
+
+    // 6. Metadata in the target language, from the translation when available
+    const metadataSource = translatedTranscript || enhancedForDownstream;
+    // A metadata failure (Gemini quota / billing / bad JSON) must not throw away the transcript,
+    // which is the expensive part and the main deliverable: fall back to the video's own metadata.
+    let enhanced: Partial<EnhancedVideoMetadata> = {};
+    try {
+      enhanced = await generateTranscriptBasedMetadata(
+        videoInfo,
+        metadataSource,
+        targetLanguageName,
+        options,
+        translatedTranscript ? targetLanguageName : language
+      );
+    } catch (metadataError: any) {
+      console.warn('⚠️ Metadata generation failed, keeping the transcript with the original video metadata:', metadataError?.message || metadataError);
+    }
 
     // Higher confidence for audio transcription as it's from actual content
-    const confidence = Math.min(0.95, transcriptionResult.confidence + 0.1);
+    // (not for Chirp's nominal placeholder, which is no recognizer score at all)
+    const confidenceIsNominal = transcriptionResult.confidenceIsNominal === true;
+    const confidence = confidenceIsNominal
+      ? transcriptionResult.confidence
+      : Math.min(0.95, transcriptionResult.confidence + 0.1);
 
     // Process audio transcript for embedding if enabled
     if (options.embedAudioTranscript) {
@@ -240,14 +535,17 @@ async function tryAudioTranscriptionBasedEnhancement(
         console.log('🔗 Processing audio transcript for embedding...');
         const videoId = youtubeUrl ? extractVideoIdFromUrl(youtubeUrl) : videoInfo.videoId;
         if (videoId) {
+          // Embed the target-language text so searches in Vietnamese work
           const embeddingResult = await processAudioTranscript(
-            transcriptionResult.transcript,
-            enhancedTranscript,
+            withoutFailureMarkers(verbatimTranscript),
+            translatedTranscript ?? enhancedForDownstream,
             {
               videoId,
               videoTitle: videoInfo.title,
               videoUrl: youtubeUrl || `https://www.youtube.com/watch?v=${videoInfo.videoId}`,
-              domains: options.domains || ['youtube', 'audio']
+              domains: options.domains || ['youtube', 'audio'],
+              originalLanguageCode: translatedTranscript && translationSourceCode ? translationSourceCode : originalLanguageCode,
+              isTranslation: !!translatedTranscript
             }
           );
           console.log(`✅ Audio transcript embedded: ${embeddingResult.totalChunks} chunks created`);
@@ -270,11 +568,24 @@ async function tryAudioTranscriptionBasedEnhancement(
       contentTags: enhanced.contentTags || [],
       keyQuotes: enhanced.keyQuotes,
       enhancementSource: 'transcript' as const, // Audio transcription is still transcript-based
-      language,
+      language, // Original language name
       confidence,
-      audioTranscript: transcriptionResult.transcript, // Raw transcript
-      enhancedTranscript: enhancedTranscript, // LLM-enhanced transcript
-      transcriptWordCount: transcriptionResult.wordCount // Include word count
+      confidenceIsNominal: confidenceIsNominal || undefined,
+      audioTranscript: rawTranscript, // Raw transcript (original language)
+      correctedTranscript, // Raw transcript with domain terms fixed (only when something was fixed)
+      termCorrections,
+      enhancedTranscript, // Verbatim ('none') or LLM-cleaned transcript (original language)
+      transcriptWordCount: transcriptionResult.wordCount, // Include word count
+      originalLanguageCode,
+      originalLanguage: language,
+      translatedTranscript,
+      translationLanguage: translatedTranscript ? targetLanguage : undefined,
+      translationPartial,
+      boardText: board?.items?.length ? board.items : undefined,
+      boardTerms,
+      boardOcrStatus: ocr?.status,
+      transcriptionEngine: transcriptionResult.engine,
+      transcriptionModel: transcriptionResult.model
     };
 
   } catch (error: any) {
@@ -306,16 +617,18 @@ async function tryTranscriptBasedEnhancement(
 
     console.log(`📝 Transcript available (${transcript.length} characters), proceeding with transcript-based enhancement`);
 
-    // Detect language
-    const language = detectLanguage(transcript);
-    console.log(`🌐 Detected language: ${language}`);
+    // Detect the transcript language; metadata is generated in the target language
+    const language = detectLanguageFromText(transcript);
+    const targetLanguageName = getLanguageName(toBaseLanguage(options.targetLanguage) || DEFAULT_TARGET_LANGUAGE);
+    console.log(`🌐 Detected language: ${language}; generating metadata in ${targetLanguageName}`);
 
     // Generate enhanced metadata using transcript
     const enhanced = await generateTranscriptBasedMetadata(
       videoInfo,
       transcript,
-      language,
-      options
+      targetLanguageName,
+      options,
+      language
     );
 
     return {
@@ -347,13 +660,14 @@ async function metadataBasedEnhancement(
 ): Promise<EnhancedVideoMetadata> {
   console.log('📊 Performing metadata-based enhancement...');
 
-  // Detect language from title and description
-  const language = detectLanguage(videoInfo.title + ' ' + videoInfo.description);
-  
+  // Detect language from title and description; metadata is generated in the target language
+  const language = detectLanguageFromText(videoInfo.title + ' ' + videoInfo.description);
+  const targetLanguageName = getLanguageName(toBaseLanguage(options.targetLanguage) || DEFAULT_TARGET_LANGUAGE);
+
   // Generate enhanced metadata using only available metadata
   const enhanced = await generateMetadataBasedEnhancement(
     videoInfo,
-    language,
+    targetLanguageName,
     options
   );
 
@@ -381,7 +695,8 @@ async function generateTranscriptBasedMetadata(
   videoInfo: YtDlpVideoInfo,
   transcript: string,
   language: string,
-  options: EnhancementOptions
+  options: EnhancementOptions,
+  transcriptLanguage?: string // Language the transcript is written in, when it differs from `language`
 ): Promise<Partial<EnhancedVideoMetadata>> {
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is required for transcript-based enhancement');
@@ -399,7 +714,8 @@ async function generateTranscriptBasedMetadata(
     videoInfo,
     transcriptSample,
     language,
-    options
+    options,
+    transcriptLanguage
   );
 
   const result = await model.generateContent({
@@ -450,10 +766,14 @@ function buildTranscriptEnhancementPrompt(
   videoInfo: YtDlpVideoInfo,
   transcript: string,
   language: string,
-  options: EnhancementOptions
+  options: EnhancementOptions,
+  transcriptLanguage?: string
 ): string {
+  const languageNote = transcriptLanguage && transcriptLanguage !== language
+    ? `\nNOTE: The transcript below is in ${transcriptLanguage}. Write ALL generated fields in ${language} (key quotes translated into ${language}).\n`
+    : '';
   return `You are analyzing a YouTube video with both metadata and transcript content. Generate enhanced metadata in ${language}.
-
+${languageNote}
 VIDEO METADATA:
 - Original Title: ${videoInfo.title}
 - Description: ${videoInfo.description}
@@ -591,13 +911,130 @@ function parseEnhancementResponse(
 }
 
 /**
- * Enhance raw transcript using LLM - fix grammar, slang, improve readability
+ * Run fn over items with at most `limit` calls in flight; results keep input order.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/** 429 / 503 / overload / network errors that are worth retrying with backoff. */
+function isTransientGeminiError(error: any): boolean {
+  const message = String(error?.message || '');
+  const status = Number(error?.status ?? error?.code);
+  // 402 = prepaid credits depleted / billing: waiting does not help
+  if (status === 402 || /"code"\s*:\s*402|credits are depleted/i.test(message)) return false;
+  return status === 429 || status === 500 || status === 503 ||
+    /\b(429|500|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|Too Many Requests|Service Unavailable|overloaded|quota|ECONNRESET|ETIMEDOUT|fetch failed/i.test(message);
+}
+
+/** RetryInfo.retryDelay (e.g. "27s") from a Gemini error, in ms. */
+function geminiRetryDelayMs(error: any): number | undefined {
+  const match = String(error?.message || '').match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  return match ? Math.round(parseFloat(match[1]) * 1000) : undefined;
+}
+
+/**
+ * One Gemini call for a transcript segment. Ordinary errors are retried once after a
+ * short delay; rate-limit / overload errors (429, 503) are retried with exponential
+ * backoff + jitter, honouring Gemini's retryDelay. A truncated (MAX_TOKENS) or empty
+ * answer counts as a failure so we never keep half a segment silently.
+ */
+async function generateSegmentText(prompt: string, temperature: number, label: string): Promise<string> {
+  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+
+  let lastError: any;
+  let ordinaryFailures = 0;
+  for (let attempt = 1; attempt <= SEGMENT_TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature,
+          maxOutputTokens: SEGMENT_MAX_OUTPUT_TOKENS,
+        }
+      });
+      const finishReason = String(result.response.candidates?.[0]?.finishReason || '');
+      if (finishReason === 'MAX_TOKENS') {
+        throw new Error('output truncated (MAX_TOKENS)');
+      }
+      const text = result.response.text().trim();
+      if (!text) {
+        throw new Error(`empty response${finishReason ? ` (finishReason=${finishReason})` : ''}`);
+      }
+      return text;
+    } catch (error: any) {
+      lastError = error;
+      const transient = isTransientGeminiError(error);
+      if (!transient) ordinaryFailures++;
+      const canRetry = attempt < SEGMENT_TRANSIENT_MAX_ATTEMPTS && (transient || ordinaryFailures < 2);
+      console.warn(`⚠️ ${label} attempt ${attempt} failed${transient ? ' (rate limit / unavailable)' : ''}: ${error.message}`);
+      if (!canRetry) break;
+      let delay = SEGMENT_RETRY_DELAY_MS;
+      if (transient) {
+        const backoff = Math.min(SEGMENT_TRANSIENT_MAX_DELAY_MS, SEGMENT_TRANSIENT_BASE_DELAY_MS * Math.pow(2, attempt - 1));
+        const hinted = geminiRetryDelayMs(error);
+        delay = Math.min(SEGMENT_TRANSIENT_MAX_DELAY_MS, Math.max(backoff, hinted ?? 0)) + Math.floor(Math.random() * 1000);
+        console.log(`⏳ ${label}: retrying in ${(delay / 1000).toFixed(1)}s`);
+      }
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Source language to translate from, or undefined when no translation is needed:
+ * the original language when it differs from the target; for a target-language
+ * transcript with a substantial CJK share (mixed audio), the CJK language.
+ */
+function resolveTranslationSourceCode(originalLanguageCode: string, targetLanguage: string, text: string): string | undefined {
+  if (!isSameLanguage(originalLanguageCode, targetLanguage)) return originalLanguageCode;
+  const targetBase = toBaseLanguage(targetLanguage);
+  const targetIsCjk = targetBase === 'zh' || targetBase === 'yue' || targetBase === 'ja' || targetBase === 'ko';
+  if (targetIsCjk || cjkRatio(text) < MIXED_CJK_TRANSLATION_THRESHOLD) return undefined;
+  const scripts = analyzeScripts(text);
+  if (scripts.hangul > scripts.han + scripts.kana) return 'ko-KR';
+  if (scripts.kana > 0 && scripts.kana / (scripts.han + scripts.kana) >= 0.15) return 'ja-JP';
+  return 'cmn-Hans-CN';
+}
+
+function segmentSizeFor(text: string, sizes: { cjk: number; other: number }): number {
+  return cjkRatio(text) >= 0.3 ? sizes.cjk : sizes.other;
+}
+
+function formatDuration(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${(seconds % 60).toString().padStart(2, '0')}`;
+}
+
+/**
+ * Enhance raw transcript using LLM - fix grammar, slang, improve readability.
+ * The output stays in the ORIGINAL language (no translation). Long transcripts
+ * are processed in segments so nothing gets truncated; a failed segment falls
+ * back to its raw text.
  */
 async function enhanceTranscriptWithLLM(
   rawTranscript: string,
   language: string,
   videoInfo: YtDlpVideoInfo,
-  cleaningLevel: 'basic' | 'aggressive' = 'aggressive'
+  cleaningLevel: 'basic' | 'aggressive' = 'aggressive',
+  /** The result will be translated: never drop or condense content, only remove noise. */
+  faithful = false,
+  /** Đông y lecture whose domain terms were already verified: keep them exactly. */
+  preserveDomainTerms = false
 ): Promise<string> {
   if (!GEMINI_API_KEY) {
     console.log('⚠️ No Gemini API key, returning raw transcript');
@@ -605,29 +1042,35 @@ async function enhanceTranscriptWithLLM(
   }
 
   try {
-    console.log('🔧 Enhancing transcript with LLM...');
+    const cleanInput = rawTranscript.replace(/\[TRANSCRIPTION_FAILED\]/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+    const segments = splitTextIntoSegments(cleanInput, segmentSizeFor(cleanInput, CLEANING_SEGMENT_CHARS));
+    console.log(`🔧 Enhancing transcript with LLM in ${language} (${segments.length} segment(s))...`);
 
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-
-    // Build prompt based on cleaning level
     const isAggressive = cleaningLevel === 'aggressive';
+    const fillerHint = getFillerWordsHint(language);
+    const chineseNote = isChineseLanguage(language)
+      ? '\n- Keep the same Chinese script as the input (Simplified stays Simplified, Traditional stays Traditional) and use full-width Chinese punctuation (，。？！).'
+      : '';
+    const domainTermsNote = preserveDomainTerms
+      ? '\n- This is a Traditional Chinese Medicine (中医) lecture. Its domain terms (herbs, formulas, acupoints, meridians, classics, syndromes) were already checked: keep every such term exactly as written, and keep all doses, numbers and units.'
+      : '';
 
-    const basePrompt = `You are a professional transcript editor. Clean and improve this raw audio transcript.
+    const faithfulAggressiveInstructions = `
+THOROUGH CLEANING (this transcript will be translated - it must stay COMPLETE) - Remove only:
+1. Filler words and hesitation sounds, e.g. ${fillerHint}
+2. False starts, stutters and immediate word repetitions
+3. Channel promotion boilerplate (like, subscribe) unless it's main content
 
-VIDEO CONTEXT:
-- Title: ${videoInfo.title}
-- Channel: ${videoInfo.uploader}
-- Duration: ${Math.floor(videoInfo.duration / 60)}:${(videoInfo.duration % 60).toString().padStart(2, '0')}
-
-RAW TRANSCRIPT:
-${rawTranscript}
-
-Please provide the cleaned transcript in ${language}.`;
+IMPROVEMENTS:
+- Fix grammar and spelling errors and obvious speech-recognition mistakes
+- Add proper punctuation and capitalization
+- Improve sentence structure while preserving meaning
+- Do NOT summarise, shorten or condense. Keep EVERY substantive sentence, including stories,
+  examples, anecdotes, greetings and questions/answers`;
 
     const aggressiveInstructions = `
 AGGRESSIVE CLEANING - Remove completely:
-1. Filler words: "um", "uh", "er", "ah", Vietnamese equivalents
+1. Filler words and hesitation sounds, e.g. ${fillerHint}
 2. Profanity and inappropriate language
 3. Unnecessary exclamations and interjections
 4. Irrelevant small talk (greetings, weather, personal matters)
@@ -635,7 +1078,7 @@ AGGRESSIVE CLEANING - Remove completely:
 6. Off-topic conversations unrelated to main subject
 
 IMPROVEMENTS:
-- Fix grammar and spelling errors
+- Fix grammar and spelling errors and obvious speech-recognition mistakes
 - Replace slang with proper language
 - Add proper punctuation and capitalization
 - Improve sentence structure while preserving meaning
@@ -644,27 +1087,45 @@ IMPROVEMENTS:
 
     const basicInstructions = `
 BASIC CLEANING:
-- Fix grammar and spelling errors
+- Fix grammar and spelling errors and obvious speech-recognition mistakes
 - Replace slang with proper language
 - Add proper punctuation and capitalization
-- Remove basic filler words: "um", "uh", "er"
+- Remove basic filler words, e.g. ${fillerHint}
 - Improve sentence structure while preserving meaning
-- Keep most of the original content`;
+- ${faithful ? 'Keep ALL of the original content - do not summarise or shorten' : 'Keep most of the original content'}`;
 
-    const prompt = basePrompt + (isAggressive ? aggressiveInstructions : basicInstructions);
+    let failedSegments = 0;
+    const cleanedSegments = await mapWithConcurrency(segments, SEGMENT_CONCURRENCY, async (segment, index) => {
+      const prompt = `You are a professional transcript editor. Clean and improve this raw speech-to-text transcript${segments.length > 1 ? ` (segment ${index + 1} of ${segments.length}; continue seamlessly, no introduction or conclusion)` : ''}.
 
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 4000,
+LANGUAGE (MANDATORY):
+- The transcript is mainly in ${language} and may contain passages in other languages (e.g. an interpreter).
+- Keep every sentence in the language it was spoken in. Do NOT translate anything (not into Vietnamese, not into English, not into ${language}).${chineseNote}${domainTermsNote}
+
+VIDEO CONTEXT:
+- Title: ${videoInfo.title}
+- Channel: ${videoInfo.uploader}
+- Duration: ${formatDuration(videoInfo.duration)}
+${isAggressive ? (faithful ? faithfulAggressiveInstructions : aggressiveInstructions) : basicInstructions}
+
+OUTPUT: Return ONLY the cleaned transcript text, in its original language(s) - no headings, labels, notes or commentary.
+
+RAW TRANSCRIPT:
+${segment}`;
+
+      try {
+        return await generateSegmentText(prompt, 0.2, `Cleaning segment ${index + 1}/${segments.length}`);
+      } catch (error: any) {
+        failedSegments++;
+        console.error(`❌ Cleaning segment ${index + 1}/${segments.length} failed, keeping raw text: ${error.message}`);
+        return segment;
       }
     });
 
-    const enhancedTranscript = result.response.text().trim();
-    console.log('✅ Transcript enhanced successfully');
+    const enhancedTranscript = cleanedSegments.join('\n\n').trim();
+    console.log(`✅ Transcript enhanced (${segments.length - failedSegments}/${segments.length} segment(s) cleaned)`);
 
-    return enhancedTranscript;
+    return enhancedTranscript || rawTranscript;
 
   } catch (error: any) {
     console.error('❌ Transcript enhancement failed:', error.message);
@@ -673,13 +1134,153 @@ BASIC CLEANING:
   }
 }
 
+interface TranscriptTranslationResult {
+  /** Full translation; undefined when no segment could be translated. */
+  text?: string;
+  partial: boolean;
+  totalSegments: number;
+  failedSegments: number;
+}
+
+const MAX_HAN_VIET_TERMS_PER_SEGMENT = 80;
+
+/** Glossary pairs whose Chinese term occurs in the segment; a term inside a longer listed one is skipped. */
+function hanVietTermsInSegment(
+  segment: string,
+  pairsLongestFirst: Array<{ zh: string; vi: string }>
+): Array<{ zh: string; vi: string }> {
+  const found: Array<{ zh: string; vi: string }> = [];
+  for (const pair of pairsLongestFirst) {
+    if (found.length >= MAX_HAN_VIET_TERMS_PER_SEGMENT) break;
+    if (!pair.zh || !segment.includes(pair.zh)) continue;
+    if (found.some(f => f.zh.includes(pair.zh))) continue;
+    found.push(pair);
+  }
+  return found;
+}
+
+/** Translator role + terminology rules for the content domain. */
+function buildTranslationDomainProfile(
+  domain: ContentDomain,
+  sourceName: string,
+  targetName: string,
+  chineseToVietnamese: boolean
+): { speciality: string; terminologyRule: string; notes: string } {
+  if (domain === 'tcm') {
+    return {
+      speciality: 'Traditional Chinese Medicine (中医 / Đông y) lectures',
+      terminologyRule: 'Keep Traditional Chinese Medicine terminology (herbs, formulas, acupoints, meridians, classics, syndromes, pulses, theory) accurate and consistent. Keep every dose, number and unit exactly.',
+      notes: chineseToVietnamese
+        ? `
+- Use the established Sino-Vietnamese (Hán-Việt) names used in Vietnamese Đông y, e.g. 当归 → Đương quy, 黄芪 → Hoàng kỳ, 脾虚 → Tỳ hư, 足三里 → Túc tam lý, 伤寒论 → Thương hàn luận, 黄帝内经 → Hoàng đế nội kinh, 气血 → khí huyết, 阴阳 → âm dương, 肝郁 → can uất, 辨证论治 → biện chứng luận trị.
+- Herb, formula, acupoint and book names: Hán-Việt reading only (capitalised as a name); do not add the Chinese characters or explanations.
+- Chinese personal names: customary Hán-Việt reading.`
+        : ''
+    };
+  }
+  if (domain === 'buddhist') {
+    return {
+      speciality: 'spoken lectures and Buddhist teachings',
+      terminologyRule: 'Keep Buddhist, philosophical and technical terminology accurate and consistent.',
+      notes: chineseToVietnamese
+        ? `
+- For Chinese Buddhist / religious vocabulary use the established Sino-Vietnamese (Hán-Việt) terms, e.g. 菩萨 → Bồ Tát, 般若 → Bát-nhã, 涅槃 → Niết bàn, 阿弥陀佛 → A Di Đà Phật, 因缘 → nhân duyên, 功德 → công đức, 法师 → Pháp sư, 念佛 → niệm Phật, 净土 → Tịnh độ, 烦恼 → phiền não, 众生 → chúng sinh, 经 → Kinh.
+- Chinese personal names, temple names and sutra titles: use their customary Hán-Việt reading.`
+        : ''
+    };
+  }
+  return {
+    speciality: `spoken ${sourceName} lectures`,
+    terminologyRule: `Keep technical terminology accurate and consistent; use the established ${targetName} term when one exists.`,
+    notes: chineseToVietnamese
+      ? `
+- Chinese personal names, place names, book titles and established technical terms: use their customary Sino-Vietnamese (Hán-Việt) reading.`
+      : ''
+  };
+}
+
 /**
- * Detect language from text content
+ * Faithfully translate a (cleaned) transcript into the target language, segment by
+ * segment on sentence boundaries. A segment that still fails after one retry is kept
+ * in the original language behind a marker, and the result is flagged as partial.
  */
-function detectLanguage(text: string): string {
-  // Basic language detection (check for Vietnamese-specific characters)
-  const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(text);
-  return hasVietnameseChars ? 'Vietnamese' : 'English';
+async function translateTranscriptWithLLM(
+  transcript: string,
+  sourceLanguageCode: string,
+  targetLanguage: string,
+  videoInfo: YtDlpVideoInfo,
+  domain: ContentDomain = 'generic'
+): Promise<TranscriptTranslationResult> {
+  const sourceName = getLanguageName(sourceLanguageCode);
+  const targetName = getLanguageName(targetLanguage);
+
+  if (!GEMINI_API_KEY) {
+    console.log('⚠️ No Gemini API key, skipping transcript translation');
+    return { text: undefined, partial: true, totalSegments: 0, failedSegments: 0 };
+  }
+
+  const segments = splitTextIntoSegments(transcript, segmentSizeFor(transcript, TRANSLATION_SEGMENT_CHARS));
+  if (segments.length === 0) {
+    return { text: undefined, partial: false, totalSegments: 0, failedSegments: 0 };
+  }
+  console.log(`🌍 Translating ${segments.length} segment(s) ${sourceName} → ${targetName}`);
+
+  const chineseToVietnamese = isChineseLanguage(sourceLanguageCode) && isSameLanguage(targetLanguage, 'vi');
+  // Hán-Việt readings for the Đông y terms that actually occur, per segment (keeps prompts small)
+  const hanVietPairs = domain === 'tcm' && chineseToVietnamese
+    ? getTcmHanVietPairs(scriptForLanguageCode(sourceLanguageCode)).sort((a, b) => b.zh.length - a.zh.length)
+    : [];
+  const domainProfile = buildTranslationDomainProfile(domain, sourceName, targetName, chineseToVietnamese);
+
+  const failedMarker = isSameLanguage(targetLanguage, 'vi')
+    ? '[⚠️ Đoạn này chưa dịch được – giữ nguyên văn]'
+    : '[⚠️ Translation failed for this segment – original text kept]';
+
+  let failedSegments = 0;
+  const translatedSegments = await mapWithConcurrency(segments, SEGMENT_CONCURRENCY, async (segment, index) => {
+    const segmentTerms = hanVietPairs.length > 0 ? hanVietTermsInSegment(segment, hanVietPairs) : [];
+    const termList = segmentTerms.length > 0
+      ? `\n- Đông y terms in this segment (use these Vietnamese readings): ${segmentTerms.map(p => `${p.zh} → ${p.vi}`).join('; ')}.`
+      : '';
+    const prompt = `You are a professional ${sourceName}-${targetName} translator specialised in ${domainProfile.speciality}.
+Translate the following ${sourceName} transcript${segments.length > 1 ? ` (segment ${index + 1} of ${segments.length} of one continuous talk)` : ''} into ${targetName}.
+
+VIDEO CONTEXT:
+- Title: ${videoInfo.title}
+- Channel: ${videoInfo.uploader}
+
+RULES:
+- Translate faithfully and COMPLETELY, sentence by sentence. Do NOT summarise, shorten, omit, or add explanations.
+- Preserve the meaning, tone and the speaker's voice; write natural, fluent ${targetName}.
+- Keep paragraph breaks.
+- ${domainProfile.terminologyRule}${domainProfile.notes}${termList}
+- If some sentences are already in ${targetName}, keep them as they are.
+- If a phrase looks like a speech-recognition error, translate the most plausible intended meaning; never invent content.
+- Output ONLY the ${targetName} translation - no headings, notes, the original text, or quotation marks around it.
+
+${sourceName.toUpperCase()} TEXT:
+${segment}`;
+
+    try {
+      return await generateSegmentText(prompt, 0.2, `Translation segment ${index + 1}/${segments.length}`);
+    } catch (error: any) {
+      failedSegments++;
+      console.error(`❌ Translation segment ${index + 1}/${segments.length} failed, keeping original text: ${error.message}`);
+      return `${failedMarker}\n${segment}`;
+    }
+  });
+
+  if (failedSegments === segments.length) {
+    console.error('❌ All translation segments failed');
+    return { text: undefined, partial: true, totalSegments: segments.length, failedSegments };
+  }
+
+  return {
+    text: translatedSegments.join('\n\n').trim(),
+    partial: failedSegments > 0,
+    totalSegments: segments.length,
+    failedSegments
+  };
 }
 
 /**
@@ -692,12 +1293,10 @@ export async function enhanceVideoMetadataAudioOnly(
   youtubeUrl?: string
 ): Promise<EnhancedVideoMetadata> {
   const startTime = Date.now();
-  const fullOptions: EnhancementOptions = {
-    ...DEFAULT_ENHANCEMENT_OPTIONS,
-    ...options,
+  const fullOptions = mergeEnhancementOptions(options, {
     useAudioTranscription: true,
     forceAudioTranscription: true
-  };
+  });
 
   console.log(`🎵 AUDIO-ONLY enhancement for: ${videoInfo.title}`);
   console.log(`📁 Video file: ${videoFilePath}`);
@@ -707,22 +1306,29 @@ export async function enhanceVideoMetadataAudioOnly(
   }
 
   try {
+    const ocr = await runBoardOcr(videoFilePath, fullOptions);
     console.log('🔥 FORCING audio transcription (no fallbacks)...');
     const audioResult = await tryAudioTranscriptionBasedEnhancement(
       videoInfo,
       videoFilePath,
       fullOptions,
-      youtubeUrl
+      youtubeUrl,
+      ocr
     );
 
     if (audioResult) {
       console.log('✅ Audio-only enhancement successful');
       return {
         ...audioResult,
+        ...boardFields(ocr),
         processingTime: Date.now() - startTime
       } as EnhancedVideoMetadata;
     } else {
-      throw new Error('Audio transcription failed - no fallback in audio-only mode');
+      const boardItems = ocr.board?.items?.length || 0;
+      throw new Error(
+        'Audio transcription failed - no fallback in audio-only mode' +
+        (boardItems > 0 ? ` (blackboard OCR had read ${boardItems} text item(s); use the standard mode to keep them)` : '')
+      );
     }
 
   } catch (error: any) {
@@ -767,7 +1373,7 @@ function createFallbackMetadata(
     keyTopics: [],
     contentTags: [],
     enhancementSource: 'metadata' as const,
-    language: detectLanguage(videoInfo.title + ' ' + videoInfo.description),
+    language: detectLanguageFromText(videoInfo.title + ' ' + videoInfo.description),
     confidence: 0.3,
     processingTime
   };

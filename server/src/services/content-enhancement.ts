@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { DocumentChunk } from './chunking';
+import { detectLanguageFromText } from './language-utils';
 
 // Load environment variables
 dotenv.config();
@@ -70,6 +71,8 @@ export interface EnhancementOptions {
   temperature?: number;
   maxOutputTokens?: number;
   domain?: string;
+  /** Language the content is written in (e.g. 'Chinese'); detected from the text when omitted. */
+  language?: string;
 }
 
 // Default enhancement options
@@ -107,7 +110,8 @@ export async function enhanceContent(
 
     // Basic language detection (check for Vietnamese-specific characters)
     const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(chunk.content);
-    const detectedLanguage = hasVietnameseChars ? 'Vietnamese' : 'English';
+    const detectedLanguage = fullOptions.language
+      || (hasVietnameseChars ? 'Vietnamese' : detectLanguageFromText(chunk.content)); // CJK-aware fallback
     console.log(`Detected language for chunk ${chunk.id}: ${detectedLanguage}`);
 
     // Initialize Gemini API
