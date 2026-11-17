@@ -12,7 +12,8 @@
  *    changed characters must lie inside that term (digits / units / Latin / punctuation
  *    never change),
  *  - a valid term (or a variant spelling of one) is never turned into another one,
- *  - at most ~3% of the characters may change overall,
+ *  - at most ~3% of the characters may change overall (with a small floor, default 6
+ *    changed characters, so a one- or two-sentence text can still get a few fixes),
  *  - edits are applied right-to-left by index so offsets never drift.
  * On any failure the original text is returned unchanged.
  */
@@ -56,9 +57,26 @@ export interface ApplyTermCorrectionsOptions {
   proposalRanges?: Array<[number, number] | undefined>;
   /** Max share of (non-whitespace) characters that may change, default 0.03. */
   maxChangeRatio?: number;
+  /**
+   * Floor of the change budget in changed characters, so short texts are not locked at 0
+   * (3% of 23 characters rounds down to 0). Default: env TERM_CORRECTION_MIN_BUDGET_CHARS or 6.
+   * Never more than a third of the text's characters.
+   */
+  minBudgetChars?: number;
 }
 
 const DEFAULT_MAX_CHANGE_RATIO = 0.03;
+/**
+ * Default floor of the change budget (changed characters). 6 covers a few genuine fixes in a
+ * one- or two-sentence text (少阳饼 -> 少阳病 + 修鞋铺满 -> 胸胁苦满 + 人生 -> 人参 = 1 + 3 + 1 = 5,
+ * or six one-character homophone fixes) and equals 3% of 200 characters, so it only matters
+ * for texts shorter than that; a 1200-character segment already has a budget of 36.
+ */
+const DEFAULT_MIN_BUDGET_CHARS = 6;
+/** Upper bound for TERM_CORRECTION_MIN_BUDGET_CHARS (a typo such as 600 must not lift the cap). */
+const MAX_MIN_BUDGET_CHARS = 20;
+/** The floor never lets more than this share of a (tiny) text's characters change. */
+const MAX_FLOOR_SHARE = 1 / 3;
 /** The quoted context must be at least this many characters longer than the original. */
 const MIN_CONTEXT_EXTRA_CHARS = 4;
 const MIN_TERM_CHARS = 2;
@@ -81,6 +99,28 @@ const VARIANT_FORMS = [
 
 const cpLength = (s: string): number => Array.from(s).length;
 const normaliseForMatch = (s: string): string => Array.from(s).filter(ch => !SKIP_FOR_MATCH_RE.test(ch)).join('');
+
+/** Budget floor from options / env TERM_CORRECTION_MIN_BUDGET_CHARS, clamped to [0, 20]. */
+function resolveMinBudgetChars(override?: number): number {
+  const fromEnv = process.env.TERM_CORRECTION_MIN_BUDGET_CHARS?.trim();
+  const raw = override ?? (fromEnv ? Number(fromEnv) : DEFAULT_MIN_BUDGET_CHARS);
+  if (!Number.isFinite(raw)) return DEFAULT_MIN_BUDGET_CHARS;
+  return Math.min(MAX_MIN_BUDGET_CHARS, Math.max(0, Math.floor(raw)));
+}
+
+/**
+ * Change budget (changed characters) for a text with `countable` non-whitespace characters:
+ * max(ratio share, floor), the floor limited to a third of the text. Computed once per
+ * applyTermCorrections call: correctDomainTerms calls it once for the whole transcript (its
+ * segments only scope where a proposal may apply), so the floor never adds up per segment and a
+ * long transcript keeps exactly the ratio budget (the default floor of 6 is at most 3% of any
+ * text of 200 characters or more).
+ */
+export function termCorrectionBudget(countable: number, maxChangeRatio: number, minBudgetChars?: number): number {
+  const byRatio = Math.floor(countable * maxChangeRatio);
+  const floor = Math.min(resolveMinBudgetChars(minBudgetChars), Math.floor(countable * MAX_FLOOR_SHARE));
+  return Math.max(byRatio, floor);
+}
 
 /**
  * Digits, Latin letters (g, mg) and punctuation of s, in order. Han unit characters
@@ -325,7 +365,7 @@ export function applyTermCorrections(
 
   // 3. Drop overlapping edits and enforce the overall change budget
   const countable = Array.from(text).filter(ch => !/\s/.test(ch)).length;
-  const budget = Math.floor(countable * maxChangeRatio);
+  const budget = termCorrectionBudget(countable, maxChangeRatio, options.minBudgetChars);
   let spent = 0;
   const accepted: Edit[] = [];
   const droppedForCap = new Set<number>();
