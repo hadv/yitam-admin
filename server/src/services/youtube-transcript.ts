@@ -1,5 +1,5 @@
 import { getTranscript } from 'youtube-transcript-api';
-import { createEmbedding } from './embedding';
+import { createEmbedding, EmbeddingError, isEmbeddingError } from './embedding';
 import { generateText } from './llm-client';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
@@ -14,6 +14,21 @@ import path from 'path';
 import os from 'os';
 
 const execAsync = promisify(exec);
+
+/**
+ * Embed one transcript chunk. Throws (no fallback vector): the caller aborts the whole video so
+ * nothing is stored, and the EmbeddingError message reaches the job / UI.
+ */
+async function embedTranscriptChunk(content: string, index: number, total: number): Promise<number[]> {
+  try {
+    return await createEmbedding(content);
+  } catch (error) {
+    if (isEmbeddingError(error)) {
+      throw new EmbeddingError(error.kind, `Chunk ${index + 1}/${total}: ${error.message}`, error.status);
+    }
+    throw error;
+  }
+}
 
 // Configuration for scraping behavior
 const SCRAPING_CONFIG = {
@@ -733,7 +748,7 @@ export const processYoutubeTranscript = async (
 
         // Create embedding for the chunk
         chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i + 1}/${totalChunks}`, i + 1);
-        const embedding = await createEmbedding(content);
+        const embedding = await embedTranscriptChunk(content, i, totalChunks);
 
         // Add a small delay to avoid overwhelming the API and prevent 503 errors
         await new Promise(resolve => setTimeout(resolve, 300)); // 300ms delay
@@ -819,7 +834,7 @@ export const processYoutubeTranscript = async (
 
         // Create embedding for the chunk
         chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i + 1}/${totalChunks}`, i + 1);
-        const embedding = await createEmbedding(content);
+        const embedding = await embedTranscriptChunk(content, i, totalChunks);
 
         // Add a small delay to avoid overwhelming the API and prevent 503 errors
         await new Promise(resolve => setTimeout(resolve, 300)); // 300ms delay

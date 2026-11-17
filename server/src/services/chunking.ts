@@ -1,6 +1,5 @@
-import { TaskType } from './embedding';
 import dotenv from 'dotenv';
-import { createEmbedding } from './embedding';
+import { createEmbedding, isEmbeddingError } from './embedding';
 import path from 'path';
 import { enhanceContent, EnhancementType } from './content-enhancement';
 import { generateText, isLlmBillingError, isLlmConfigured, llmModelFor, llmUnavailableReason } from './llm-client';
@@ -265,12 +264,9 @@ export async function chunkDocument(
         }
       }
       
-      // Generate embedding
+      // Generate embedding (throws EmbeddingError on failure: the whole document is then rejected
+      // instead of being stored with pages missing)
       const embedding = await createEmbedding(pageContent);
-      if (!embedding) {
-        console.error(`❌ Failed to generate embedding for page ${page.pageNumber}`);
-        continue;
-      }
       
       // Create the chunk object with default title and summary
       const chunk: DocumentChunk = {
@@ -294,6 +290,10 @@ export async function chunkDocument(
       
       console.log(`✅ Created chunk for page ${page.pageNumber} (${pageContent.length} chars)`);
     } catch (error) {
+      if (isEmbeddingError(error)) {
+        console.error(`❌ Embedding failed for page ${page.pageNumber}; aborting document: ${error.message}`);
+        throw error;
+      }
       console.error(`❌ Error processing page ${page.pageNumber}:`, error);
     }
   }

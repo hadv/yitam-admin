@@ -69,6 +69,12 @@ export interface EnhancedVideoMetadata {
   translationLanguage?: string; // Target language of translatedTranscript, e.g. 'vi'
   translationPartial?: boolean; // true if some translation segments failed
 
+  // Vector-store embedding of the audio transcript (only when embedAudioTranscript was requested)
+  // 'exists': nothing new was stored because a transcript for this video is already in the vector database
+  audioEmbeddingStatus?: 'embedded' | 'exists' | 'failed' | 'skipped';
+  audioEmbeddedChunks?: number; // chunks stored in the vector database
+  audioEmbeddingError?: string; // why nothing was stored (e.g. Gemini embedding key out of credits)
+
   // Chinese (Đông y) lecture pipeline
   correctedTranscript?: string; // Raw transcript with mis-recognised domain terms fixed (only set when something was fixed)
   termCorrections?: TermCorrection[]; // What was fixed (present whenever domain-term correction ran, may be empty)
@@ -552,6 +558,11 @@ async function tryAudioTranscriptionBasedEnhancement(
       : Math.min(0.95, transcriptionResult.confidence + 0.1);
 
     // Process audio transcript for embedding if enabled
+    // The transcript is the expensive deliverable, so an embedding failure does not fail the request;
+    // it is reported in the result (audioEmbeddingStatus / audioEmbeddingError) instead of swallowed.
+    let audioEmbeddingStatus: EnhancedVideoMetadata['audioEmbeddingStatus'];
+    let audioEmbeddedChunks: number | undefined;
+    let audioEmbeddingError: string | undefined;
     if (options.embedAudioTranscript) {
       try {
         console.log('🔗 Processing audio transcript for embedding...');
@@ -570,13 +581,27 @@ async function tryAudioTranscriptionBasedEnhancement(
               isTranslation: !!translatedTranscript
             }
           );
-          console.log(`✅ Audio transcript embedded: ${embeddingResult.totalChunks} chunks created`);
+          if (embeddingResult.alreadyExists || embeddingResult.totalChunks === 0) {
+            console.log(`ℹ️ Audio transcript not stored: a transcript for video ${videoId} is already in the vector database`);
+            audioEmbeddingStatus = 'exists';
+            audioEmbeddedChunks = 0;
+            audioEmbeddingError = embeddingResult.alreadyExists
+              ? 'A transcript for this video is already stored in the vector database, so the audio transcript was not added; the existing chunks were left unchanged (they may be YouTube captions, and older ones may still need `npm run repair-embeddings`).'
+              : 'The audio transcript produced no chunks, so nothing was stored in the vector database.';
+          } else {
+            console.log(`✅ Audio transcript embedded: ${embeddingResult.totalChunks} chunks created`);
+            audioEmbeddingStatus = 'embedded';
+            audioEmbeddedChunks = embeddingResult.totalChunks;
+          }
         } else {
           console.warn('⚠️ Could not extract video ID for embedding');
+          audioEmbeddingStatus = 'skipped';
+          audioEmbeddingError = 'Could not determine the YouTube video ID, so the transcript was not stored in the vector database.';
         }
-      } catch (embeddingError) {
-        console.error('❌ Failed to embed audio transcript:', embeddingError);
-        // Don't fail the entire process if embedding fails
+      } catch (embeddingError: any) {
+        console.error('❌ Failed to embed audio transcript (nothing was stored):', embeddingError);
+        audioEmbeddingStatus = 'failed';
+        audioEmbeddingError = embeddingError?.message || String(embeddingError);
       }
     }
 
@@ -607,7 +632,10 @@ async function tryAudioTranscriptionBasedEnhancement(
       boardTerms,
       boardOcrStatus: ocr?.status,
       transcriptionEngine: transcriptionResult.engine,
-      transcriptionModel: transcriptionResult.model
+      transcriptionModel: transcriptionResult.model,
+      audioEmbeddingStatus,
+      audioEmbeddedChunks,
+      audioEmbeddingError
     };
 
   } catch (error: any) {

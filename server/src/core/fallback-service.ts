@@ -57,8 +57,6 @@ export class FallbackService {
       if (this.serviceName === 'Qdrant') {
         console.warn(`Ensure ${this.serviceName} is running at the configured URL with proper credentials.`);
         console.warn('You can install Qdrant using Docker: docker run -p 6333:6333 qdrant/qdrant');
-      } else if (this.serviceName === 'Embedding') {
-        console.warn('Check your embedding service configuration and connectivity.');
       }
       
       this.warningFlags.set(errorKey, true);

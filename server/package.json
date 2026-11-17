@@ -14,7 +14,8 @@
     "dev:debug": "ts-node -r tsconfig-paths/register --inspect src/index.ts",
     "migrate": "ts-node -r tsconfig-paths/register src/scripts/migrate.ts",
     "backup": "ts-node -r tsconfig-paths/register src/scripts/backup.ts",
-    "compare-stt": "ts-node -r tsconfig-paths/register src/scripts/compare-stt.ts"
+    "compare-stt": "ts-node -r tsconfig-paths/register src/scripts/compare-stt.ts",
+    "repair-embeddings": "ts-node -r tsconfig-paths/register src/scripts/repair-embeddings.ts"
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
