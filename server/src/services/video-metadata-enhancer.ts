@@ -341,7 +341,7 @@ function withoutFailureMarkers(text: string): string {
 }
 
 type ContentDomain = 'tcm' | 'buddhist' | 'generic';
-const TCM_DOMAIN_RE = /đông y|y học cổ truyền|nội kinh|y tông|hải thượng|lê hữu trác|y quán|ni hải hạ|nghê hải hạ|倪海厦|倪海廈|kinh phương|thương hàn|kim quỹ|bản thảo|âm dương|ngũ hành|khí công|châm cứu|tcm|traditional chinese medicine|中医|中醫/i;
+const TCM_DOMAIN_RE = /đông y|y học cổ truyền|nội kinh|y tông|hải thượng|lê hữu trác|y quán|ni hải hạ|nghê hải hạ|倪海厦|倪海廈|bài thuốc cổ phương|kinh phương|thương hàn|kim quỹ|dược liệu|bản thảo|âm dương|ngũ hành|khí công|châm cứu|tcm|traditional chinese medicine|中医|中醫/i;
 const BUDDHIST_DOMAIN_RE = /phật|thiền|buddh|thích nhất hạnh|viên minh|佛|禅|禪/i;
 
 /**
