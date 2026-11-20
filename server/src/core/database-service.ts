@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import { FallbackService } from './fallback-service';
 import { DocumentChunk } from '../services/chunking';
 import { v4 as uuidv4 } from 'uuid';
+import { assertValidEmbedding } from '../services/embedding';
 
 // Load environment variables
 dotenv.config();
@@ -143,6 +144,12 @@ export class DatabaseService {
 
   // Add documents to knowledge base
   public async addDocumentChunks(documents: DocumentChunk[]): Promise<void> {
+    // Validate BEFORE the fallback wrapper, so a bad vector is rejected (not silently kept in memory)
+    // and nothing of the batch is written when any vector is unusable
+    for (const doc of documents) {
+      assertValidEmbedding(doc.embedding, `Chunk ${doc.id}`, VECTOR_SIZE);
+    }
+
     return this.fallbackService.withFallback(
       'addDocumentChunks',
       // Fallback function
@@ -943,6 +950,13 @@ export class DatabaseService {
     title?: string;
     summary?: string;
   }>): Promise<number> {
+    // Validate BEFORE the fallback wrapper: a bad replacement vector must fail the whole update
+    for (const update of updates) {
+      if (update.embedding !== undefined) {
+        assertValidEmbedding(update.embedding, `Chunk ${update.chunkId}`, VECTOR_SIZE);
+      }
+    }
+
     return this.fallbackService.withFallback(
       'updateChunks',
       // Fallback function

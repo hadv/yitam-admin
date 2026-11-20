@@ -1,6 +1,6 @@
 import { getTranscript } from 'youtube-transcript-api';
-import { createEmbedding } from './embedding';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createEmbedding, EmbeddingError, isEmbeddingError } from './embedding';
+import { generateText } from './llm-client';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { enhanceContent, EnhancementType } from './content-enhancement';
@@ -14,6 +14,21 @@ import path from 'path';
 import os from 'os';
 
 const execAsync = promisify(exec);
+
+/**
+ * Embed one transcript chunk. Throws (no fallback vector): the caller aborts the whole video so
+ * nothing is stored, and the EmbeddingError message reaches the job / UI.
+ */
+async function embedTranscriptChunk(content: string, index: number, total: number): Promise<number[]> {
+  try {
+    return await createEmbedding(content);
+  } catch (error) {
+    if (isEmbeddingError(error)) {
+      throw new EmbeddingError(error.kind, `Chunk ${index + 1}/${total}: ${error.message}`, error.status);
+    }
+    throw error;
+  }
+}
 
 // Configuration for scraping behavior
 const SCRAPING_CONFIG = {
@@ -733,7 +748,7 @@ export const processYoutubeTranscript = async (
 
         // Create embedding for the chunk
         chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i + 1}/${totalChunks}`, i + 1);
-        const embedding = await createEmbedding(content);
+        const embedding = await embedTranscriptChunk(content, i, totalChunks);
 
         // Add a small delay to avoid overwhelming the API and prevent 503 errors
         await new Promise(resolve => setTimeout(resolve, 300)); // 300ms delay
@@ -819,7 +834,7 @@ export const processYoutubeTranscript = async (
 
         // Create embedding for the chunk
         chunkProgressUpdate('embedding_generation', `Generating embedding for chunk ${i + 1}/${totalChunks}`, i + 1);
-        const embedding = await createEmbedding(content);
+        const embedding = await embedTranscriptChunk(content, i, totalChunks);
 
         // Add a small delay to avoid overwhelming the API and prevent 503 errors
         await new Promise(resolve => setTimeout(resolve, 300)); // 300ms delay
@@ -2021,10 +2036,6 @@ async function generateTitleAndSummary(
   language: string = 'English'
 ): Promise<{ title: string; summary: string }> {
   try {
-    // Initialize Gemini API
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-
     // Extract a shorter sample of the content for the title/summary generation
     // to avoid token limits (first 1500 chars should be enough for context)
     const contentSample = content.length > 1500 ? content.substring(0, 1500) + "..." : content;
@@ -2048,16 +2059,13 @@ Format your response exactly like this:
 TITLE: [your generated title in ${language}]
 SUMMARY: [your generated summary in ${language}]`;
 
-    // Call Gemini API to generate title and summary
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 1000,
-      }
+    // Call the LLM (Qwen, fast model) to generate title and summary
+    const responseText = await generateText({
+      prompt,
+      task: 'fast',
+      temperature: 0.2,
+      maxOutputTokens: 1000
     });
-
-    const responseText = result.response.text().trim();
 
     // Parse the response to extract title and summary
     let title = `Part ${chunkNumber} of ${videoTitle}`;

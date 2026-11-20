@@ -1,5 +1,5 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
+import { generateChat, generateText, isLlmConfigured, llmModelFor, LlmError } from './llm-client';
 import { YtDlpVideoInfo } from './yt-dlp-downloader';
 import { getTranscriptFromPublicApi, getVideoDetails } from './youtube-transcript';
 import {
@@ -31,10 +31,9 @@ import {
 // Load environment variables
 dotenv.config();
 
-// Gemini API key for generating enhanced content
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-if (!GEMINI_API_KEY) {
-  console.warn('GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.');
+// Generative LLM (Alibaba Cloud Model Studio / Qwen) for metadata, cleaning and translation
+if (!isLlmConfigured('fast')) {
+  console.warn('DASHSCOPE_API_KEY is not set (or ALIBABA_LLM_ENABLED=false): LLM metadata, transcript cleaning and translation are disabled.');
 }
 
 /**
@@ -69,6 +68,12 @@ export interface EnhancedVideoMetadata {
   translatedTranscript?: string; // Translation of enhancedTranscript (only when original != target language)
   translationLanguage?: string; // Target language of translatedTranscript, e.g. 'vi'
   translationPartial?: boolean; // true if some translation segments failed
+
+  // Vector-store embedding of the audio transcript (only when embedAudioTranscript was requested)
+  // 'exists': nothing new was stored because a transcript for this video is already in the vector database
+  audioEmbeddingStatus?: 'embedded' | 'exists' | 'failed' | 'skipped';
+  audioEmbeddedChunks?: number; // chunks stored in the vector database
+  audioEmbeddingError?: string; // why nothing was stored (e.g. Gemini embedding key out of credits)
 
   // Chinese (Đông y) lecture pipeline
   correctedTranscript?: string; // Raw transcript with mis-recognised domain terms fixed (only set when something was fixed)
@@ -155,14 +160,15 @@ const TRANSLATION_SEGMENT_CHARS = { cjk: 1500, other: 3000 };
 const SEGMENT_MAX_OUTPUT_TOKENS = 8192;
 const SEGMENT_CONCURRENCY = 3;
 const SEGMENT_RETRY_DELAY_MS = 1500;
-// Rate-limit / overload errors (429, 503) need real backoff: a quick retry lands in the same quota window
-const SEGMENT_TRANSIENT_MAX_ATTEMPTS = 6;
+// Rate-limit / overload errors (429, 503) need real backoff: a quick retry lands in the same quota window.
+// llm-client already retries each request (ALIBABA_LLM_MAX_RETRIES, honouring Retry-After); these outer
+// attempts add a longer wait on top for a quota window that outlasts those retries.
+const SEGMENT_TRANSIENT_MAX_ATTEMPTS = 3;
 const SEGMENT_TRANSIENT_BASE_DELAY_MS = 4000;
 const SEGMENT_TRANSIENT_MAX_DELAY_MS = 60000;
 // Translate a transcript whose dominant language is the target when this share of it is CJK
 // (e.g. a Chinese master with a Vietnamese interpreter where Vietnamese narrowly won detection)
 const MIXED_CJK_TRANSLATION_THRESHOLD = 0.15;
-const GEMINI_MODEL = 'gemini-2.5-flash-lite';
 
 /**
  * Merge caller options over defaults. Keys explicitly set to `undefined` (as the
@@ -206,7 +212,7 @@ export async function enhanceVideoMetadata(
     audioTranscriptionAvailable: isAudioTranscriptionAvailable()
   });
 
-  // Blackboard OCR needs only the video file + Gemini, not Speech-to-Text: run it up front so
+  // Blackboard OCR needs only the video file + the vision LLM, not Speech-to-Text: run it up front so
   // its result reaches the client whichever enhancement path produces the metadata.
   let ocr: BoardOcrOutcome | undefined;
   try {
@@ -529,7 +535,7 @@ async function tryAudioTranscriptionBasedEnhancement(
 
     // 6. Metadata in the target language, from the translation when available
     const metadataSource = translatedTranscript || enhancedForDownstream;
-    // A metadata failure (Gemini quota / billing / bad JSON) must not throw away the transcript,
+    // A metadata failure (LLM quota / billing / bad output) must not throw away the transcript,
     // which is the expensive part and the main deliverable: fall back to the video's own metadata.
     let enhanced: Partial<EnhancedVideoMetadata> = {};
     try {
@@ -552,6 +558,11 @@ async function tryAudioTranscriptionBasedEnhancement(
       : Math.min(0.95, transcriptionResult.confidence + 0.1);
 
     // Process audio transcript for embedding if enabled
+    // The transcript is the expensive deliverable, so an embedding failure does not fail the request;
+    // it is reported in the result (audioEmbeddingStatus / audioEmbeddingError) instead of swallowed.
+    let audioEmbeddingStatus: EnhancedVideoMetadata['audioEmbeddingStatus'];
+    let audioEmbeddedChunks: number | undefined;
+    let audioEmbeddingError: string | undefined;
     if (options.embedAudioTranscript) {
       try {
         console.log('🔗 Processing audio transcript for embedding...');
@@ -570,13 +581,27 @@ async function tryAudioTranscriptionBasedEnhancement(
               isTranslation: !!translatedTranscript
             }
           );
-          console.log(`✅ Audio transcript embedded: ${embeddingResult.totalChunks} chunks created`);
+          if (embeddingResult.alreadyExists || embeddingResult.totalChunks === 0) {
+            console.log(`ℹ️ Audio transcript not stored: a transcript for video ${videoId} is already in the vector database`);
+            audioEmbeddingStatus = 'exists';
+            audioEmbeddedChunks = 0;
+            audioEmbeddingError = embeddingResult.alreadyExists
+              ? 'A transcript for this video is already stored in the vector database, so the audio transcript was not added; the existing chunks were left unchanged (they may be YouTube captions, and older ones may still need `npm run repair-embeddings`).'
+              : 'The audio transcript produced no chunks, so nothing was stored in the vector database.';
+          } else {
+            console.log(`✅ Audio transcript embedded: ${embeddingResult.totalChunks} chunks created`);
+            audioEmbeddingStatus = 'embedded';
+            audioEmbeddedChunks = embeddingResult.totalChunks;
+          }
         } else {
           console.warn('⚠️ Could not extract video ID for embedding');
+          audioEmbeddingStatus = 'skipped';
+          audioEmbeddingError = 'Could not determine the YouTube video ID, so the transcript was not stored in the vector database.';
         }
-      } catch (embeddingError) {
-        console.error('❌ Failed to embed audio transcript:', embeddingError);
-        // Don't fail the entire process if embedding fails
+      } catch (embeddingError: any) {
+        console.error('❌ Failed to embed audio transcript (nothing was stored):', embeddingError);
+        audioEmbeddingStatus = 'failed';
+        audioEmbeddingError = embeddingError?.message || String(embeddingError);
       }
     }
 
@@ -607,7 +632,10 @@ async function tryAudioTranscriptionBasedEnhancement(
       boardTerms,
       boardOcrStatus: ocr?.status,
       transcriptionEngine: transcriptionResult.engine,
-      transcriptionModel: transcriptionResult.model
+      transcriptionModel: transcriptionResult.model,
+      audioEmbeddingStatus,
+      audioEmbeddedChunks,
+      audioEmbeddingError
     };
 
   } catch (error: any) {
@@ -720,12 +748,9 @@ async function generateTranscriptBasedMetadata(
   options: EnhancementOptions,
   transcriptLanguage?: string // Language the transcript is written in, when it differs from `language`
 ): Promise<Partial<EnhancedVideoMetadata>> {
-  if (!GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is required for transcript-based enhancement');
+  if (!isLlmConfigured('fast')) {
+    throw new Error('DASHSCOPE_API_KEY is required for transcript-based enhancement');
   }
-
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
   // Truncate transcript if too long (keep first 8000 chars for context)
   const transcriptSample = transcript.length > 8000 
@@ -740,15 +765,12 @@ async function generateTranscriptBasedMetadata(
     transcriptLanguage
   );
 
-  const result = await model.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: options.temperature,
-      maxOutputTokens: options.maxOutputTokens,
-    }
+  const responseText = await generateText({
+    prompt,
+    task: 'fast',
+    temperature: options.temperature,
+    maxOutputTokens: options.maxOutputTokens
   });
-
-  const responseText = result.response.text().trim();
   return parseEnhancementResponse(responseText, 'transcript');
 }
 
@@ -760,24 +782,18 @@ async function generateMetadataBasedEnhancement(
   language: string,
   options: EnhancementOptions
 ): Promise<Partial<EnhancedVideoMetadata>> {
-  if (!GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is required for metadata-based enhancement');
+  if (!isLlmConfigured('fast')) {
+    throw new Error('DASHSCOPE_API_KEY is required for metadata-based enhancement');
   }
-
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
   const prompt = buildMetadataEnhancementPrompt(videoInfo, language, options);
 
-  const result = await model.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: options.temperature,
-      maxOutputTokens: options.maxOutputTokens,
-    }
+  const responseText = await generateText({
+    prompt,
+    task: 'fast',
+    temperature: options.temperature,
+    maxOutputTokens: options.maxOutputTokens
   });
-
-  const responseText = result.response.text().trim();
   return parseEnhancementResponse(responseText, 'metadata');
 }
 
@@ -952,64 +968,81 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-/** 429 / 503 / overload / network errors that are worth retrying with backoff. */
-function isTransientGeminiError(error: any): boolean {
+/**
+ * Rate-limit / overload errors (429 / 5xx) that outlasted llm-client's own retries and are worth one
+ * more round after a longer backoff. Other retryable LlmErrors (timeout, network, empty or non-JSON
+ * reply) have already been retried by llm-client, so they are not treated as transient here.
+ */
+function isTransientLlmError(error: any): boolean {
+  if (error instanceof LlmError) {
+    const status = Number(error.status);
+    return error.retryable && (status === 429 || status >= 500 || /throttl|ServiceUnavailable|overload/i.test(error.code || ''));
+  }
   const message = String(error?.message || '');
   const status = Number(error?.status ?? error?.code);
-  // 402 = prepaid credits depleted / billing: waiting does not help
-  if (status === 402 || /"code"\s*:\s*402|credits are depleted/i.test(message)) return false;
-  return status === 429 || status === 500 || status === 503 ||
-    /\b(429|500|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|Too Many Requests|Service Unavailable|overloaded|quota|ECONNRESET|ETIMEDOUT|fetch failed/i.test(message);
-}
-
-/** RetryInfo.retryDelay (e.g. "27s") from a Gemini error, in ms. */
-function geminiRetryDelayMs(error: any): number | undefined {
-  const match = String(error?.message || '').match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
-  return match ? Math.round(parseFloat(match[1]) * 1000) : undefined;
+  return status === 408 || status === 429 || status >= 500 ||
+    /\b(408|429|500|502|503|504)\b|Throttling|Too Many Requests|Service Unavailable|overloaded|ECONNRESET|ETIMEDOUT|fetch failed/i.test(message);
 }
 
 /**
- * One Gemini call for a transcript segment. Ordinary errors are retried once after a
- * short delay; rate-limit / overload errors (429, 503) are retried with exponential
- * backoff + jitter, honouring Gemini's retryDelay. A truncated (MAX_TOKENS) or empty
- * answer counts as a failure so we never keep half a segment silently.
+ * Errors a retry cannot fix: billing (402 / Arrearage / credits depleted), invalid key (401),
+ * permission (403), unknown model (404), bad request (400), content filter, oversized input,
+ * LLM not configured. llm-client marks all of these non-retryable.
+ */
+function isFatalLlmError(error: any): boolean {
+  return error instanceof LlmError && !error.retryable;
+}
+
+/**
+ * Retryable LlmErrors other than 429 / 5xx (timeout, network, empty or non-JSON reply): llm-client
+ * already made ALIBABA_LLM_MAX_RETRIES + 1 attempts, so another outer round would only multiply
+ * billed requests (and, for timeouts, minutes of waiting).
+ */
+function isLlmRetriesExhausted(error: any): boolean {
+  return error instanceof LlmError && error.retryable && !isTransientLlmError(error);
+}
+
+/**
+ * One LLM call for a transcript segment. llm-client already retries each request with backoff
+ * (honouring Retry-After). On top of that, an ordinary failure (e.g. truncated output) is retried
+ * once after a short delay, and a rate-limit / overload error (429 / 5xx) that outlasted the client
+ * retries is retried with a longer exponential backoff + jitter. Billing / auth / bad-request errors,
+ * and timeouts / empty replies that llm-client already retried, stop at once. A truncated (finish_reason=length) or empty answer counts as a failure so we never keep
+ * half a segment silently.
  */
 async function generateSegmentText(prompt: string, temperature: number, label: string): Promise<string> {
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
   let lastError: any;
   let ordinaryFailures = 0;
   for (let attempt = 1; attempt <= SEGMENT_TRANSIENT_MAX_ATTEMPTS; attempt++) {
     try {
-      const result = await model.generateContent({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature,
-          maxOutputTokens: SEGMENT_MAX_OUTPUT_TOKENS,
-        }
+      const result = await generateChat({
+        prompt,
+        task: 'fast',
+        temperature,
+        maxOutputTokens: SEGMENT_MAX_OUTPUT_TOKENS
       });
-      const finishReason = String(result.response.candidates?.[0]?.finishReason || '');
-      if (finishReason === 'MAX_TOKENS') {
-        throw new Error('output truncated (MAX_TOKENS)');
+      const finishReason = String(result.finishReason || '');
+      if (finishReason === 'length') {
+        throw new Error('output truncated (finish_reason=length)');
       }
-      const text = result.response.text().trim();
+      const text = result.text.trim();
       if (!text) {
-        throw new Error(`empty response${finishReason ? ` (finishReason=${finishReason})` : ''}`);
+        throw new Error(`empty response${finishReason ? ` (finish_reason=${finishReason})` : ''}`);
       }
       return text;
     } catch (error: any) {
       lastError = error;
-      const transient = isTransientGeminiError(error);
+      const fatal = isFatalLlmError(error);
+      const exhausted = !fatal && isLlmRetriesExhausted(error);
+      const transient = !fatal && !exhausted && isTransientLlmError(error);
       if (!transient) ordinaryFailures++;
-      const canRetry = attempt < SEGMENT_TRANSIENT_MAX_ATTEMPTS && (transient || ordinaryFailures < 2);
-      console.warn(`⚠️ ${label} attempt ${attempt} failed${transient ? ' (rate limit / unavailable)' : ''}: ${error.message}`);
+      const canRetry = !fatal && !exhausted && attempt < SEGMENT_TRANSIENT_MAX_ATTEMPTS && (transient || ordinaryFailures < 2);
+      console.warn(`⚠️ ${label} attempt ${attempt} failed${transient ? ' (rate limit / unavailable)' : fatal ? ' (not retryable)' : exhausted ? ' (already retried by llm-client)' : ''}: ${error.message}`);
       if (!canRetry) break;
       let delay = SEGMENT_RETRY_DELAY_MS;
       if (transient) {
         const backoff = Math.min(SEGMENT_TRANSIENT_MAX_DELAY_MS, SEGMENT_TRANSIENT_BASE_DELAY_MS * Math.pow(2, attempt - 1));
-        const hinted = geminiRetryDelayMs(error);
-        delay = Math.min(SEGMENT_TRANSIENT_MAX_DELAY_MS, Math.max(backoff, hinted ?? 0)) + Math.floor(Math.random() * 1000);
+        delay = backoff + Math.floor(Math.random() * 1000);
         console.log(`⏳ ${label}: retrying in ${(delay / 1000).toFixed(1)}s`);
       }
       await new Promise(resolve => setTimeout(resolve, delay));
@@ -1058,15 +1091,15 @@ async function enhanceTranscriptWithLLM(
   /** Đông y lecture whose domain terms were already verified: keep them exactly. */
   preserveDomainTerms = false
 ): Promise<string> {
-  if (!GEMINI_API_KEY) {
-    console.log('⚠️ No Gemini API key, returning raw transcript');
+  if (!isLlmConfigured('fast')) {
+    console.log('⚠️ LLM not configured (DASHSCOPE_API_KEY), returning raw transcript');
     return rawTranscript;
   }
 
   try {
     const cleanInput = rawTranscript.replace(/\[TRANSCRIPTION_FAILED\]/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
     const segments = splitTextIntoSegments(cleanInput, segmentSizeFor(cleanInput, CLEANING_SEGMENT_CHARS));
-    console.log(`🔧 Enhancing transcript with LLM in ${language} (${segments.length} segment(s))...`);
+    console.log(`🔧 Enhancing transcript with ${llmModelFor('fast')} in ${language} (${segments.length} segment(s))...`);
 
     const isAggressive = cleaningLevel === 'aggressive';
     const fillerHint = getFillerWordsHint(language);
@@ -1236,8 +1269,8 @@ async function translateTranscriptWithLLM(
   const sourceName = getLanguageName(sourceLanguageCode);
   const targetName = getLanguageName(targetLanguage);
 
-  if (!GEMINI_API_KEY) {
-    console.log('⚠️ No Gemini API key, skipping transcript translation');
+  if (!isLlmConfigured('fast')) {
+    console.log('⚠️ LLM not configured (DASHSCOPE_API_KEY), skipping transcript translation');
     return { text: undefined, partial: true, totalSegments: 0, failedSegments: 0 };
   }
 
@@ -1245,7 +1278,7 @@ async function translateTranscriptWithLLM(
   if (segments.length === 0) {
     return { text: undefined, partial: false, totalSegments: 0, failedSegments: 0 };
   }
-  console.log(`🌍 Translating ${segments.length} segment(s) ${sourceName} → ${targetName}`);
+  console.log(`🌍 Translating ${segments.length} segment(s) ${sourceName} → ${targetName} with ${llmModelFor('fast')}`);
 
   const chineseToVietnamese = isChineseLanguage(sourceLanguageCode) && isSameLanguage(targetLanguage, 'vi');
   // Hán-Việt readings for the Đông y terms that actually occur, per segment (keeps prompts small)

@@ -4,6 +4,7 @@ import {
   CorrectionRule, 
   DEFAULT_BUDDHIST_CORRECTIONS 
 } from '../services/transcript-correction';
+import { isEmbeddingError } from '../services/embedding';
 
 // Create a singleton instance of the correction service
 const correctionService = new TranscriptCorrectionService();
@@ -51,6 +52,14 @@ export const correctAllTranscripts = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error correcting transcripts:', error);
+    if (isEmbeddingError(error)) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        message: `Failed to correct transcripts: could not re-create embeddings. ${error.message}`,
+        error: error.message,
+        code: `EMBEDDING_${error.kind.toUpperCase()}`
+      });
+    }
     res.status(500).json({
       success: false,
       message: 'Failed to correct transcripts',
@@ -109,6 +118,14 @@ export const correctYoutubeTranscripts = async (req: Request, res: Response) => 
     });
   } catch (error) {
     console.error('Error correcting YouTube transcripts:', error);
+    if (isEmbeddingError(error)) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        message: `Failed to correct YouTube transcripts: could not re-create embeddings. ${error.message}`,
+        error: error.message,
+        code: `EMBEDDING_${error.kind.toUpperCase()}`
+      });
+    }
     res.status(500).json({
       success: false,
       message: 'Failed to correct YouTube transcripts',

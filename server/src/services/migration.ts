@@ -1,6 +1,6 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { DatabaseService, dbService, SearchResult } from '../core/database-service';
-import { createEmbedding, TaskType } from './embedding';
+import { createEmbedding, embeddingTextForPayload, EmbeddingError, isEmbeddingError, isFatalEmbeddingError, TaskType } from './embedding';
 import { DocumentChunk } from './chunking';
 import dotenv from 'dotenv';
 
@@ -11,6 +11,28 @@ const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 const COLLECTION_NAME = process.env.COLLECTION_NAME || 'knowledge_base';
 const NEW_VECTOR_SIZE = parseInt(process.env.GEMINI_VECTOR_SIZE || '768', 10);
+// Parallel Gemini embedding calls while re-embedding (kept low so per-minute rate limits are not hit)
+const EMBED_CONCURRENCY = Math.min(16, Math.max(1, parseInt(process.env.MIGRATION_EMBED_CONCURRENCY || '4', 10) || 4));
+
+/** Run `fn` over `items` with at most `limit` calls in flight; results keep the input order. */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failure: unknown;
+  const worker = async () => {
+    while (failure === undefined && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await fn(items[index]);
+      } catch (error) {
+        failure = error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure !== undefined) throw failure;
+  return results;
+}
 
 export interface MigrationOptions {
   preserveData?: boolean;
@@ -143,6 +165,11 @@ export class MigrationService {
       console.log(`   Backup collection: ${backupCollectionName}`);
     }
 
+    // Set once the original points are in the backup collection: from then on a failure needs a rollback hint
+    let backupReady = false;
+    const rollbackHint = () =>
+      ` The original data is in backup collection '${backupCollectionName}' (npm run migrate rollback ${backupCollectionName}).`;
+
     try {
       // Check current state
       const migrationCheck = await this.checkMigrationNeeded();
@@ -186,6 +213,22 @@ export class MigrationService {
 
       // Strategy 1: Preserve data by re-embedding
       if (preserveData) {
+        // Check that embeddings actually work BEFORE creating / deleting any collection: with a dead
+        // GEMINI_API_KEY every document would fail and the in-place strategy would leave an empty collection.
+        try {
+          await createEmbedding('embedding availability check', TaskType.RETRIEVAL_DOCUMENT);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error('❌ Embedding pre-flight check failed, no collection was changed:', message);
+          return {
+            success: false,
+            message: `Migration not started (no collection was changed): embeddings are unavailable. ${message}`,
+            oldVectorSize: migrationCheck.currentSize,
+            newVectorSize: NEW_VECTOR_SIZE,
+            errors: [message]
+          };
+        }
+
         if (isCreatingNewCollection) {
           console.log(`📦 Creating new collection '${targetCollection}' and re-embedding documents...`);
 
@@ -217,18 +260,38 @@ export class MigrationService {
         } else {
           console.log('📦 Creating backup and re-embedding documents...');
 
-          // Create backup collection
-          await this.createBackupCollection(backupCollectionName, migrationCheck.currentSize || 384);
-
           // Export existing data
           const existingDocuments = await this.exportAllDocuments();
           console.log(`📄 Found ${existingDocuments.length} documents to migrate`);
 
+          // The main collection is deleted and rebuilt, so every point must be re-embeddable: points
+          // without text can no longer be stored (there is no fallback vector) and would be dropped.
+          const unembeddable = existingDocuments
+            .filter(doc => !embeddingTextForPayload((doc.payload as any) || {}).trim())
+            .map(doc => String(doc.id));
+          if (unembeddable.length > 0) {
+            const sample = unembeddable.slice(0, 20).join(', ');
+            const message = `${unembeddable.length} point(s) in '${COLLECTION_NAME}' have no text to embed (ids: ${sample}${unembeddable.length > 20 ? ', ...' : ''}); ` +
+              `an in-place migration would drop them. Remove or fix those points first, or migrate into a new collection (newCollectionName) instead.`;
+            console.error(`❌ Migration not started (no collection was changed): ${message}`);
+            return {
+              success: false,
+              message: `Migration not started (no collection was changed): ${message}`,
+              oldVectorSize: migrationCheck.currentSize,
+              newVectorSize: NEW_VECTOR_SIZE,
+              errors: [message]
+            };
+          }
+
+          // Create backup collection
+          await this.createBackupCollection(backupCollectionName, migrationCheck.currentSize || 384);
+
           if (existingDocuments.length > 0) {
             // Copy to backup
             await this.copyDocumentsToBackup(existingDocuments, backupCollectionName);
+            backupReady = true;
 
-            // Re-embed and migrate documents
+            // Re-embed and migrate documents (stops at the first document that cannot be re-embedded)
             documentsProcessed = await this.reEmbedDocuments(existingDocuments, batchSize, errors);
           }
         }
@@ -239,7 +302,7 @@ export class MigrationService {
 
         const completedMessage = isCreatingNewCollection
           ? `Migration to new collection completed with ${errors.length} errors`
-          : `Migration completed with ${errors.length} errors`;
+          : `Migration completed with ${errors.length} errors.${backupReady ? rollbackHint() : ''}`;
 
         return {
           success: errors.length === 0,
@@ -267,10 +330,12 @@ export class MigrationService {
 
     } catch (error) {
       console.error('Migration failed:', error);
+      const reason = error instanceof Error ? error.message : String(error);
       return {
         success: false,
-        message: `Migration failed: ${error}`,
-        errors: [String(error)]
+        message: `Migration failed: ${reason}${backupReady ? rollbackHint() : ''}`,
+        backupCollectionName: preserveData && !isCreatingNewCollection ? backupCollectionName : undefined,
+        errors: [reason]
       };
     }
   }
@@ -350,7 +415,9 @@ export class MigrationService {
   }
 
   /**
-   * Re-embed documents with new embedding model and store in recreated collection
+   * Re-embed documents with new embedding model and store in recreated collection.
+   * Strict: the main collection has just been rebuilt, so any document that cannot be re-embedded
+   * (or stored) stops the migration with an error instead of being silently dropped.
    */
   private async reEmbedDocuments(documents: any[], batchSize: number, errors: string[]): Promise<number> {
     console.log('🔄 Recreating collection with new dimensions...');
@@ -358,53 +425,8 @@ export class MigrationService {
     // Delete and recreate the main collection
     await this.recreateCollection();
 
-    console.log('🧠 Re-embedding documents with new model...');
-    let processed = 0;
-
-    for (let i = 0; i < documents.length; i += batchSize) {
-      const batch = documents.slice(i, i + batchSize);
-
-      try {
-        const reEmbeddedBatch = await Promise.all(
-          batch.map(async (doc) => {
-            try {
-              const payload = doc.payload as any;
-              const content = payload.content || '';
-
-              // Generate new embedding
-              const newEmbedding = await createEmbedding(content, TaskType.RETRIEVAL_DOCUMENT);
-
-              return {
-                id: doc.id,
-                vector: newEmbedding,
-                payload: payload
-              };
-            } catch (error) {
-              errors.push(`Failed to re-embed document ${doc.id}: ${error}`);
-              return null;
-            }
-          })
-        );
-
-        // Filter out failed embeddings
-        const validDocuments = reEmbeddedBatch.filter(doc => doc !== null);
-
-        if (validDocuments.length > 0) {
-          await this.qdrantClient.upsert(COLLECTION_NAME, {
-            wait: true,
-            points: validDocuments
-          });
-          processed += validDocuments.length;
-        }
-
-        console.log(`   Processed ${Math.min(i + batchSize, documents.length)}/${documents.length} documents`);
-
-      } catch (error) {
-        errors.push(`Failed to process batch ${i}-${i + batchSize}: ${error}`);
-      }
-    }
-
-    return processed;
+    console.log(`🧠 Re-embedding documents with new model (${EMBED_CONCURRENCY} at a time)...`);
+    return this.reEmbedInto(documents, COLLECTION_NAME, batchSize, errors, true);
   }
 
   /**
@@ -440,53 +462,97 @@ export class MigrationService {
   }
 
   /**
-   * Re-embed documents with new embedding model and store in new collection
+   * Re-embed documents with new embedding model and store in new collection.
+   * The source collection is untouched, so documents that cannot be re-embedded are reported in `errors` and skipped.
    */
   private async reEmbedDocumentsToNewCollection(documents: any[], targetCollection: string, batchSize: number, errors: string[]): Promise<number> {
-    console.log(`🧠 Re-embedding ${documents.length} documents with new model to collection '${targetCollection}'...`);
+    console.log(`🧠 Re-embedding ${documents.length} documents with new model to collection '${targetCollection}' (${EMBED_CONCURRENCY} at a time)...`);
+    return this.reEmbedInto(documents, targetCollection, batchSize, errors, false);
+  }
+
+  /**
+   * Re-embed `documents` and upsert them into `targetCollection` in batches of `batchSize`.
+   * Embedding calls run EMBED_CONCURRENCY at a time; documents that fail with a retryable error
+   * (rate limit / transient, after createEmbedding's own retries) are retried once more one by one.
+   * Billing / key errors always abort. With `strict`, any other failure aborts too (nothing is skipped).
+   */
+  private async reEmbedInto(documents: any[], targetCollection: string, batchSize: number, errors: string[], strict: boolean): Promise<number> {
     let processed = 0;
+    const stopped = (error: unknown): Error => {
+      const reason = error instanceof Error ? error.message : String(error);
+      const message = `Re-embedding stopped after ${processed} of ${documents.length} documents. ${reason}`;
+      return isEmbeddingError(error) ? new EmbeddingError(error.kind, message, error.status) : new Error(message);
+    };
+
+    const embedDoc = async (doc: any) => {
+      const payload = doc.payload as any;
+      // Same text ingestion embedded (audio transcript chunks: enhancedContent || content)
+      const content = embeddingTextForPayload(payload || {});
+      const vector = await createEmbedding(content, TaskType.RETRIEVAL_DOCUMENT);
+      return { id: doc.id, vector, payload };
+    };
 
     for (let i = 0; i < documents.length; i += batchSize) {
       const batch = documents.slice(i, i + batchSize);
+      const failed: Array<{ doc: any; error: unknown }> = [];
 
+      let embedded: Array<{ id: any; vector: number[]; payload: any } | null>;
       try {
-        const reEmbeddedBatch = await Promise.all(
-          batch.map(async (doc) => {
-            try {
-              const payload = doc.payload as any;
-              const content = payload.content || '';
+        embedded = await mapWithConcurrency(batch, EMBED_CONCURRENCY, async (doc) => {
+          try {
+            return await embedDoc(doc);
+          } catch (error) {
+            // Billing / key problems fail every document: abort instead of skipping them all
+            if (isFatalEmbeddingError(error)) throw error;
+            failed.push({ doc, error });
+            return null;
+          }
+        });
+      } catch (error) {
+        throw stopped(error);
+      }
 
-              // Generate new embedding
-              const newEmbedding = await createEmbedding(content, TaskType.RETRIEVAL_DOCUMENT);
+      // Second chance, one at a time, for documents that hit a rate limit or a transient error
+      for (const failure of failed) {
+        if (!(isEmbeddingError(failure.error) && failure.error.retryable)) continue;
+        try {
+          const point = await embedDoc(failure.doc);
+          embedded[batch.indexOf(failure.doc)] = point;
+          failure.error = undefined;
+        } catch (error) {
+          if (isFatalEmbeddingError(error)) throw stopped(error);
+          failure.error = error;
+        }
+      }
 
-              return {
-                id: doc.id,
-                vector: newEmbedding,
-                payload: payload
-              };
-            } catch (error) {
-              errors.push(`Failed to re-embed document ${doc.id}: ${error}`);
-              return null;
-            }
-          })
-        );
+      for (const failure of failed) {
+        if (failure.error === undefined) continue;
+        const reason = failure.error instanceof Error ? failure.error.message : String(failure.error);
+        if (strict) {
+          throw stopped(new EmbeddingError(
+            isEmbeddingError(failure.error) ? failure.error.kind : 'transient',
+            `Document ${failure.doc.id} could not be re-embedded: ${reason}`,
+            isEmbeddingError(failure.error) ? failure.error.status : undefined
+          ));
+        }
+        errors.push(`Failed to re-embed document ${failure.doc.id}: ${reason}`);
+      }
 
-        // Filter out failed embeddings
-        const validDocuments = reEmbeddedBatch.filter(doc => doc !== null);
-
-        if (validDocuments.length > 0) {
+      const validDocuments = embedded.filter((doc): doc is { id: any; vector: number[]; payload: any } => doc !== null);
+      if (validDocuments.length > 0) {
+        try {
           await this.qdrantClient.upsert(targetCollection, {
             wait: true,
             points: validDocuments
           });
           processed += validDocuments.length;
+        } catch (error) {
+          if (strict) throw stopped(error);
+          errors.push(`Failed to store batch ${i}-${i + batch.length}: ${error instanceof Error ? error.message : error}`);
         }
-
-        console.log(`   Processed ${Math.min(i + batchSize, documents.length)}/${documents.length} documents`);
-
-      } catch (error) {
-        errors.push(`Failed to process batch ${i}-${i + batchSize}: ${error}`);
       }
+
+      console.log(`   Processed ${Math.min(i + batchSize, documents.length)}/${documents.length} documents`);
     }
 
     return processed;

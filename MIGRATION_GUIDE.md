@@ -73,6 +73,40 @@ npm run migrate rollback <backup_collection_name>
 
 The backup collection name is shown in the migration output.
 
+Migration now checks that Gemini embeddings work before it creates or deletes any collection, and stops
+(instead of skipping every document) on a billing / API-key error.
+
+## Repairing Random Fallback Vectors
+
+Older versions of `services/embedding.ts` returned a **random vector** whenever the Gemini embedding call
+failed (for example HTTP 402 when the prepaid credits ran out), and that vector was stored in Qdrant. Such
+chunks look normal but are never found by search. The fallback is gone (failures now abort the upload / video
+with the real reason), and `repair-embeddings` finds and fixes the points written before.
+
+```bash
+cd server
+npm run repair-embeddings                                  # dry run, read-only: counts, histograms, affected sources
+npm run repair-embeddings -- --collection <name> --out ./repair-report.json
+npm run backup export                                      # take a backup before repairing
+npm run repair-embeddings -- --apply                       # re-embed flagged points (needs a GEMINI_API_KEY with credits)
+npm run repair-embeddings -- --apply --limit 200           # repair in smaller runs
+```
+
+- **Detection** (`services/embedding-quality.ts`): the fallback is uniform(-0.5, 0.5) noise, so its values are
+  flat and bounded: `max|x| / rms <= 1.73` and excess kurtosis about -1.2, versus `>= 8` and `>= 20` for real
+  gemini-embedding-001 vectors. These checks compare values with the vector's own size, so they also work
+  for Cosine collections, where Qdrant stores normalised vectors. A point is flagged only when every check
+  agrees. Points where only some checks match are listed as `ambiguous` and never changed.
+- **Dry run** (the default) only scrolls the collection. It prints the histograms and the per-source
+  breakdown (`youtube_<videoId>`, `youtube_<videoId> (audio)`, or the document name) and writes a JSON report
+  with every flagged point id. The default report path is under the OS temp directory.
+- **`--apply`** first checks that Gemini works. It then re-reads each flagged point, skips it if it is no
+  longer flagged (so it is safe to re-run after an interruption), and embeds the same text ingestion
+  embedded: `enhancedContent || content` for audio transcript chunks, `content` for documents and YouTube
+  captions. It replaces **only the vector** through Qdrant's vector-update API; the id and payload stay as they
+  are. It stops at the first billing / key error, after saving the points it already re-embedded.
+  Options: `--limit N`, `--batch N` (default 16), `--delay-ms N` (default 250).
+
 ## API Endpoints
 
 You can also use the REST API for migration:

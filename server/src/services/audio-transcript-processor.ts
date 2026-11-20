@@ -1,4 +1,4 @@
-import { createEmbedding } from './embedding';
+import { createEmbedding, EmbeddingError, isEmbeddingError } from './embedding';
 import { DocumentChunk } from './chunking';
 import { dbService } from '../core/database-service';
 import { enhanceContent, EnhancementType } from './content-enhancement';
@@ -29,6 +29,8 @@ export interface AudioTranscriptProcessingResult {
   videoUrl: string;
   videoTitle: string;
   processingTime: number;
+  /** True when nothing was stored because a transcript for this video is already in the vector database. */
+  alreadyExists?: boolean;
 }
 
 /**
@@ -97,7 +99,8 @@ export const processAudioTranscript = async (
       videoId,
       videoUrl,
       videoTitle,
-      processingTime: Date.now() - startTime
+      processingTime: Date.now() - startTime,
+      alreadyExists: true
     };
   }
 
@@ -166,7 +169,12 @@ export const processAudioTranscript = async (
 
     } catch (error) {
       console.error(`❌ Failed to process chunk ${i + 1}:`, error);
-      throw new Error(`Failed to create embedding for chunk ${i + 1}: ${error}`);
+      // Nothing has been stored yet: abort the whole transcript, keeping the EmbeddingError type
+      // (kind / status) so callers can report why
+      if (isEmbeddingError(error)) {
+        throw new EmbeddingError(error.kind, `Chunk ${i + 1}/${chunks.length}: ${error.message}`, error.status);
+      }
+      throw new Error(`Failed to create embedding for chunk ${i + 1}: ${error instanceof Error ? error.message : error}`);
     }
   }
 

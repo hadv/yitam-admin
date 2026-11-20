@@ -1,54 +1,15 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { DocumentChunk } from './chunking';
 import { detectLanguageFromText } from './language-utils';
+import { generateText, isLlmConfigured, llmUnavailableReason } from './llm-client';
 
 // Load environment variables
 dotenv.config();
 
-// Gemini API key for generating enhanced content
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-if (!GEMINI_API_KEY) {
-  console.warn('GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.');
-}
-
-/**
- * Retry function with exponential backoff for handling temporary service outages
- */
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  maxRetries: number = 3,
-  baseDelay: number = 1000
-): Promise<T> {
-  let lastError: Error;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      lastError = error;
-
-      // Check if it's a retryable error (503, 429, network issues)
-      const isRetryable = error.message?.includes('503') ||
-                         error.message?.includes('Service Unavailable') ||
-                         error.message?.includes('429') ||
-                         error.message?.includes('Too Many Requests') ||
-                         error.message?.includes('ECONNRESET') ||
-                         error.message?.includes('ETIMEDOUT');
-
-      if (!isRetryable || attempt === maxRetries) {
-        throw error;
-      }
-
-      // Calculate delay with exponential backoff
-      const delay = baseDelay * Math.pow(2, attempt);
-      console.log(`Gemini API error (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`);
-
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-
-  throw lastError!;
+// Content enhancement runs on Alibaba Cloud Model Studio (Qwen) via llm-client.
+// llm-client retries 429 / 5xx / network errors / timeouts itself (and never retries billing errors).
+if (!isLlmConfigured('fast')) {
+  console.warn(`Content enhancement LLM unavailable (${llmUnavailableReason()}). Set DASHSCOPE_API_KEY in your .env file.`);
 }
 
 /**
@@ -108,15 +69,17 @@ export async function enhanceContent(
       return chunk;
     }
 
+    // Skip enhancement if the LLM is not configured (same result as a failed call: original chunk)
+    if (!isLlmConfigured('fast')) {
+      console.warn(`Skipping enhancement for ${chunk.documentName} - ${llmUnavailableReason()}`);
+      return chunk;
+    }
+
     // Basic language detection (check for Vietnamese-specific characters)
     const hasVietnameseChars = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(chunk.content);
     const detectedLanguage = fullOptions.language
       || (hasVietnameseChars ? 'Vietnamese' : detectLanguageFromText(chunk.content)); // CJK-aware fallback
     console.log(`Detected language for chunk ${chunk.id}: ${detectedLanguage}`);
-
-    // Initialize Gemini API
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
     // Build prompt based on enhancement types
     let prompt = `Enhance the following content according to these specific instructions:\n\n`;
@@ -161,18 +124,13 @@ export async function enhanceContent(
 
     prompt += `\nCONTENT:\n${chunk.content}\n\nReturn ONLY the enhanced content in ${detectedLanguage}, with no additional explanations or commentary. PRESERVE THE ORIGINAL TEXT STRUCTURE.`;
 
-    // Call Gemini API with retry mechanism for service unavailable errors
-    const result = await retryWithBackoff(async () => {
-      return await model.generateContent({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: fullOptions.temperature,
-          maxOutputTokens: fullOptions.maxOutputTokens,
-        }
-      });
-    }, 3, 2000); // 3 retries, starting with 2 second delay
-    
-    const enhancedContent = result.response.text().trim();
+    // Call the LLM (llm-client retries temporary failures: 429 / 5xx / network errors)
+    const enhancedContent = await generateText({
+      task: 'fast',
+      prompt,
+      temperature: fullOptions.temperature,
+      maxOutputTokens: fullOptions.maxOutputTokens,
+    });
     
     // Return enhanced chunk
     return {
@@ -236,9 +194,11 @@ export async function enhanceTranscriptWithLLM(
       return transcript;
     }
 
-    // Initialize Gemini API
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+    // Skip enhancement if the LLM is not configured (same result as a failed call: original transcript)
+    if (!isLlmConfigured('fast')) {
+      console.warn(`Skipping transcript enhancement - ${llmUnavailableReason()}`);
+      return transcript;
+    }
 
     // Build prompt for transcript enhancement
     const prompt = `You are an expert transcript editor. Please enhance the following audio transcript by:
@@ -263,16 +223,13 @@ ${transcript}
 
 ENHANCED TRANSCRIPT:`;
 
-    // Call Gemini API
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 8000,
-      }
+    // Call the LLM
+    const enhancedTranscript = await generateText({
+      task: 'fast',
+      prompt,
+      temperature: 0.2,
+      maxOutputTokens: 8000,
     });
-
-    const enhancedTranscript = result.response.text().trim();
     console.log('✅ Transcript enhanced successfully');
 
     return enhancedTranscript;

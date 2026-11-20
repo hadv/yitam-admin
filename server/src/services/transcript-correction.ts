@@ -1,5 +1,5 @@
 import { DatabaseService, dbService } from '../core/database-service';
-import { createEmbedding } from './embedding';
+import { createEmbedding, embeddingTextForPayload, EmbeddingError, isFatalEmbeddingError } from './embedding';
 
 /**
  * Interface for spelling correction rules
@@ -176,8 +176,14 @@ export class TranscriptCorrectionService {
 
           if (!dryRun) {
             try {
-              // Generate new embedding for corrected content
-              const newEmbedding = await createEmbedding(contentResult.correctedText);
+              // Generate new embedding from the corrected text, using the same field ingestion embedded
+              // (audio transcript chunks: enhancedContent || content, everything else: content)
+              const newEmbedding = await createEmbedding(embeddingTextForPayload({
+                documentName: chunk.documentName,
+                title: chunk.title,
+                content: contentResult.correctedText,
+                enhancedContent: enhancedContentResult?.correctedText ?? chunk.enhancedContent
+              }));
 
               updates.push({
                 pointId: chunk.pointId,
@@ -192,7 +198,17 @@ export class TranscriptCorrectionService {
               // Add a small delay to avoid overwhelming the API
               await new Promise(resolve => setTimeout(resolve, 100));
             } catch (error) {
-              const errorMsg = `Failed to process chunk ${chunk.chunkId}: ${error}`;
+              if (isFatalEmbeddingError(error)) {
+                // Billing / key problem: every further chunk would fail too. Stop before writing anything,
+                // so content and vectors never get out of step; corrections are idempotent, run again later.
+                throw new EmbeddingError(
+                  error.kind,
+                  `Stopped at chunk ${chunk.chunkId}; no chunks were updated. ${error.message}`,
+                  error.status
+                );
+              }
+              // This chunk is left unchanged (neither its text nor its vector is updated)
+              const errorMsg = `Failed to process chunk ${chunk.chunkId}: ${error instanceof Error ? error.message : error}`;
               console.error(errorMsg);
               stats.errors.push(errorMsg);
             }

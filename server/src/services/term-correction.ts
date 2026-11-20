@@ -2,9 +2,9 @@
  * Domain-term correction for Chinese speech-to-text output (Đông y / 中医 lectures).
  *
  * Speech recognisers often write a domain term with homophone / near-homophone
- * characters (黄旗 -> 黄芪, 当规 -> 当归, 足三李 -> 足三里). Gemini is asked to PROPOSE
- * replacements as JSON only - it never rewrites the text. Every proposal is then
- * verified and applied deterministically by applyTermCorrections():
+ * characters (黄旗 -> 黄芪, 当规 -> 当归, 足三李 -> 足三里). An LLM (Alibaba Qwen, see
+ * llm-client.ts) is asked to PROPOSE replacements as JSON only - it never rewrites the
+ * text. Every proposal is then verified and applied deterministically by applyTermCorrections():
  *  - the original must occur in the text inside the quoted context (which must be
  *    longer than the original) and inside the segment the proposal came from,
  *  - the length may change by at most one character,
@@ -12,11 +12,12 @@
  *    changed characters must lie inside that term (digits / units / Latin / punctuation
  *    never change),
  *  - a valid term (or a variant spelling of one) is never turned into another one,
- *  - at most ~3% of the characters may change overall,
+ *  - at most ~3% of the characters may change overall (with a small floor, default 6
+ *    changed characters, so a one- or two-sentence text can still get a few fixes),
  *  - edits are applied right-to-left by index so offsets never drift.
  * On any failure the original text is returned unchanged.
  */
-import { GoogleGenAI, Type } from '@google/genai';
+import { generateText, isLlmBillingError, isLlmConfigured, llmModelFor, llmUnavailableReason } from './llm-client';
 import dotenv from 'dotenv';
 import { TCM_GLOSSARY, GlossaryTerm, scriptForLanguageCode } from './tcm-glossary';
 import { splitTextIntoSegments } from './language-utils';
@@ -56,10 +57,26 @@ export interface ApplyTermCorrectionsOptions {
   proposalRanges?: Array<[number, number] | undefined>;
   /** Max share of (non-whitespace) characters that may change, default 0.03. */
   maxChangeRatio?: number;
+  /**
+   * Floor of the change budget in changed characters, so short texts are not locked at 0
+   * (3% of 23 characters rounds down to 0). Default: env TERM_CORRECTION_MIN_BUDGET_CHARS or 6.
+   * Never more than a third of the text's characters.
+   */
+  minBudgetChars?: number;
 }
 
-const TERM_CORRECTION_MODEL = process.env.TERM_CORRECTION_MODEL || 'gemini-2.5-flash';
 const DEFAULT_MAX_CHANGE_RATIO = 0.03;
+/**
+ * Default floor of the change budget (changed characters). 6 covers a few genuine fixes in a
+ * one- or two-sentence text (少阳饼 -> 少阳病 + 修鞋铺满 -> 胸胁苦满 + 人生 -> 人参 = 1 + 3 + 1 = 5,
+ * or six one-character homophone fixes) and equals 3% of 200 characters, so it only matters
+ * for texts shorter than that; a 1200-character segment already has a budget of 36.
+ */
+const DEFAULT_MIN_BUDGET_CHARS = 6;
+/** Upper bound for TERM_CORRECTION_MIN_BUDGET_CHARS (a typo such as 600 must not lift the cap). */
+const MAX_MIN_BUDGET_CHARS = 20;
+/** The floor never lets more than this share of a (tiny) text's characters change. */
+const MAX_FLOOR_SHARE = 1 / 3;
 /** The quoted context must be at least this many characters longer than the original. */
 const MIN_CONTEXT_EXTRA_CHARS = 4;
 const MIN_TERM_CHARS = 2;
@@ -68,13 +85,6 @@ const SEGMENT_CHARS = 1200;
 const SEGMENT_CONCURRENCY = 3;
 const MAX_GLOSSARY_TERMS_PER_PROMPT = 300;
 const MAX_BOARD_TERMS_PER_PROMPT = 120;
-const MAX_ATTEMPTS = 5;
-const BASE_DELAY_MS = 3000;
-const MAX_DELAY_MS = 60000;
-const THINKING_BUDGET = Number.isFinite(Number(process.env.TERM_CORRECTION_THINKING_BUDGET))
-  && process.env.TERM_CORRECTION_THINKING_BUDGET !== undefined
-  ? Number(process.env.TERM_CORRECTION_THINKING_BUDGET)
-  : 1024;
 
 const HAN_RE = /\p{Script=Han}/u;
 const SKIP_FOR_MATCH_RE = /[\s\p{P}\p{S}]/u;
@@ -89,6 +99,28 @@ const VARIANT_FORMS = [
 
 const cpLength = (s: string): number => Array.from(s).length;
 const normaliseForMatch = (s: string): string => Array.from(s).filter(ch => !SKIP_FOR_MATCH_RE.test(ch)).join('');
+
+/** Budget floor from options / env TERM_CORRECTION_MIN_BUDGET_CHARS, clamped to [0, 20]. */
+function resolveMinBudgetChars(override?: number): number {
+  const fromEnv = process.env.TERM_CORRECTION_MIN_BUDGET_CHARS?.trim();
+  const raw = override ?? (fromEnv ? Number(fromEnv) : DEFAULT_MIN_BUDGET_CHARS);
+  if (!Number.isFinite(raw)) return DEFAULT_MIN_BUDGET_CHARS;
+  return Math.min(MAX_MIN_BUDGET_CHARS, Math.max(0, Math.floor(raw)));
+}
+
+/**
+ * Change budget (changed characters) for a text with `countable` non-whitespace characters:
+ * max(ratio share, floor), the floor limited to a third of the text. Computed once per
+ * applyTermCorrections call: correctDomainTerms calls it once for the whole transcript (its
+ * segments only scope where a proposal may apply), so the floor never adds up per segment and a
+ * long transcript keeps exactly the ratio budget (the default floor of 6 is at most 3% of any
+ * text of 200 characters or more).
+ */
+export function termCorrectionBudget(countable: number, maxChangeRatio: number, minBudgetChars?: number): number {
+  const byRatio = Math.floor(countable * maxChangeRatio);
+  const floor = Math.min(resolveMinBudgetChars(minBudgetChars), Math.floor(countable * MAX_FLOOR_SHARE));
+  return Math.max(byRatio, floor);
+}
 
 /**
  * Digits, Latin letters (g, mg) and punctuation of s, in order. Han unit characters
@@ -240,7 +272,7 @@ export function applyTermCorrections(
 
   // 1. Validate each proposal and locate its occurrences
   const candidates: Edit[] = [];
-  /** Occurrence positions already claimed by an identical earlier proposal. */
+  /** Occurrence positions already claimed by an earlier proposal for the same original -> corrected. */
   const claimedByKey = new Map<string, Set<number>>();
   proposals.forEach((raw, proposalIndex) => {
     const original = typeof raw?.original === 'string' ? raw.original.trim() : '';
@@ -299,9 +331,11 @@ export function applyTermCorrections(
     positions.sort((a, b) => a - b);
     if (positions.length === 0) return reject(proposal, 'original not found inside context');
 
-    // One occurrence per proposal: identical proposals (same error, same context, repeated)
-    // each take the next unclaimed occurrence.
-    const key = `${original}\u0000${corrected}\u0000${normContext}`;
+    // One occurrence per proposal: proposals for the same fix (same original -> corrected) each
+    // take the next occurrence not yet claimed by another one, even when their contexts differ
+    // but overlap ("讲黄旗，用黄旗30克" and "今天我们讲黄旗，用黄旗" both contain both occurrences;
+    // keyed by context, both would pick the first one and the second fix would be dropped).
+    const key = `${original}\u0000${corrected}`;
     const claimed = claimedByKey.get(key) || new Set<number>();
     claimedByKey.set(key, claimed);
     const start = positions.find(p => !claimed.has(p));
@@ -331,7 +365,7 @@ export function applyTermCorrections(
 
   // 3. Drop overlapping edits and enforce the overall change budget
   const countable = Array.from(text).filter(ch => !/\s/.test(ch)).length;
-  const budget = Math.floor(countable * maxChangeRatio);
+  const budget = termCorrectionBudget(countable, maxChangeRatio, options.minBudgetChars);
   let spent = 0;
   const accepted: Edit[] = [];
   const droppedForCap = new Set<number>();
@@ -484,26 +518,6 @@ TRANSCRIPT:
 ${segment}`;
 }
 
-const RESPONSE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    corrections: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          original: { type: Type.STRING },
-          corrected: { type: Type.STRING },
-          context: { type: Type.STRING },
-          reason: { type: Type.STRING }
-        },
-        required: ['original', 'corrected', 'context']
-      }
-    }
-  },
-  required: ['corrections']
-};
-
 /** Parse {"corrections": [...]} (or a bare array), tolerating code fences / surrounding prose. */
 export function parseProposalJson(raw: string): TermCorrection[] {
   if (!raw) return [];
@@ -535,54 +549,19 @@ export function parseProposalJson(raw: string): TermCorrection[] {
   return [];
 }
 
-/** 402 / depleted prepaid credits / billing: retrying cannot help, and neither can other segments. */
-function isBillingError(error: any): boolean {
-  const message = String(error?.message || '');
-  const status = Number(error?.status ?? error?.code);
-  return status === 402 || /"code"\s*:\s*402|credits are depleted|billing/i.test(message);
-}
-
-function isTransientError(error: any): boolean {
-  if (isBillingError(error)) return false;
-  const message = String(error?.message || '');
-  const status = Number(error?.status ?? error?.code);
-  return status === 429 || status === 500 || status === 503 ||
-    /\b(429|500|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|Too Many Requests|Service Unavailable|overloaded|quota|ECONNRESET|ETIMEDOUT|fetch failed/i.test(message);
-}
-
-function retryDelayHintMs(error: any): number | undefined {
-  const match = String(error?.message || '').match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
-  return match ? Math.round(parseFloat(match[1]) * 1000) : undefined;
-}
-
-async function proposeForSegment(ai: GoogleGenAI, prompt: string, label: string): Promise<TermCorrection[]> {
-  let lastError: any;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const response = await ai.models.generateContent({
-        model: TERM_CORRECTION_MODEL,
-        contents: prompt,
-        config: {
-          temperature: 0,
-          maxOutputTokens: 4096 + Math.max(0, THINKING_BUDGET),
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-          thinkingConfig: { thinkingBudget: THINKING_BUDGET }
-        }
-      });
-      return parseProposalJson(response.text || '');
-    } catch (error: any) {
-      lastError = error;
-      const transient = isTransientError(error);
-      // Ordinary errors get one retry, rate limits / overload get exponential backoff
-      if (attempt >= MAX_ATTEMPTS || isBillingError(error) || (!transient && attempt >= 2)) break;
-      const backoff = transient ? Math.min(MAX_DELAY_MS, BASE_DELAY_MS * Math.pow(2, attempt - 1)) : 1500;
-      const delay = Math.min(MAX_DELAY_MS, Math.max(backoff, retryDelayHintMs(error) ?? 0)) + Math.floor(Math.random() * 1000);
-      console.warn(`⚠️ Term correction ${label} attempt ${attempt} failed${transient ? ' (rate limit / unavailable)' : ''}: ${error.message}; retrying in ${(delay / 1000).toFixed(1)}s`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-  throw lastError;
+/**
+ * One proposal request. llm-client retries rate limits / 5xx / network errors with backoff and
+ * never retries billing errors (LlmError.billing), which the caller uses to stop early.
+ */
+async function proposeForSegment(prompt: string): Promise<TermCorrection[]> {
+  const text = await generateText({
+    task: 'quality',
+    prompt,
+    json: true,
+    temperature: 0,
+    maxOutputTokens: 4096
+  });
+  return parseProposalJson(text);
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -599,7 +578,7 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T,
 }
 
 /**
- * Find and fix mis-recognised TCM terms in a Chinese transcript. Gemini proposes,
+ * Find and fix mis-recognised TCM terms in a Chinese transcript. The LLM proposes,
  * applyTermCorrections verifies and applies. Never throws: on failure the text is
  * returned unchanged.
  */
@@ -608,10 +587,9 @@ export async function correctDomainTerms(
   opts: { languageCode: string; domain: 'tcm'; boardTerms?: string[] }
 ): Promise<TermCorrectionResult> {
   const unchanged: TermCorrectionResult = { text: text || '', corrections: [], applied: 0, rejected: 0 };
-  const apiKey = process.env.GEMINI_API_KEY || '';
   if (!text || !text.trim()) return unchanged;
-  if (!apiKey) {
-    console.warn('⚠️ GEMINI_API_KEY missing, skipping domain-term correction');
+  if (!isLlmConfigured('quality')) {
+    console.warn(`⚠️ Domain-term correction skipped: LLM not configured (${llmUnavailableReason() ?? 'DASHSCOPE_API_KEY is not set'})`);
     return unchanged;
   }
 
@@ -641,9 +619,8 @@ export async function correctDomainTerms(
         cursor = at + segment.length;
       }
     }
-    console.log(`🩺 Domain-term correction (${opts.domain}, ${script}): ${segments.length} segment(s), ${boardTerms.length} board term(s)`);
+    console.log(`🩺 Domain-term correction (${opts.domain}, ${script}, ${llmModelFor('quality')}): ${segments.length} segment(s), ${boardTerms.length} board term(s)`);
 
-    const ai = new GoogleGenAI({ apiKey });
     let failed = 0;
     let billingError: string | undefined;
     const perSegment = await mapWithConcurrency(segments, SEGMENT_CONCURRENCY, async (segment, index) => {
@@ -660,10 +637,10 @@ export async function correctDomainTerms(
         label
       );
       try {
-        return await proposeForSegment(ai, prompt, `${index + 1}/${segments.length}`);
+        return await proposeForSegment(prompt);
       } catch (error: any) {
         failed++;
-        if (isBillingError(error)) billingError = String(error?.message || error);
+        if (isLlmBillingError(error)) billingError = String(error?.message || error);
         console.error(`❌ Term correction segment ${index + 1}/${segments.length} failed, leaving it unchanged: ${error.message}`);
         return [] as TermCorrection[];
       }

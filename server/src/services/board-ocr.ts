@@ -13,12 +13,13 @@
  *     are extracted.
  *  3. One ffmpeg seek per candidate emits a JPEG (width <= 1280) plus a 64x36 grayscale
  *     thumbnail; thumbnails drop near-duplicate / blank frames cheaply.
- *  4. Kept frames (<= maxFrames) are sent to Gemini (vision) in small batches with
- *     bounded concurrency and backoff on 429/5xx; JSON output enforced by schema.
+ *  4. Kept frames (<= maxFrames) are sent to the vision LLM (Alibaba Qwen, see llm-client.ts)
+ *     in small batches with bounded concurrency; llm-client retries 429/5xx with backoff.
+ *     JSON output is enforced by a strict schema (it keeps the board's own script).
  *  5. Terms are validated (must appear in that frame's transcribed text, must contain
  *     CJK), then merged across frames preserving first-seen order.
  *
- * Never throws: missing video stream, missing GEMINI_API_KEY, ffmpeg or Gemini failures
+ * Never throws: missing video stream, missing DASHSCOPE_API_KEY, ffmpeg or LLM failures
  * all return an empty result with `skippedReason`, so callers can run it unconditionally.
  */
 
@@ -27,7 +28,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { generateChat, isLlmConfigured, llmModelFor, llmUnavailableReason, LlmError, LlmPart } from './llm-client';
 import { scriptForLanguageCode } from './tcm-glossary';
 
 dotenv.config();
@@ -51,13 +52,12 @@ export interface BoardOcrOptions {
   intervalSeconds?: number;
 }
 
-const DEFAULT_MODEL = 'gemini-2.5-flash';
 const DEFAULT_MAX_FRAMES = 60;
 const DEFAULT_INTERVAL_SECONDS = 20;
 const THUMB_W = 64;
 const THUMB_H = 36;
 const EXTRACT_CONCURRENCY = 4;
-const GEMINI_CONCURRENCY = 3;
+const LLM_CONCURRENCY = 3;
 const MAX_TERM_CHARS = 30;
 
 function envInt(name: string, fallback: number, min: number, max: number): number {
@@ -70,6 +70,15 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
 // ---------------------------------------------------------------------------
 // process helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Per-attempt timeout for a vision OCR call: BOARD_OCR_TIMEOUT_MS when set, otherwise the larger of
+ * 180 s (multi-frame, high-resolution batches run long) and the general ALIBABA_LLM_TIMEOUT_MS.
+ */
+function boardOcrTimeoutMs(): number {
+  const general = envInt('ALIBABA_LLM_TIMEOUT_MS', 120_000, 5_000, 30 * 60_000);
+  return envInt('BOARD_OCR_TIMEOUT_MS', Math.max(180_000, general), 5_000, 30 * 60_000);
+}
 
 function runProcess(
   cmd: string,
@@ -192,7 +201,7 @@ function pickEvenly<T>(items: T[], n: number): T[] {
 }
 
 // ---------------------------------------------------------------------------
-// Gemini
+// Vision LLM
 // ---------------------------------------------------------------------------
 
 function buildPrompt(script: 'hans' | 'hant', frameCount: number): string {
@@ -210,22 +219,24 @@ function buildPrompt(script: 'hans' | 'hant', frameCount: number): string {
 }
 
 const RESPONSE_SCHEMA = {
-  type: Type.OBJECT,
+  type: 'object',
+  additionalProperties: false,
+  required: ['frames'],
   properties: {
     frames: {
-      type: Type.ARRAY,
+      type: 'array',
       items: {
-        type: Type.OBJECT,
-        properties: {
-          frame: { type: Type.INTEGER },
-          text: { type: Type.STRING },
-          terms: { type: Type.ARRAY, items: { type: Type.STRING } },
-        },
+        type: 'object',
+        additionalProperties: false,
         required: ['frame', 'text', 'terms'],
+        properties: {
+          frame: { type: 'integer' },
+          text: { type: 'string' },
+          terms: { type: 'array', items: { type: 'string' } },
+        },
       },
     },
   },
-  required: ['frames'],
 };
 
 interface FrameOcr {
@@ -234,7 +245,7 @@ interface FrameOcr {
   terms: string[];
 }
 
-/** Tolerant JSON parsing: code fences, leading prose, bare arrays. */
+/** Tolerant JSON parsing: code fences, leading prose, bare arrays, [{"frames":[...]}] wrappers. */
 export function parseBoardOcrJson(raw: string): FrameOcr[] {
   if (!raw) return [];
   let s = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
@@ -254,6 +265,10 @@ export function parseBoardOcrJson(raw: string): FrameOcr[] {
     if (start !== -1 && end > start) parsed = tryParse(s.slice(start, end + 1));
   }
   if (parsed === undefined) return [];
+  // Some models wrap the object in an array: [{"frames":[...]}]
+  if (Array.isArray(parsed) && parsed.length && parsed.every((p) => p && typeof p === 'object' && Array.isArray(p.frames))) {
+    parsed = { frames: parsed.flatMap((p: any) => p.frames) };
+  }
   const list: any[] = Array.isArray(parsed)
     ? parsed
     : Array.isArray(parsed.frames)
@@ -303,29 +318,13 @@ function cleanText(text: string): string {
   return CJK_RE.test(joined) ? joined : '';
 }
 
-function errorStatus(err: any): number | undefined {
-  const direct = Number(err?.status ?? err?.code ?? err?.response?.status);
-  if (Number.isFinite(direct) && direct >= 100) return direct;
-  const m = /"code"\s*:\s*(\d{3})/.exec(String(err?.message ?? ''));
-  return m ? Number(m[1]) : undefined;
-}
-
-/** Auth / billing / permission problems: retrying (or trying further batches) is pointless. */
+/** Auth / billing / permission / unknown-model problems: further batches would fail the same way. */
 function isFatal(err: any): boolean {
-  const status = errorStatus(err);
-  if (status === 401 || status === 402 || status === 403) return true;
-  return /API key not valid|PERMISSION_DENIED|credits are depleted|billing/i.test(String(err?.message ?? err));
+  if (!(err instanceof LlmError)) return false;
+  if (err.billing) return true;
+  if (err.code === 'not_configured') return true;
+  return err.status === 401 || err.status === 402 || err.status === 403 || err.status === 404;
 }
-
-function isRetryable(err: any): boolean {
-  if (isFatal(err)) return false;
-  const status = errorStatus(err);
-  if (status !== undefined) return [408, 429, 500, 502, 503, 504].includes(status);
-  const msg = String(err?.message ?? err);
-  return /RESOURCE_EXHAUSTED|UNAVAILABLE|INTERNAL|overloaded|ECONNRESET|ETIMEDOUT|fetch failed/i.test(msg);
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface BatchOutcome {
   results: Map<number, FrameOcr>; // index within batch (0-based) -> OCR
@@ -336,65 +335,46 @@ interface BatchOutcome {
 }
 
 async function ocrBatch(
-  ai: GoogleGenAI,
   model: string,
   frames: Frame[],
   script: 'hans' | 'hant',
   abort: { reason?: string }
 ): Promise<BatchOutcome> {
   if (abort.reason) return { results: new Map(), ok: false, error: abort.reason };
-  const parts: any[] = [{ text: buildPrompt(script, frames.length) }];
+  const parts: LlmPart[] = [{ type: 'text', text: buildPrompt(script, frames.length) }];
   frames.forEach((f, i) => {
-    parts.push({ text: `Frame ${i + 1}:` });
-    parts.push({ inlineData: { mimeType: 'image/jpeg', data: fs.readFileSync(f.jpegPath).toString('base64') } });
+    parts.push({ type: 'text', text: `Frame ${i + 1}:` });
+    parts.push({ type: 'image', mimeType: 'image/jpeg', dataBase64: fs.readFileSync(f.jpegPath).toString('base64') });
   });
 
-  const thinkingBudget = envInt('BOARD_OCR_THINKING_BUDGET', 0, 0, 24576);
-  const maxAttempts = 5;
-  let lastErr: any;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    if (abort.reason) return { results: new Map(), ok: false, error: abort.reason };
-    try {
-      const resp = await ai.models.generateContent({
-        model,
-        contents: [{ role: 'user', parts }],
-        config: {
-          temperature: 0,
-          maxOutputTokens: 1024 + 1024 * frames.length + thinkingBudget,
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-          thinkingConfig: { thinkingBudget },
-        },
-      });
-      const parsed = parseBoardOcrJson(resp.text ?? '');
-      const results = new Map<number, FrameOcr>();
-      for (const p of parsed) {
-        const idx = p.frame - 1;
-        if (idx >= 0 && idx < frames.length && !results.has(idx)) results.set(idx, p);
-      }
-      if (!results.size && frames.length && (resp.text ?? '').trim() === '') {
-        throw new Error('Empty Gemini response');
-      }
-      return {
-        results,
-        ok: true,
-        promptTokens: resp.usageMetadata?.promptTokenCount,
-        outputTokens: (resp.usageMetadata?.candidatesTokenCount ?? 0) + (resp.usageMetadata?.thoughtsTokenCount ?? 0),
-      };
-    } catch (err: any) {
-      lastErr = err;
-      if (attempt < maxAttempts && isRetryable(err)) {
-        const delay = Math.min(30_000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 500);
-        console.warn(`⏳ Board OCR: Gemini ${String(err?.message ?? err).slice(0, 120)} — retry ${attempt}/${maxAttempts - 1} in ${delay}ms`);
-        await sleep(delay);
-        continue;
-      }
-      break;
+  try {
+    // llm-client retries 429 / 5xx / network errors / empty replies with backoff
+    const resp = await generateChat({
+      task: 'vision',
+      model,
+      prompt: parts,
+      temperature: 0,
+      maxOutputTokens: 1024 + 1024 * frames.length,
+      jsonSchema: { name: 'board_ocr', schema: RESPONSE_SCHEMA },
+      timeoutMs: boardOcrTimeoutMs(),
+    });
+    const parsed = parseBoardOcrJson(resp.text);
+    const results = new Map<number, FrameOcr>();
+    for (const p of parsed) {
+      const idx = p.frame - 1;
+      if (idx >= 0 && idx < frames.length && !results.has(idx)) results.set(idx, p);
     }
+    return {
+      results,
+      ok: true,
+      promptTokens: resp.usage.promptTokens,
+      outputTokens: resp.usage.completionTokens,
+    };
+  } catch (err: any) {
+    const error = String(err?.message ?? err).slice(0, 300);
+    if (isFatal(err)) abort.reason = error;
+    return { results: new Map(), ok: false, error };
   }
-  const error = String(lastErr?.message ?? lastErr).slice(0, 300);
-  if (isFatal(lastErr)) abort.reason = error;
-  return { results: new Map(), ok: false, error };
 }
 
 // ---------------------------------------------------------------------------
@@ -407,14 +387,13 @@ export async function extractBoardText(
 ): Promise<BoardOcrResult> {
   const empty = (skippedReason: string): BoardOcrResult => ({ items: [], terms: [], framesAnalysed: 0, skippedReason });
 
-  const apiKey = process.env.GEMINI_API_KEY || '';
-  if (!apiKey) return empty('GEMINI_API_KEY not set');
+  if (!isLlmConfigured('vision')) return empty(`vision LLM not configured: ${llmUnavailableReason() ?? 'DASHSCOPE_API_KEY is not set'}`);
   if (!videoFilePath || !fs.existsSync(videoFilePath)) return empty(`file not found: ${videoFilePath}`);
 
   const maxFrames = Math.max(1, Math.floor(opts.maxFrames ?? DEFAULT_MAX_FRAMES));
   const baseInterval = Math.max(2, opts.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS);
   const script = scriptForLanguageCode(opts.languageCode);
-  const model = process.env.BOARD_OCR_MODEL || DEFAULT_MODEL;
+  const model = llmModelFor('vision');
   const framesPerCall = envInt('BOARD_OCR_FRAMES_PER_CALL', 4, 1, 10);
 
   let probe: ProbeInfo;
@@ -470,12 +449,11 @@ export async function extractBoardText(
     );
     if (!selected.length) return { items: [], terms: [], framesAnalysed: 0, skippedReason: 'no usable frames (all blank)' };
 
-    // 4. Gemini OCR in batches
-    const ai = new GoogleGenAI({ apiKey });
+    // 4. vision-LLM OCR in batches
     const abort: { reason?: string } = {};
     const batches: Frame[][] = [];
     for (let i = 0; i < selected.length; i += framesPerCall) batches.push(selected.slice(i, i + framesPerCall));
-    const outcomes = await mapLimit(batches, GEMINI_CONCURRENCY, (b) => ocrBatch(ai, model, b, script, abort));
+    const outcomes = await mapLimit(batches, LLM_CONCURRENCY, (b) => ocrBatch(model, b, script, abort));
 
     let framesAnalysed = 0;
     let promptTokens = 0;
@@ -500,7 +478,7 @@ export async function extractBoardText(
     });
 
     if (!framesAnalysed) {
-      return { items: [], terms: [], framesAnalysed: 0, skippedReason: `Gemini OCR failed: ${errors[0] ?? 'unknown'}` };
+      return { items: [], terms: [], framesAnalysed: 0, skippedReason: `${model} OCR failed: ${errors[0] ?? 'unknown'}` };
     }
     if (errors.length) console.warn(`⚠️ Board OCR: ${errors.length}/${batches.length} batch(es) failed: ${errors[0]}`);
 

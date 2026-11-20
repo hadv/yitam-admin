@@ -1,11 +1,24 @@
 import { Request, Response } from 'express';
-import { createEmbedding } from '../services/embedding';
+import { createEmbedding, isEmbeddingError, TaskType } from '../services/embedding';
 import { parseDocument, parsePdfByPages, parseDocxByPages, processImageFolder, prepareContentForChunking, correctOcrWithLLM } from '../services/document';
 import { dbService } from '../core/database-service';
-import { TaskType } from '../services/embedding';
 import { chunkDocument, ChunkingConfig } from '../services/chunking';
 import path from 'path';
 import fs from 'fs';
+
+/**
+ * Send an embedding failure to the client with its real reason (e.g. the Gemini key is out of
+ * credits) instead of a generic 500. Returns false for other errors.
+ */
+const sendEmbeddingError = (res: Response, error: unknown, action: string): boolean => {
+  if (!isEmbeddingError(error)) return false;
+  res.status(error.httpStatus).json({
+    message: `${action}: could not create embeddings, nothing was stored. ${error.message}`,
+    error: error.message,
+    code: `EMBEDDING_${error.kind.toUpperCase()}`
+  });
+  return true;
+};
 
 // Use the singleton instance of the database service
 // dbService is now imported from core
@@ -134,6 +147,7 @@ export const parseAndStoreDocument = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error processing document:', error);
+    if (sendEmbeddingError(res, error, 'Failed to process document')) return;
     res.status(500).json({ message: 'Failed to process document' });
   } finally {
     // Clean up file regardless of success or failure
@@ -236,6 +250,7 @@ export const parseAndStoreImageFolder = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error processing scanned document folder:', error);
+    if (sendEmbeddingError(res, error, 'Failed to process scanned document folder')) return;
     res.status(500).json({ message: 'Failed to process scanned document folder' });
   } finally {
     // Clean up files regardless of success or failure
@@ -329,7 +344,8 @@ export const searchDocuments = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Search query is required' });
     }
 
-    // Create embedding for the query using TaskType enum for search queries
+    // Create embedding for the query using TaskType enum for search queries.
+    // On failure this throws (no random query vector), so no meaningless results are returned.
     const queryEmbedding = await createEmbedding(query, TaskType.RETRIEVAL_QUERY);
 
     // Search using vector similarity
@@ -338,6 +354,13 @@ export const searchDocuments = async (req: Request, res: Response) => {
     res.status(200).json(searchResults);
   } catch (error) {
     console.error('Error searching documents:', error);
+    if (isEmbeddingError(error)) {
+      return res.status(error.httpStatus).json({
+        message: `Search is unavailable: could not embed the query. ${error.message}`,
+        error: error.message,
+        code: `EMBEDDING_${error.kind.toUpperCase()}`
+      });
+    }
     res.status(500).json({ message: 'Failed to search documents' });
   }
 };

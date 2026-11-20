@@ -44,6 +44,9 @@ interface EnhancedVideoMetadata {
   translatedTranscript?: string; // Vietnamese translation, present only when original != Vietnamese
   translationLanguage?: string; // 'vi' when translatedTranscript is present
   translationPartial?: boolean; // true if some translation segments failed
+  audioEmbeddingStatus?: 'embedded' | 'exists' | 'failed' | 'skipped'; // vector-store embedding of the audio transcript ('exists': already stored, nothing added)
+  audioEmbeddedChunks?: number; // chunks stored in the vector database
+  audioEmbeddingError?: string; // why nothing was stored (e.g. Gemini embedding key out of credits)
   correctedTranscript?: string; // Verbatim transcript after deterministic domain-term correction
   termCorrections?: TermCorrection[]; // Domain-term corrections applied to the raw transcript
   boardText?: BoardTextItem[]; // Text read from the blackboard/slides (OCR)
@@ -1380,6 +1383,32 @@ const YtDlpDownloader = ({ onUploadSuccess }: { onUploadSuccess: () => void }) =
                 <span className="font-medium">Uploader:</span> {downloadResult.videoInfo.uploader}
               </p>
             </div>
+
+            {/* Audio transcript embedding outcome (only when embedding was requested) */}
+            {downloadResult.enhancedMetadata?.audioEmbeddingStatus === 'embedded' && (
+              <p className="text-sm text-green-800">
+                <span className="font-medium">Vector DB:</span> đã lưu {downloadResult.enhancedMetadata.audioEmbeddedChunks ?? 0} đoạn transcript
+              </p>
+            )}
+            {downloadResult.enhancedMetadata?.audioEmbeddingStatus === 'exists' && (
+              <div className="p-3 bg-amber-50 border border-amber-300 rounded text-sm text-amber-800">
+                <p className="font-medium">ℹ️ Vector DB: video này đã có transcript được lưu từ trước, transcript audio mới không được thêm (0 đoạn mới).</p>
+                <p className="mt-1 text-xs">Các đoạn đã lưu được giữ nguyên, chưa được nhúng lại.</p>
+                {downloadResult.enhancedMetadata.audioEmbeddingError && (
+                  <p className="mt-1 text-xs break-words">{downloadResult.enhancedMetadata.audioEmbeddingError}</p>
+                )}
+              </div>
+            )}
+            {(downloadResult.enhancedMetadata?.audioEmbeddingStatus === 'failed' ||
+              downloadResult.enhancedMetadata?.audioEmbeddingStatus === 'skipped') && (
+              <div className="p-3 bg-red-50 border border-red-300 rounded text-sm text-red-800">
+                <p className="font-medium">⚠️ Transcript chưa được lưu vào vector database (không tìm kiếm được).</p>
+                {downloadResult.enhancedMetadata.audioEmbeddingError && (
+                  <p className="mt-1 text-xs break-words">{downloadResult.enhancedMetadata.audioEmbeddingError}</p>
+                )}
+                <p className="mt-1 text-xs">Transcript bên dưới vẫn dùng được; sửa lỗi rồi xử lý lại video để lưu.</p>
+              </div>
+            )}
 
             {/* Enhanced Metadata */}
             {downloadResult.enhancedMetadata && (
