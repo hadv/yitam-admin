@@ -340,19 +340,41 @@ function withoutFailureMarkers(text: string): string {
   return text.replace(TRANSCRIPTION_FAILED_MARKER_RE, ' ').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
-type ContentDomain = 'tcm' | 'buddhist' | 'generic';
-const TCM_DOMAIN_RE = /đông y|y học cổ truyền|nội kinh|y tông|hải thượng|lê hữu trác|y quán|âm dương|ngũ hành|khí công|châm cứu|tcm|traditional chinese medicine|中医|中醫/i;
+export type ContentDomain = 'tcm' | 'buddhist' | 'generic';
+
+/**
+ * Domain tags (see client/src/constants/domains.ts) that mark Đông y content. Matched as
+ * substrings of the NFC-normalised, lower-cased tag, so phrases are kept specific enough not
+ * to catch unrelated free-form tags sent through the API (e.g. bare 'bản thảo' also means
+ * "draft", bare 'thương hàn' usually means typhoid).
+ */
+const TCM_DOMAIN_RE = new RegExp([
+  // general
+  'đông y', 'y học cổ truyền', '\\btcm\\b', 'traditional chinese medicine', '中医', '中醫',
+  // classics, teachers and schools
+  'nội kinh', 'y tông', 'hải thượng', 'lê hữu trác', 'y quán',
+  'ni hải hạ', 'nghê hải hạ', '倪海厦', '倪海廈',
+  // subjects
+  'châm cứu', 'bài thuốc cổ phương', 'kinh phương', 'thương hàn luận', 'kim quỹ',
+  'dược liệu', 'bản thảo kinh', 'bản thảo cương mục', 'thần nông bản thảo',
+  // qigong / dưỡng sinh
+  'khí công', 'dịch cân kinh', 'bát đoạn cẩm', 'ngũ cầm hí',
+].join('|'), 'i');
+/** Cosmology tags shared by Đông y and other traditions: count as TCM only without a Buddhist tag. */
+const TCM_WEAK_DOMAIN_RE = /âm dương|ngũ hành/i;
 const BUDDHIST_DOMAIN_RE = /phật|thiền|buddh|thích nhất hạnh|viên minh|佛|禅|禪/i;
 
 /**
- * Subject domain of the content, from the caller's knowledge domains. Chinese audio
- * defaults to Đông y (TCM) unless only Buddhist domains were chosen.
+ * Subject domain of the content, from the caller's knowledge domains:
+ * a TCM tag wins, then a Buddhist tag, then the shared cosmology tags (âm dương / ngũ hành).
+ * Chinese audio with no matching tag defaults to Đông y (TCM).
  * languageCode undefined = not known yet (before transcription).
  */
-function resolveContentDomain(domains: string[] | undefined, languageCode?: string): ContentDomain {
-  const list = (domains || []).map(d => String(d).toLowerCase());
+export function resolveContentDomain(domains: string[] | undefined, languageCode?: string): ContentDomain {
+  const list = (domains || []).map(d => String(d).normalize('NFC').trim().toLowerCase());
   if (list.some(d => TCM_DOMAIN_RE.test(d))) return 'tcm';
   if (list.some(d => BUDDHIST_DOMAIN_RE.test(d))) return 'buddhist';
+  if (list.some(d => TCM_WEAK_DOMAIN_RE.test(d))) return 'tcm';
   return languageCode === undefined || isChineseLanguage(languageCode) ? 'tcm' : 'generic';
 }
 
